@@ -22,18 +22,28 @@ class InfoPanel(QtWidgets.QWidget):
         self.which.currentIndexChanged.connect(lambda _i: self.refresh(keep_choice=True))
         row.addWidget(self.which, 1)
         lay.addLayout(row)
+        self.tabs = QtWidgets.QTabWidget()
+        lay.addWidget(self.tabs, 1)
+        page = QtWidgets.QWidget()
+        self.tabs.addTab(page, 'Analysis')
+        outer, lay = lay, QtWidgets.QVBoxLayout(page)
+        lay.setContentsMargins(4, 6, 4, 4)
         self.formula = QtWidgets.QLabel('–')
         f = self.formula.font(); f.setPointSizeF(f.pointSizeF() * 1.6); self.formula.setFont(f)
         self.formula.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
-        lay.addWidget(self.formula)
+        frow = QtWidgets.QHBoxLayout()
+        frow.addWidget(self.formula, 1); frow.addWidget(self._paste_button('formula'))
+        lay.addLayout(frow)
         form = QtWidgets.QFormLayout()
         form.setContentsMargins(0, 0, 0, 0)
         self.exact = self._value(); self.average = self._value(); self.charge = self._value()
         self.analysis = self._value(); self.analysis.setWordWrap(True)
-        form.addRow('Exact mass:', self.exact)
-        form.addRow('Average MW:', self.average)
+        self.mz = self._value(); self.mz.setWordWrap(True)
+        for label, w, key in (('Exact mass:', self.exact, 'exact'), ('m/z:', self.mz, 'mz'),
+                              ('Mol. weight:', self.average, 'mw'), ('Elem. anal.:', self.analysis, 'analysis')):
+            r = QtWidgets.QHBoxLayout(); r.addWidget(w, 1); r.addWidget(self._paste_button(key))
+            form.addRow(label, r)
         form.addRow('Charge:', self.charge)
-        form.addRow('Elem. anal.:', self.analysis)
         lay.addLayout(form)
         self.table = QtWidgets.QTableWidget(0, 2)
         self.table.setHorizontalHeaderLabels(['Ion', 'm/z'])
@@ -68,12 +78,57 @@ class InfoPanel(QtWidgets.QWidget):
         self.errors = QtWidgets.QLabel()
         self.errors.setWordWrap(True)
         self.errors.setStyleSheet('color: #C62828;')
-        lay.addWidget(self.errors)
+        outer.addWidget(self.errors)
+        self.props = QtWidgets.QTableWidget(0, 2)
+        self.props.setHorizontalHeaderLabels(['Property', 'Value'])
+        self.props.verticalHeader().hide()
+        self.props.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        self.props.horizontalHeader().setStretchLastSection(True)
+        self.props.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.props.setAlternatingRowColors(True)
+        self.props.setToolTip('Calculated with RDKit. Double-click a row to paste it under the structure.')
+        self.props.cellDoubleClicked.connect(self._paste_property_row)
+        self.tabs.addTab(self.props, 'Properties')
+        self.tabs.currentChanged.connect(lambda _i: self.refresh(keep_choice=True))
         self.timer = QtCore.QTimer(self, singleShot=True, interval=120)
         self.timer.timeout.connect(self.refresh)
         canvas.changed.connect(self.timer.start)
         canvas.selection_changed.connect(self.timer.start)
         self.refresh()
+
+    def _paste_button(self, key):
+        b = QtWidgets.QToolButton()
+        b.setText('Paste'); b.setAutoRaise(True)
+        b.setToolTip('Put this under the structure on the drawing, as a caption')
+        b.clicked.connect(lambda _c=False, k=key: self.paste(k))
+        return b
+
+    def _target(self):
+        choices = self._choices()
+        k = self.which.currentIndex()
+        ids = choices[k][1] if 0 <= k < len(choices) else None
+        return set(ids) if ids else set(self.canvas.doc.atoms)
+
+    def paste(self, key):
+        """A caption with one analysis value under the structure the numbers are for."""
+        info = getattr(self, 'info', None)
+        if not info or not info.atoms:
+            return
+        if key == 'formula':
+            text = f'Chemical Formula: {info.formula}{chem.charge_text(info.charge)}'
+        elif key == 'exact':
+            text = f'Exact Mass: {info.exact:.2f}'
+        elif key == 'mw':
+            text = f'Molecular Weight: {info.average:.2f}'
+        elif key == 'mz':
+            text = 'm/z: ' + ', '.join(f'{m:.2f} ({p:.1f}%)' for m, p in chem.isotope_pattern(info.counts, 0)[:4])
+        else:
+            text = f'Elemental Analysis: {info.analysis}'
+        self.canvas.add_caption_below(self._target(), text, formula=True)
+
+    def _paste_property_row(self, row, _col):
+        name, value = self.props.item(row, 0).text(), self.props.item(row, 1).text()
+        self.canvas.add_caption_below(self._target(), f'{name}: {value}')
 
     @staticmethod
     def _value():
@@ -117,12 +172,19 @@ class InfoPanel(QtWidgets.QWidget):
         ids = choices[k][1] if 0 <= k < len(choices) else None
         info = chem.analyse(self.canvas.doc, ids)
         self.show_info(info)
+        if self.tabs.currentIndex() == 1:                   # properties only while their tab is shown
+            rows = chem.properties(self.canvas.doc, ids) if info.atoms else []
+            self.props.setRowCount(len(rows))
+            for r, (name, value, tip) in enumerate(rows):
+                a, b = QtWidgets.QTableWidgetItem(name), QtWidgets.QTableWidgetItem(value)
+                a.setToolTip(tip); b.setToolTip(tip)
+                self.props.setItem(r, 0, a); self.props.setItem(r, 1, b)
 
     def show_info(self, info):
         self.info = info
         if not info.atoms:
             self.formula.setText('–')
-            for w in (self.exact, self.average, self.charge, self.analysis):
+            for w in (self.exact, self.average, self.charge, self.analysis, self.mz):
                 w.setText('–')
             self.table.setRowCount(0); self.pattern.setRowCount(0)
             self.smiles.clear(); self.inchikey.clear(); self.errors.clear()
@@ -132,6 +194,7 @@ class InfoPanel(QtWidgets.QWidget):
         self.average.setText(f'{info.average:.3f}')
         self.charge.setText(chem.charge_text(info.charge) or '0')
         self.analysis.setText(info.analysis)
+        self.mz.setText(', '.join(f'{m:.2f} ({p:.1f}%)' for m, p in chem.isotope_pattern(info.counts, 0)[:4]))
         self.table.blockSignals(True)
         self.table.setRowCount(len(info.ions))
         for r, ion in enumerate(info.ions):

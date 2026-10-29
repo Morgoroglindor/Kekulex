@@ -35,7 +35,8 @@ OPEN_FILTER = ('Structures and drawings (*.sed *.cdxml *.cdx *.mol *.sdf *.sd *.
                'SMILES files (*.smi *.smiles *.txt);;All files (*)')
 SAVE_FILTER = 'Structure editor drawing (*.sed);;ChemDraw XML (*.cdxml)'
 # The palette: single tools, and drop-down groups (the button shows the last one used; click its arrow for the rest)
-TOOLS = (('select', 'Select / move  (Space)'), ('erase', 'Eraser  (Delete over an item)'), None,
+TOOLS = (('lasso', 'Lasso: select free-hand'), ('select', 'Select / move  (Space)'),
+         ('erase', 'Eraser  (Delete over an item)'), None,
          ('bond1', 'Single bond  (x; 1 over a bond)'), ('bond2', 'Double bond  (2 over a bond)'),
          ('group', 'bonds', [('wedge', 'Wedged bond (toward you)  (w over a bond)'),
                              ('hash', 'Hashed wedged bond (away from you)  (h over a bond)'),
@@ -58,6 +59,13 @@ TOOLS = (('select', 'Select / move  (Space)'), ('erase', 'Eraser  (Delete over a
          ('text', 'Text: captions, and atom labels typed in place  (t)'))
 COLORS = (('Black', ''), ('Red', '#E01E1E'), ('Blue', '#1E4FE0'), ('Green', '#1E8C3A'), ('Orange', '#E07B00'),
           ('Magenta', '#C0189A'), ('Cyan', '#0096B4'), ('Grey', '#808080'))
+HIGHLIGHT_COLORS = ('#2EE62E', '#2EE6F0', '#FFEA2E', '#F2994A', '#FF5252', '#B5E62E', '#8AD8FF', '#E8D44D',
+                    '#B4B8FF', '#C27BFF', '#6BE04A', '#8CF5CF', '#FFBE80', '#FF9CF0', '#C4C4C4', '#FFC21A',
+                    '#E08A8A', '#FF8A5C', '#C9B98A', '#FFD8C2')
+RING_FILL_COLORS = ('#E5F7B5', '#C8F5D2', '#7FF28C', '#B6EB3B', '#33D633', '#FFF7B0', '#FFE14D', '#FFF23B',
+                    '#FFC07A', '#FF9F40', '#CFF7F7', '#C9DDF7', '#3BF2F2', '#6FB8EB', '#1FCFCF', '#FFD0D0',
+                    '#FBD7F7', '#FF8ADF', '#FF8A80', '#FF4F4F', '#ECECEC', '#E4D9F5', '#CBA8EF', '#B8B8B8',
+                    '#9B6BE0')
 ELEMENTS = ('C', 'H', 'N', 'O', 'S', 'P', 'F', 'Cl', 'Br', 'I')
 STYLE_FIELDS = (('bond_length', 'Bond length (pt)', 4, 60, 0.1), ('line_width', 'Line width (pt)', 0.1, 5, 0.05),
                 ('bold_width', 'Bold / wedge width (pt)', 0.3, 10, 0.1), ('hash_spacing', 'Hash spacing (pt)', 0.5, 10, 0.1),
@@ -127,8 +135,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.canvas.tool_key.connect(self.set_tool)
         self.canvas.message.connect(lambda m: self.statusBar().showMessage(m, 6000))
         self.canvas.selection_changed.connect(self._sync_style_bar)
+        self.canvas.context_menu.connect(self.object_menu)
         self.canvas.zoom_changed.connect(lambda z: self.zoom_label.setText(f'{z * 100:.0f} %'))
         self._build_tools()
+        self._build_color_bars()
         self._build_menus()
         self.zoom_label = QtWidgets.QLabel('200 %')
         self.statusBar().addPermanentWidget(self.zoom_label)
@@ -252,6 +262,192 @@ class MainWindow(QtWidgets.QMainWindow):
         top.addWidget(self.smiles_box)
         self._build_style_bar()
 
+    def _build_color_bars(self):
+        """The Highlight Colors and Ring Fill Colors palettes (View menu, or right-click): click a swatch to colour the
+        selection's band / its rings; Custom… picks any colour, Remove takes it off."""
+        self.highlight_bar = self._swatch_bar('Highlight Colors', 'highlight', HIGHLIGHT_COLORS, 4,
+                                              self.canvas.set_highlight)
+        self.fill_bar = self._swatch_bar('Ring Fill Colors', 'ringfill', RING_FILL_COLORS, 5, self.canvas.set_ring_fill)
+
+    def _swatch_bar(self, title, key, colors, columns, apply):
+        bar = QtWidgets.QToolBar(title, self)
+        bar.setObjectName(key)
+        bar.setToolTip(title)
+        self.addToolBar(QtCore.Qt.ToolBarArea.LeftToolBarArea, bar)
+        box = QtWidgets.QWidget()
+        g = QtWidgets.QGridLayout(box)
+        g.setContentsMargins(3, 3, 3, 3); g.setSpacing(3)
+        g.addWidget(QtWidgets.QLabel(title.replace(' Colors', '')), 0, 0, 1, columns)
+        for k, c in enumerate(colors):
+            b = QtWidgets.QToolButton()
+            b.setFixedSize(18, 18)
+            b.setToolTip(c)
+            b.setStyleSheet(f'QToolButton {{ background: {c}; border: 1px solid #8A9099; border-radius: 2px; }}'
+                            f'QToolButton:hover {{ border: 2px solid #1B6CA8; }}')
+            b.clicked.connect(lambda _c=False, c=c: apply(c))
+            g.addWidget(b, 1 + k // columns, k % columns)
+        row = 2 + (len(colors) - 1) // columns
+        custom = QtWidgets.QPushButton('Custom…')
+        custom.clicked.connect(lambda: self._custom_color(apply))
+        remove = QtWidgets.QPushButton('Remove')
+        remove.clicked.connect(lambda: apply(''))
+        g.addWidget(custom, row, 0, 1, columns)
+        g.addWidget(remove, row + 1, 0, 1, columns)
+        bar.addWidget(box)
+        bar.toggleViewAction().setText(f'Show {title} Toolbar')
+        bar.setVisible(str(self.settings.value('show_' + key, 'false')).lower() == 'true')
+        bar.visibilityChanged.connect(lambda v, k=key: self.settings.setValue('show_' + k, v))
+        return bar
+
+    def _custom_color(self, apply):
+        c = QtWidgets.QColorDialog.getColor(QtGui.QColor('#FFF59D'), self, 'Colour')
+        if c.isValid():
+            apply(c.name().upper())
+
+    def _transform_actions(self, m):
+        """Flip / Rotate 180° / Rotate… / Scale…, as in ChemDraw's Object menu (also in the right-click menu)."""
+        c = self.canvas
+        if not hasattr(self, '_tf_actions'):
+            self._tf_actions = [
+                self._act('Flip &Horizontal', lambda: c.transform_selection('mirror_h'),
+                          tip='The mirror image, left to right (stereocentres invert)'),
+                self._act('Flip &Vertical', lambda: c.transform_selection('mirror_v'),
+                          tip='The mirror image, top to bottom (stereocentres invert)'),
+                self._act('Rotate 180° Hori&zontal', lambda: c.transform_selection('flip_h'), 'Ctrl+Shift+H',
+                          tip='Turned over left to right: still the same molecule'),
+                self._act('Rotate 180° V&ertical', lambda: c.transform_selection('flip_v'), 'Ctrl+Shift+V',
+                          tip='Turned over top to bottom: still the same molecule'),
+                self._act('R&otate…', self.rotate_dialog, 'Ctrl+R'),
+                self._act('Rotate 15° clockwise', lambda: c.transform_selection('rot+'), 'Ctrl+]'),
+                self._act('Rotate 15° counter-clockwise', lambda: c.transform_selection('rot-'), 'Ctrl+['),
+                self._act('&Scale…', self.scale_dialog, 'Ctrl+K')]
+        for a in self._tf_actions:
+            m.addAction(a)
+
+    def object_menu(self, global_pos, item):
+        """The right-click menu, laid out like ChemDraw's: edit, arrange, colours, then a submenu per kind of object
+        in the selection (Atom, Bond, Text, Bracket, Table, Molecule, Analysis)."""
+        c = self.canvas
+        m = QtWidgets.QMenu(self)
+        theme.register_window(m)
+        sel_kinds = {k for k, _i in c.sel}
+        if not c.sel:                                       # empty page
+            m.addAction(self.a_undo); m.addAction(self.a_redo)
+            m.addSeparator()
+            m.addAction('&Paste', self.paste)
+            m.addAction('Convert &Name to Structure…', self.name_to_structure)
+            m.addAction('Select &All', c.select_all)
+            m.addSeparator()
+            m.addAction('Document &Settings…', self.style_dialog)
+            m.addAction(self.highlight_bar.toggleViewAction())
+            m.addAction(self.fill_bar.toggleViewAction())
+            m.exec(global_pos)
+            return
+        m.addAction('Cu&t', self.cut); m.addAction('&Copy', self.copy); m.addAction('&Paste', self.paste)
+        m.addAction('Clea&r', c.delete_selection)
+        m.addSeparator()
+        m.addAction(self.a_warnings)
+        al = m.addMenu('&Align')
+        for text, how in (('&Left edges', 'left'), ('Horizontal &centres', 'hcenter'), ('&Right edges', 'right'),
+                          ('&Top edges', 'top'), ('&Vertical centres', 'vcenter'), ('&Bottom edges', 'bottom')):
+            al.addAction(text, lambda h=how: c.align(h))
+        di = m.addMenu('&Distribute')
+        di.addAction('&Horizontally', lambda: c.distribute('h'))
+        di.addAction('&Vertically', lambda: c.distribute('v'))
+        fr = m.addMenu('Add &Frame')
+        for text, kind in (('&Rectangle', 'rect'), ('R&ounded rectangle', 'roundrect'), ('&Brackets', 'brackets'),
+                           ('&Parentheses', 'parens'), ('Bra&ces', 'braces')):
+            fr.addAction(text, lambda k=kind: c.add_frame(k))
+        self._transform_actions(m)
+        m.addAction('Object &Settings…', self.style_dialog)
+        m.addMenu(self._color_menu(m))
+        m.addAction(self.highlight_bar.toggleViewAction())
+        m.addAction(self.fill_bar.toggleViewAction())
+        m.addSeparator()
+        atoms = c.selected_atoms()
+        if atoms:
+            am = m.addMenu('A&tom')
+            el = am.addMenu('&Element')
+            for e in ELEMENTS:
+                el.addAction(e, lambda e=e: c.edit_selected('atom', el=e, label=''))
+            ch = am.addMenu('&Charge')
+            for text, z in (('+1', 1), ('0', 0), ('−1', -1), ('+2', 2), ('−2', -2)):
+                ch.addAction(text, lambda z=z: c.edit_selected('atom', charge=z))
+            if item and item[0] == 'atom':
+                am.addAction('Edit &label…', lambda a=item[1]: c.edit_label(a))
+            if any(c.doc.atoms[a].label for a in atoms):
+                am.addAction('E&xpand label', c.expand_labels)
+            self._swatch_menu(am, '&Highlight', HIGHLIGHT_COLORS, c.set_highlight)
+        bonds = [i for i, b in c.doc.bonds.items() if ('bond', i) in c.sel or (b.a in atoms and b.b in atoms)]
+        if bonds:
+            bm = m.addMenu('&Bond')
+            om = bm.addMenu('&Order')
+            for text, order in (('&Single', 1), ('&Double', 2), ('&Triple', 3)):
+                om.addAction(text, lambda o=order: c.edit_selected('bond', order=o, stereo='', style='', side=None))
+            sm = bm.addMenu('&Style')
+            for text, stereo, style in (('&Plain', '', ''), ('&Wedged', 'wedge', ''), ('&Hashed wedged', 'hash', ''),
+                                        ('&Bold', '', 'bold'), ('Hashe&d', '', 'hashed'), ('D&ashed', '', 'dashed'),
+                                        ('Wa&vy', '', 'wavy')):
+                sm.addAction(text, lambda st=stereo, sy=style: c.edit_selected(
+                    'bond', stereo=st, style=sy, **({'order': 1} if st or sy not in ('', 'dashed') else {})))
+            pm = bm.addMenu('Double bond &position')
+            for text, side in (('&Automatic', None), ('&Left', -1), ('&Right', 1), ('&Centred', 0)):
+                pm.addAction(text, lambda s=side: c.edit_selected('bond', side=s))
+            bm.addAction('&Reverse direction', c.reverse_bonds)
+            self._swatch_menu(bm, '&Highlight', HIGHLIGHT_COLORS, c.set_highlight)
+        if 'text' in sel_kinds:
+            tm = m.addMenu('Te&xt')
+            if item and item[0] == 'text':
+                tm.addAction('&Edit…', lambda i=item[1]: c.edit_text(i))
+            for text, key in (('&Bold', 'bold'), ('&Italic', 'italic'), ('&Formula (subscripts)', 'formula')):
+                first = c.doc.texts[c.selected('text')[0]]
+                a = tm.addAction(text, lambda k=key, v=not getattr(first, key): c.set_text_props(**{k: v}))
+                a.setCheckable(True); a.setChecked(bool(getattr(first, key)))
+            jm = tm.addMenu('&Justification')
+            for text, al_ in (('&Left', 'left'), ('&Centre', 'center'), ('&Right', 'right')):
+                jm.addAction(text, lambda a_=al_: c.set_text_props(align=a_))
+        if 'shape' in sel_kinds:
+            km = m.addMenu('Brac&ket / shape')
+            for text, kind in (('&Brackets', 'brackets'), ('&Parentheses', 'parens'), ('Bra&ces', 'braces'),
+                               ('&Rectangle', 'rect'), ('R&ounded rectangle', 'roundrect'), ('O&val', 'oval')):
+                km.addAction(text, lambda k=kind: self._set_shape_kind(k))
+        if 'grid' in sel_kinds:
+            gm = m.addMenu('T&able')
+            gid = c.selected('grid')[0]
+            gm.addAction('&Edit values…', lambda: c.edit_grid(gid))
+            gm.addAction('&Remove grid', c.delete_selection)
+        if atoms:
+            mm = m.addMenu('&Molecule')
+            mm.addAction('&Select whole structure', lambda: c.select_fragment(next(iter(atoms))))
+            mm.addAction(self.a_clean)
+            mm.addAction('E&xpand labels', c.expand_labels)
+            mm.addAction('&Check structure', self.check_structure)
+            self._swatch_menu(mm, '&Ring fill', RING_FILL_COLORS, c.set_ring_fill)
+            an = m.addMenu('A&nalysis')
+            an.addAction('Show &analysis', c.add_analysis)
+            an.addAction('Analyze &stoichiometry', c.analyze_stoichiometry)
+            an.addAction('Structure to &name (PubChem, online)', self.structure_to_name)
+            an.addAction(self.a_stereo)
+        m.exec(global_pos)
+
+    def _swatch_menu(self, parent, title, colors, apply):
+        sub = parent.addMenu(title)
+        for c in colors[:12]:
+            pm = QtGui.QPixmap(14, 14); pm.fill(QtGui.QColor(c))
+            sub.addAction(QtGui.QIcon(pm), c, lambda c=c: apply(c))
+        sub.addSeparator()
+        sub.addAction('Custom…', lambda: self._custom_color(apply))
+        sub.addAction('Remove', lambda: apply(''))
+
+    def _set_shape_kind(self, kind):
+        c = self.canvas
+        shapes = c.selected('shape')
+        if shapes:
+            c.snapshot()
+            for i in shapes:
+                c.doc.shapes[i].kind = kind
+            c.edited()
+
     def _build_style_bar(self):
         """The text style bar: font size, bold, italic, formula (subscript numbers), alignment, colour - for the
         selected captions, or for the next ones typed."""
@@ -372,6 +568,20 @@ class MainWindow(QtWidgets.QMainWindow):
         m.addSeparator()
         self.a_stereo = self._toggle(m, 'Show &stereochemistry (R/S, E/Z)', 'show_stereo')
         self.a_numbers = self._toggle(m, 'Show atom &numbers', 'show_atom_numbers')
+        self.a_reaction = QtGui.QAction('Show &reaction interpretation', self, checkable=True)
+        self.a_reaction.setToolTip('Reactants red, products magenta, above the arrow cyan, below blue')
+        self.a_reaction.toggled.connect(lambda v: (setattr(self.canvas, 'show_reaction', v), self.canvas.update()))
+        m.addAction(self.a_reaction)
+        m.addAction(self.highlight_bar.toggleViewAction())
+        m.addAction(self.fill_bar.toggleViewAction())
+        a = QtGui.QAction('Display &warnings (atoms over their valence)', self, checkable=True)
+        a.setChecked(True)
+        a.toggled.connect(lambda v: (setattr(self.canvas, 'show_warnings', v), self.canvas.update()))
+        m.addAction(a)
+        self.a_warnings = a
+        a = QtGui.QAction('Show r&ulers', self, checkable=True)
+        a.toggled.connect(lambda v: (setattr(self.canvas, 'show_rulers', v), self.canvas.update()))
+        m.addAction(a)
         m.addSeparator()
         theme.add_menu(self, m, self._retheme)
 
@@ -385,12 +595,7 @@ class MainWindow(QtWidgets.QMainWindow):
         di.addAction(self._act('&Horizontally', lambda: self.canvas.distribute('h')))
         di.addAction(self._act('&Vertically', lambda: self.canvas.distribute('v')))
         m.addSeparator()
-        m.addAction(self._act('Flip &horizontally', lambda: self.canvas.transform_selection('flip_h'), 'Ctrl+Shift+H'))
-        m.addAction(self._act('Flip &vertically', lambda: self.canvas.transform_selection('flip_v'), 'Ctrl+Shift+V'))
-        m.addAction(self._act('Rotate 15° clockwise', lambda: self.canvas.transform_selection('rot+'), 'Ctrl+R'))
-        m.addAction(self._act('Rotate 15° counter-clockwise', lambda: self.canvas.transform_selection('rot-'), 'Ctrl+Shift+R'))
-        m.addAction(self._act('R&otate…', self.rotate_dialog))
-        m.addAction(self._act('&Scale…', self.scale_dialog))
+        self._transform_actions(m)
         m.addSeparator()
         m.addMenu(self._color_menu(m))
 
@@ -398,8 +603,13 @@ class MainWindow(QtWidgets.QMainWindow):
         m.addAction(self.a_clean)
         m.addAction(self._act('&Expand label', self.canvas.expand_labels, 'Ctrl+Shift+E'))
         m.addAction(self._act('Show &analysis (formula, mass, m/z …)', self.canvas.add_analysis, 'Ctrl+Shift+A'))
+        m.addAction(self._act('Analyze &stoichiometry', self.canvas.analyze_stoichiometry))
+        m.addAction(self._act('Check s&tructure', self.check_structure))
         m.addSeparator()
-        m.addAction(self.a_stereo); m.addAction(self.a_numbers)
+        m.addAction(self._act('&Name to structure (PubChem, online)…', self.name_to_structure, 'Ctrl+Shift+N'))
+        m.addAction(self._act('Structure to na&me (PubChem, online)', self.structure_to_name))
+        m.addSeparator()
+        m.addAction(self.a_stereo); m.addAction(self.a_numbers); m.addAction(self.a_reaction)
 
         m = mb.addMenu('&Templates')
         for cat, items in templates.TEMPLATES.items():
@@ -443,6 +653,62 @@ class MainWindow(QtWidgets.QMainWindow):
         s = render.style_of(self.canvas.doc)
         self.a_stereo.setChecked(bool(s['show_stereo']))
         self.a_numbers.setChecked(bool(s['show_atom_numbers']))
+
+    def check_structure(self):
+        problems = self.canvas.check_structure()
+        if problems:
+            QtWidgets.QMessageBox.warning(self, 'Check structure', '\n'.join(problems))
+        else:
+            self.statusBar().showMessage('Check structure: no problems found.', 5000)
+
+    def name_to_structure(self):
+        """A structure from its name, looked up at PubChem (the name is sent there)."""
+        import pubchem
+        name, ok = QtWidgets.QInputDialog.getText(self, 'Name to structure',
+                                                  'Compound name (looked up online at PubChem):')
+        if not ok or not name.strip():
+            return
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.WaitCursor)
+        try:
+            smiles = pubchem.smiles_for_name(name)
+        except pubchem.PubChemError as e:
+            QtWidgets.QApplication.restoreOverrideCursor()
+            QtWidgets.QMessageBox.warning(self, APP_NAME, str(e))
+            return
+        QtWidgets.QApplication.restoreOverrideCursor()
+        if not smiles:
+            QtWidgets.QMessageBox.information(self, APP_NAME, f'PubChem has no compound called "{name}".')
+            return
+        self.insert_text(smiles)
+
+    def structure_to_name(self):
+        """The name PubChem has for the selected structure (its InChIKey is sent there); pasted as a caption."""
+        import pubchem
+        ids = self.info._target()
+        info = chem.analyse(self.canvas.doc, ids)
+        if not info.inchikey:
+            QtWidgets.QMessageBox.information(self, APP_NAME, 'Select (or draw) one complete structure first.')
+            return
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.WaitCursor)
+        try:
+            found = pubchem.name_for_inchikey(info.inchikey)
+        except pubchem.PubChemError as e:
+            QtWidgets.QApplication.restoreOverrideCursor()
+            QtWidgets.QMessageBox.warning(self, APP_NAME, str(e))
+            return
+        QtWidgets.QApplication.restoreOverrideCursor()
+        if not found:
+            QtWidgets.QMessageBox.information(self, APP_NAME, 'PubChem does not have this structure (a new compound '
+                                              'has no name there).')
+            return
+        title, iupac = found
+        choice = title
+        if iupac and iupac.lower() != title.lower():
+            choice, ok = QtWidgets.QInputDialog.getItem(self, 'Structure to name', 'Paste which name under the structure?',
+                                                        [title, iupac], 0, False)
+            if not ok:
+                return
+        self.canvas.add_caption_below(ids, choice)
 
     def rotate_dialog(self):
         deg, ok = QtWidgets.QInputDialog.getDouble(self, 'Rotate', 'Degrees (clockwise):', 90, -360, 360, 1)
@@ -822,8 +1088,10 @@ class MainWindow(QtWidgets.QMainWindow):
                  ('d', 'dashed (on a double bond: dashed second line)'), ('y', 'wavy'), ('Shift+H', 'hashed')] + fuse
         tools = [(k, v) for k, v in cv.TOOL_KEYS.items()]
         menu = [('Ctrl+Shift+K', 'clean up structure'), ('Ctrl+Alt+C', 'copy as SMILES'),
-                ('Ctrl+Shift+C', 'copy as picture'), ('Ctrl+Shift+H / V', 'flip horizontally / vertically'),
-                ('Ctrl+R / Ctrl+Shift+R', 'rotate 15°'), ('Ctrl+E', 'export picture'), ('Ctrl+I', 'insert SMILES / MOL'),
+                ('Ctrl+Shift+C', 'copy as picture'),
+                ('Ctrl+Shift+H / V', 'rotate 180° horizontal / vertical (same molecule)'),
+                ('Ctrl+R', 'rotate…'), ('Ctrl+] / Ctrl+[', 'rotate 15°'), ('Ctrl+K', 'scale…'),
+                ('Ctrl+E', 'export picture'), ('Ctrl+I', 'insert SMILES / MOL'),
                 ('Ctrl+= / Ctrl+- / Ctrl+0', 'zoom in / out / fit'), ('+ / -', 'charge (over an atom)'),
                 ('Enter', 'type the label of the atom under the mouse'),
                 ('Ctrl+Shift+E', 'expand label'), ('Ctrl+Shift+A', 'show analysis'),

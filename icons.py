@@ -265,6 +265,15 @@ def _align(how):
     return draw
 
 
+def _lasso(p):                                            # a loose loop with its tail
+    path = QPainterPath(QPointF(8, 16))
+    path.cubicTo(1, 13, 3, 4, 12, 4)
+    path.cubicTo(21, 4, 22, 12, 15, 14)
+    path.cubicTo(11, 15, 8, 15, 8, 16)
+    path.cubicTo(8, 19, 10, 20, 9, 22)
+    p.drawPath(path)
+
+
 def _templates(p):                                         # a stack of hexagons
     p.drawPolygon(QPolygonF(_poly(6, cx=9, cy=9, r=5.5)))
     p.drawPolygon(QPolygonF(_poly(6, cx=15, cy=15, r=5.5)))
@@ -280,7 +289,7 @@ DRAW = {'select': _select, 'bond1': _bond(1), 'bond2': _bond(2), 'bond3': _bond(
         'curved_half': _curved(True), 'rect': _shape('rect'), 'roundrect': _shape('roundrect'), 'oval': _shape('oval'),
         'line': _shape('line'), 'brackets': _shape('brackets'), 'parens': _shape('parens'), 'braces': _shape('braces'),
         'align_left': _align('left'), 'align_center': _align('center'), 'align_right': _align('right'),
-        'templates': _templates}
+        'templates': _templates, 'lasso': _lasso}
 
 
 def _pixmap(name, scale, color):

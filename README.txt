@@ -34,15 +34,40 @@ ChemDraw-like features (0.3.0)
                        arrow again with its tool to bend it the other way).
   Shapes               brackets, parentheses, braces, rectangle, rounded rectangle, oval, line.
   Captions             size, bold, italic, formula style (H2SO4 with subscripts), left / centre / right, colour.
-  Object menu          align (edges, centres), distribute, flip, rotate (15 degrees or any angle), scale, colour.
+  Object menu          align (edges, centres), distribute, Flip Horizontal / Vertical (the mirror image: stereo
+                       inverts), Rotate 180 degrees Horizontal / Vertical (Ctrl+Shift+H / V: turned over, same
+                       molecule), Rotate... (Ctrl+R), 15 degree steps (Ctrl+] / Ctrl+[), Scale... (Ctrl+K), colour.
+  Lasso                the tool beside Select: drag a free-hand outline around what to select.
+  Right-click menu     right-click an object (a right drag still pans): cut / copy / paste / clear, display
+                       warnings, align, distribute, add frame (rectangle, brackets ...), flip, rotate, scale,
+                       colour, the two colour palettes, then Atom (element, charge, label, highlight), Bond (order,
+                       style, double-bond position, reverse, highlight), Text, Bracket / shape, Table (stoichiometry
+                       grid), Molecule (select structure, clean up, expand labels, check, ring fill) and Analysis.
+  Highlight / ring fill  View > Show Highlight Colors Toolbar and Show Ring Fill Colors Toolbar: a colour band behind
+                       the selected atoms and bonds, a colour inside the selected structure's rings (Custom... any
+                       colour, Remove takes it off). Kept in .sed files and in pictures; not written to .cdxml yet.
   Structure menu       clean up, expand label, analysis caption (formula, exact mass, m/z with isotopes, MW,
-                       elemental analysis), R/S and E/Z labels, atom numbers.
-  Templates            rings, heterocycles, L-amino acids, sugars, nucleobases, betalain building blocks,
-                       solvents and reagents.
+                       elemental analysis), analyze stoichiometry, check structure, name <-> structure through
+                       PubChem (online, only when asked: sends the typed name or the structure's InChIKey),
+                       R/S and E/Z labels, atom numbers, reaction interpretation.
+  Stoichiometry grid   Structure > Analyze stoichiometry puts a Reactants / Products grid under the reaction
+                       (structures left of the arrow and above / below it are reactants, right of it products).
+                       Double-click it to type values, with or without units (250 mg, 1.5 mmol, 2 mL, 0.5 M,
+                       1.2 g/mL, 95 %): limiting reactant, equivalents, sample mass, %weight, molarity, density,
+                       volume, moles; for products equivalents, %completion, measured mass, purity. Moles, masses,
+                       volumes, expected mass and %yield follow and are redrawn whenever the reaction changes.
+                       Typed values are bold, calculated ones normal; rows can be hidden (right-click a row name).
+  View menu            show reaction interpretation (reactants red, products magenta, above / below the arrow
+                       cyan / blue), rulers in cm, whole page.
+  Templates            rings and ring systems, heterocycles, functional groups, reagents, solvents.
   ChemDraw files       .cdxml opens and saves (structures, nicknames, bond styles, captions, arrows, shapes, colours,
-                       document style); .cdx opens the structures (through RDKit). Not read: stoichiometry tables,
-                       TLC plates, orbitals, spectra.
-  Masses panel         elemental analysis, and the isotope pattern of the ion picked in the m/z table.
+                       document style); the stoichiometry grid and its typed values open too (not written back to
+                       .cdxml yet: keep .sed for that). .cdx opens the structures (through RDKit). Not read: TLC
+                       plates, orbitals, spectra.
+  Analysis panel       Analysis tab: formula, exact mass, m/z with isotopes, MW, elemental analysis (each with
+                       Paste, which puts it under the structure as a caption), adduct m/z, isotope pattern of the
+                       chosen ion. Properties tab: logP, MR, tPSA, H-bond donors / acceptors, rotatable bonds,
+                       rings, heavy atoms, fraction sp3, stereocentres, rule of five (RDKit).
 
 Figures
   Ctrl+Shift+C copies the selection (or everything) as a picture (PNG + SVG on the clipboard) for PowerPoint / Word;
@@ -63,6 +88,8 @@ Files
   model.py         the drawing (atoms, bonds, arrows, text, shapes, nicknames) and its geometry; MOL; RDKit in
   cdxml.py         ChemDraw .cdxml reading and writing
   templates.py     the Templates menu (SMILES)
+  stoich.py        stoichiometry grid: reaction columns, unit parsing, calculations; stoich_dialog.py its editor
+  pubchem.py       name <-> structure through PubChem (online, on request only)
   render.py        drawing with QPainter in points (screen and every export the same); PNG / SVG / PDF
   chem.py          formula, masses, adducts, SMILES, InChIKey (RDKit); reading SMILES / MOL / SDF
   info_panel.py    the formula and masses panel

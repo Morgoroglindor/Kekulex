@@ -81,6 +81,8 @@ def read(path):
 
     rev = _reversed_nicknames()
     nodes = {}                                              # CDXML node id -> atom id
+    frag_atoms = {}                                         # CDXML fragment id -> atom ids
+    grids = []
     unknown = set()
 
     def xy(p):
@@ -101,8 +103,8 @@ def read(path):
                 read_arrow(el)
             elif tag == 'graphic':
                 read_graphic(el)
-            elif tag in ('stoichiometrygrid',):
-                notes.append('the stoichiometry table')
+            elif tag == 'stoichiometrygrid':
+                grids.append(el)
             elif tag in ('page',):
                 walk(el)
 
@@ -131,6 +133,7 @@ def read(path):
                 a = doc.add_atom(x, y, el, int(n.get('Charge', 0)))
             doc.atoms[a].color = color(n)
             nodes[n.get('id')] = a
+            frag_atoms.setdefault(frag.get('id'), []).append(a)
         for b in frag.findall('b'):
             a1, a2 = nodes.get(b.get('B')), nodes.get(b.get('E'))
             if a1 is None or a2 is None:
@@ -237,9 +240,52 @@ def read(path):
             doc.shapes[i].color = color(g)
 
     walk(root)
+    for g in grids:
+        read_grid(g, doc, frag_atoms, BL)
     if unknown:
         notes.append('these labels, kept as text but counted as carbon: ' + ', '.join(sorted(unknown)))
     return doc, notes
+
+
+# A grid datum's SGPropertyType -> our row key; values as ChemDraw keeps them (fractions for percentages)
+SG_REACTANT = {4: 'limiting', 6: 'equiv', 7: 'mass', 8: 'pct', 9: 'volume', 10: 'molarity', 12: 'density', 13: 'moles'}
+SG_PRODUCT = {6: 'equiv', 22: 'completion', 17: 'measured', 18: 'purity'}
+SG_DEFAULTS = {'equiv': 1.0, 'pct': 1.0, 'completion': 1.0, 'purity': 1.0}
+
+
+def read_grid(g, doc, frag_atoms, BL):
+    """A ChemDraw stoichiometry grid: its columns (by the fragment each one describes) and the values typed in."""
+    p = _floats(g.get('p'))
+    grid_id = doc._id()
+    grid = model.Grid(p[0] / BL if p else 0.0, (p[1] / BL if p else 0.0) + 1.2)
+    for comp in g.findall('sgcomponent'):
+        if comp.get('ComponentIsHeader') == 'yes':
+            continue
+        atoms = frag_atoms.get(comp.get('ComponentReferenceID'))
+        if not atoms:
+            continue
+        reactant = comp.get('ComponentIsReactant') == 'yes'
+        keys = SG_REACTANT if reactant else SG_PRODUCT
+        col = {'atoms': list(atoms)}
+        for d in comp.findall('sgdatum'):
+            key = keys.get(int(d.get('SGPropertyType', 0)))
+            if key is None:
+                continue
+            try:
+                v = float(d.get('SGDataValue', ''))
+            except ValueError:
+                continue
+            if key == 'limiting':
+                col['limiting'] = v == 1
+                continue
+            if d.get('IsEdited') != 'yes' and (v == SG_DEFAULTS.get(key, 0.0)):
+                continue                                    # an untouched default
+            if key in ('pct', 'completion', 'purity'):
+                v *= 100
+            col[key] = v
+        (grid.reactants if reactant else grid.products).append(col)
+    if grid.reactants or grid.products:
+        doc.grids[grid_id] = grid
 
 
 # ------------------------------------------------------------------------------------------------ write

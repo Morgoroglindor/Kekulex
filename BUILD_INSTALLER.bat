@@ -44,7 +44,7 @@ echo       version %APPVER%
 rem ---------------------------------------------------------------- 3. programs
 echo [3/5] Building the programs (this is the slow step) ...
 python -m PyInstaller --noconfirm --clean --windowed --onedir --name StructureEditor --icon structureeditor.ico --paths . ^
-  --add-data "structureeditor.ico;." --hidden-import theme --hidden-import icons --collect-all rdkit ^
+  --add-data "structureeditor.ico;." --hidden-import theme --hidden-import icons --hidden-import stoich_dialog --hidden-import pubchem --collect-all rdkit ^
   --exclude-module tkinter --exclude-module matplotlib --exclude-module pandas --exclude-module PyQt5 --exclude-module PySide2 --exclude-module PySide6 ^
   --exclude-module IPython --exclude-module ipywidgets --exclude-module notebook --exclude-module pytest ^
   structure_editor.py || goto :fail

@@ -484,6 +484,111 @@ class Renderer:
                 p.cubicTo(x + bw * s, ym, x, y2, x + bw * s, y2)
         return p
 
+    # ------------------------------------------------------------------------------------------- stoichiometry grid
+    def grid_layout(self, i):
+        """What a stoichiometry grid draws: ([('text', text, x, baseline, size, bold, italic) | ('line', x1, y1, x2,
+        y2) | ('rect', QRectF)], QRectF, {('reactants' | 'products', column index, row key): QRectF of the cell})."""
+        import stoich
+        from PyQt6.QtCore import QLocale
+        g = self.doc.grids[i]
+        table = stoich.compute(self.doc, g)
+        dec = QLocale.system().decimalPoint() or ','
+        fs = self.s['font_size']
+        small = fs * 0.75
+        m = self.m
+        row_h = fs * 1.5
+        pad = fs * 0.6
+        ops, cells = [], {}
+        x = g.x * self.BL
+        top = g.y * self.BL
+        bounds = QRectF()
+
+        def text_w(t, size, bold=False, italic=False, formula=False):
+            return sum(m.width(txt, size * (SUB if sub else 1), bold, italic) for txt, sub in runs(t, formula))
+
+        def put_text(t, x0, base, size, bold=False, italic=False, formula=False):
+            for txt, sub in runs(t, formula):
+                sz = size * (SUB if sub else 1)
+                ops.append(('text', txt, x0, base + (0.28 * size if sub else 0), sz, bold, italic))
+                x0 += m.width(txt, sz, bold, italic)
+            return x0
+        for side, rows in (('reactants', stoich.REACTANT_ROWS), ('products', stoich.PRODUCT_ROWS)):
+            cols = table[side]
+            rows = [(k, label) for k, label in rows if k not in g.hidden]
+            if not cols:
+                continue
+            texts = []                                      # per column, per row: (number, unit, bold, italic)
+            for col in cols:
+                col_texts = {}
+                for key, _label in rows:
+                    cell = col.cells.get(key)
+                    if cell is None:
+                        col_texts[key] = ('', '', False, False)
+                        continue
+                    num, unit = stoich.display(key, cell, dec)
+                    bold = cell.typed or key == 'formula' or (key == 'limiting' and cell.value)
+                    italic = key == 'limiting' and bool(cell.value)
+                    col_texts[key] = (num, unit, bold, italic)
+                texts.append(col_texts)
+            label_w = max(m.width(label, fs) for _k, label in rows) + 2 * pad
+            col_ws = []
+            for col_texts in texts:
+                w = max([text_w(n, fs, b, it, formula=True) + (m.width(u, small) if u else 0)
+                         for n, u, b, it in col_texts.values()] + [fs * 3.5])
+                col_ws.append(w + 2 * pad)
+            title = 'Reactants' if side == 'reactants' else 'Products'
+            tx = x + pad
+            for ch in title:                                # letter-spaced italic title above the table
+                ops.append(('text', ch, tx, top - fs * 0.45, fs, False, True))
+                tx += m.width(ch, fs, False, True) + fs * 0.32
+            w_total = label_w + sum(col_ws)
+            h_total = row_h * len(rows) + pad * 0.6
+            rect = QRectF(x, top, w_total, h_total)
+            ops.append(('rect', rect))
+            cx = x + label_w
+            for k, cw in enumerate(col_ws):                 # column separators
+                ops.append(('line', cx, top, cx, top + h_total))
+                for r, (key, _label) in enumerate(rows):
+                    cells[(side, k, key)] = QRectF(cx, top + pad * 0.3 + r * row_h, cw, row_h)
+                cx += cw
+            for r, (key, label) in enumerate(rows):
+                base = top + pad * 0.3 + r * row_h + row_h * 0.72
+                put_text(label, x + pad, base, fs)
+                cx = x + label_w
+                for k, cw in enumerate(col_ws):
+                    num, unit, bold, italic = texts[k][key]
+                    if num:
+                        end = put_text(num, cx + pad, base, fs, bold, italic, formula=(key == 'formula'))
+                        if unit:
+                            put_text(unit, end + 0.5, base, small, bold)
+                    cx += cw
+            r_all = rect.adjusted(0, -fs * 1.6, 0, 0)
+            bounds = r_all if bounds.isNull() else bounds.united(r_all)
+            x += w_total + fs * 0.6
+        if bounds.isNull():                                 # every compound of the grid was deleted
+            bounds = QRectF(g.x * self.BL, g.y * self.BL, fs * 10, fs * 2)
+            ops.append(('text', 'Stoichiometry: no reaction', g.x * self.BL + pad, g.y * self.BL + fs * 1.3, fs, False, True))
+        return ops, bounds, cells
+
+    def grid_rect(self, i):
+        return self.grid_layout(i)[1]
+
+    def paint_grid(self, p, i):
+        g = self.doc.grids[i]
+        color = self.color(g)
+        ops, _bounds, _cells = self.grid_layout(i)
+        pen = QPen(color, self.s['line_width'])
+        for op in ops:
+            if op[0] == 'text':
+                _t, txt, x, y, size, bold, italic = op
+                if txt.strip():
+                    p.setPen(Qt.PenStyle.NoPen); p.setBrush(QBrush(color))
+                    p.drawPath(text_path(txt, self.s['font'], size, x, y, bold, italic))
+            elif op[0] == 'line':
+                p.setPen(pen); p.drawLine(QPointF(op[1], op[2]), QPointF(op[3], op[4]))
+            else:
+                p.setPen(pen); p.setBrush(Qt.BrushStyle.NoBrush); p.drawRect(op[1])
+
     # ------------------------------------------------------------------------------------------- painting
     def cip(self):
         if self._cip is None:
@@ -502,6 +607,7 @@ class Renderer:
 
         def pen(color):
             return QPen(color, s['line_width'], Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+        self.paint_fills_and_highlights(p)
         for i, sh in doc.shapes.items():
             p.setPen(pen(self.color(sh))); p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawPath(self.shape_paths(i))
@@ -524,6 +630,8 @@ class Renderer:
             stroke, fill = self.arrow_paths(i)
             p.setPen(pen(color)); p.setBrush(Qt.BrushStyle.NoBrush); p.drawPath(stroke)
             p.setPen(Qt.PenStyle.NoPen); p.setBrush(QBrush(color)); p.drawPath(fill)
+        for i in doc.grids:
+            self.paint_grid(p, i)
         p.setPen(Qt.PenStyle.NoPen)
         for i, t in doc.texts.items():
             p.setBrush(QBrush(self.color(t)))
@@ -539,6 +647,28 @@ class Renderer:
                 if doc.valence_error(a):
                     r = 0.28 * self.BL
                     p.drawRect(QRectF(at.x * self.BL - r, at.y * self.BL - r, 2 * r, 2 * r))
+
+    def paint_fills_and_highlights(self, p):
+        """Behind the structures: rings filled with their colour, then highlight bands along bonds and discs on atoms
+        (round-ended, so the bands of one structure join up)."""
+        doc, BL = self.doc, self.BL
+        p.setPen(Qt.PenStyle.NoPen)
+        for f in doc.fills.values():
+            if len(f.atoms) < 3 or any(a not in doc.atoms for a in f.atoms):
+                continue
+            p.setBrush(QBrush(QColor(f.color)))
+            p.drawPolygon(QPolygonF([QPointF(doc.atoms[a].x * BL, doc.atoms[a].y * BL) for a in f.atoms]))
+        width = 0.42 * BL
+        for b in doc.bonds.values():
+            if b.highlight:
+                p.setPen(QPen(QColor(b.highlight), width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                pa, pb = doc.atoms[b.a], doc.atoms[b.b]
+                p.drawLine(QPointF(pa.x * BL, pa.y * BL), QPointF(pb.x * BL, pb.y * BL))
+        p.setPen(Qt.PenStyle.NoPen)
+        for a in doc.atoms.values():
+            if a.highlight:
+                p.setBrush(QBrush(QColor(a.highlight)))
+                p.drawEllipse(QPointF(a.x * BL, a.y * BL), width / 2 * 1.15, width / 2 * 1.15)
 
     def paint_overlays(self, p):
         """(R) / (S) and (E) / (Z) labels and atom numbers, small and blue, beside their atoms and bonds."""
@@ -592,6 +722,8 @@ class Renderer:
             add(self.text_rect(i))
         for i in self.doc.shapes:
             add(self.shape_paths(i).boundingRect().adjusted(-1, -1, 1, 1))
+        for i in self.doc.grids:
+            add(self.grid_rect(i).adjusted(-1, -1, 1, 1))
         if not r.isNull() and (self.s['show_stereo'] or self.s['show_atom_numbers']):
             r = r.adjusted(-6, -6, 6, 6)
         return r
@@ -612,6 +744,8 @@ class Renderer:
             return stroke.boundingRect().united(fill.boundingRect())
         if kind == 'text':
             return self.text_rect(i)
+        if kind == 'grid':
+            return self.grid_rect(i)
         return self.shape_paths(i).boundingRect()
 
 

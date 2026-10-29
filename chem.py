@@ -292,3 +292,34 @@ def mols_from_file(path):
     if not mols:
         raise ValueError('No structure could be read from this file.')
     return mols
+
+
+# ------------------------------------------------------------------------------------------------ properties
+def properties(doc, atom_ids=None):
+    """[(name, value text, tooltip)] of calculated properties (RDKit; atom_ids None: everything drawn): Crippen logP
+    and molar refractivity, topological polar surface area, H-bond donors / acceptors, rotatable bonds, rings, heavy
+    atoms, fraction sp3 carbons, and whether Lipinski's rule of five holds."""
+    from rdkit.Chem import Crippen, Descriptors, Lipinski, rdMolDescriptors
+    full, grown = doc.expanded()
+    ids = expand_ids(grown, [a for a in doc.atoms if atom_ids is None or a in atom_ids])
+    mol, _order, _err = to_mol(full, ids)
+    if mol is None:
+        return []
+    logp, mr = Crippen.MolLogP(mol), Crippen.MolMR(mol)
+    hbd, hba = Lipinski.NumHDonors(mol), Lipinski.NumHAcceptors(mol)
+    mw = Descriptors.MolWt(mol)
+    violations = sum((mw > 500, logp > 5, hbd > 5, hba > 10))
+    return [
+        ('LogP', f'{logp:.2f}', 'Octanol / water partition coefficient (Crippen method)'),
+        ('MR', f'{mr:.2f} cm³/mol', 'Molar refractivity (Crippen method)'),
+        ('tPSA', f'{rdMolDescriptors.CalcTPSA(mol):.2f} Å²', 'Topological polar surface area'),
+        ('H-bond donors', str(hbd), 'Lipinski donors (OH and NH)'),
+        ('H-bond acceptors', str(hba), 'Lipinski acceptors (N and O)'),
+        ('Rotatable bonds', str(rdMolDescriptors.CalcNumRotatableBonds(mol)), ''),
+        ('Rings (aromatic)', f'{rdMolDescriptors.CalcNumRings(mol)} ({rdMolDescriptors.CalcNumAromaticRings(mol)})', ''),
+        ('Heavy atoms', str(mol.GetNumHeavyAtoms()), 'Atoms other than hydrogen'),
+        ('Fraction sp³ C', f'{rdMolDescriptors.CalcFractionCSP3(mol):.2f}', ''),
+        ('Stereocentres', str(len(Chem.FindMolChiralCenters(mol, includeUnassigned=True, useLegacyImplementation=False))), ''),
+        ('Rule of five', 'passes' if violations <= 1 else f'{violations} violations',
+         'Lipinski: MW ≤ 500, logP ≤ 5, ≤ 5 donors, ≤ 10 acceptors (one violation allowed)'),
+    ]

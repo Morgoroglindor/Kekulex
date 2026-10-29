@@ -14,7 +14,7 @@ label is a nickname (OMe, Boc ...): drawn as that text, written out in full by e
 """
 import copy
 import math
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 
 MERGE = 0.3                                                 # a new atom this close to an existing one is that atom
 MOL_BOND = 1.5                                              # bond length written into MOL files (A, RDKit's own)
@@ -94,6 +94,7 @@ class Atom:
     charge: int = 0
     label: str = ''                                         # a nickname (OMe, Boc ...) shown instead of the element
     color: str = ''                                         # '' = the drawing's colour
+    highlight: str = ''                                     # a coloured disc behind the atom ('' = none)
 
 
 @dataclass
@@ -105,6 +106,7 @@ class Bond:
     side: int | None = None                                 # double bond: None = automatic, 0 = centred, +1 / -1 = side
     style: str = ''                                         # '' | 'bold' | 'dashed' | 'wavy' | 'hashed' (single bonds;
     color: str = ''                                         # 'dashed' on a double bond dashes its second line)
+    highlight: str = ''                                     # a coloured band behind the bond ('' = none)
 
 
 ARROW_KINDS = ('forward', 'equilibrium', 'retro', 'resonance', 'dashed', 'curved', 'curved_half')
@@ -147,8 +149,28 @@ class Shape:
     color: str = ''
 
 
-KINDS = {'atom': Atom, 'bond': Bond, 'arrow': Arrow, 'text': Text, 'shape': Shape}
-PLURAL = {'atom': 'atoms', 'bond': 'bonds', 'arrow': 'arrows', 'text': 'texts', 'shape': 'shapes'}
+@dataclass
+class Grid:
+    """A stoichiometry grid under a reaction: one column per reactant / product. Each column is a dict with the
+    compound's 'atoms' (ids) and the values typed into it (stoich.py says which; units g, mL, M, g/mL, mol, %)."""
+    x: float                                                # top-left corner
+    y: float
+    reactants: list = field(default_factory=list)
+    products: list = field(default_factory=list)
+    hidden: list = field(default_factory=list)              # row keys not shown
+    color: str = ''
+
+
+@dataclass
+class Fill:
+    """A ring filled with a colour: the ring's atoms in order around it (it follows them when they move)."""
+    atoms: list
+    color: str = '#FFF59D'
+
+
+KINDS = {'atom': Atom, 'bond': Bond, 'arrow': Arrow, 'text': Text, 'shape': Shape, 'grid': Grid, 'fill': Fill}
+PLURAL = {'atom': 'atoms', 'bond': 'bonds', 'arrow': 'arrows', 'text': 'texts', 'shape': 'shapes', 'grid': 'grids',
+          'fill': 'fills'}
 
 
 def angle_of(dx, dy):
@@ -167,6 +189,8 @@ class Doc:
         self.arrows = {}
         self.texts = {}
         self.shapes = {}
+        self.grids = {}
+        self.fills = {}
         self.style = {}                                     # overrides of render.DEFAULT_STYLE
         self._next = 1
 
@@ -177,7 +201,7 @@ class Doc:
 
     def table(self, kind):
         return {'atom': self.atoms, 'bond': self.bonds, 'arrow': self.arrows, 'text': self.texts,
-                'shape': self.shapes}[kind]
+                'shape': self.shapes, 'grid': self.grids, 'fill': self.fills}[kind]
 
     def add_atom(self, x, y, el='C', charge=0):
         i = self._id()
@@ -243,6 +267,8 @@ class Doc:
         for _n, b in self.neighbors(a):
             self.remove_bond(b, prune=False)
         self.atoms.pop(a, None)
+        for i in [i for i, f in self.fills.items() if a in f.atoms]:   # a ring fill goes with its ring
+            del self.fills[i]
 
     def remove_bond(self, i, prune=True):
         """Remove a bond; a carbon left without bonds goes with it (it would show up as a lone CH4)."""
@@ -267,7 +293,7 @@ class Doc:
         del self.atoms[src]
 
     def is_empty(self):
-        return not (self.atoms or self.arrows or self.texts or self.shapes)
+        return not (self.atoms or self.arrows or self.texts or self.shapes or self.grids)
 
     # ------------------------------------------------------------------------------------------- hit testing
     def find_atom(self, x, y, r, exclude=()):
@@ -577,6 +603,32 @@ class Doc:
             self.put_group(b, smiles)
         return b
 
+    def rings(self, atom_ids=None):
+        """The smallest set of smallest rings (RDKit), as atom-id lists in order around each ring; with atom_ids, only
+        the rings all of whose atoms are in it."""
+        from rdkit import Chem
+        block, order = self.to_molblock()
+        if not order:
+            return []
+        mol = Chem.MolFromMolBlock(block, sanitize=False, removeHs=False)
+        if mol is None:
+            return []
+        mol.UpdatePropertyCache(strict=False)
+        out = []
+        for ring in Chem.GetSymmSSSR(mol):                  # the smallest rings (naphthalene: two six-rings)
+            ids = [order[k] for k in ring]
+            if atom_ids is None or set(ids) <= set(atom_ids):
+                out.append(ids)
+        return out
+
+    def fill_of_ring(self, ring):
+        """The id of the fill on exactly these atoms, or None."""
+        key = set(ring)
+        for i, f in self.fills.items():
+            if set(f.atoms) == key:
+                return i
+        return None
+
     def chain_points(self, x0, y0, x1, y1):
         """Zigzag chain from (x0, y0) toward (x1, y1) (direction snapped to 30 degrees): the points after the first."""
         ang = snap_angle(angle_of(x1 - x0, y1 - y0), 30)
@@ -609,6 +661,8 @@ class Doc:
                 ar = self.arrows[i]; pts += [(ar.x1, ar.y1), (ar.x2, ar.y2)]
             elif kind == 'shape' and i in self.shapes:
                 sh = self.shapes[i]; pts += [(sh.x1, sh.y1), (sh.x2, sh.y2)]
+            elif kind == 'grid' and i in self.grids:
+                pts.append((self.grids[i].x, self.grids[i].y))
             elif kind == 'text' and i in self.texts:
                 pts.append((self.texts[i].x, self.texts[i].y))
         return pts
@@ -624,13 +678,15 @@ class Doc:
             elif kind == 'shape' and i in self.shapes:
                 sh = self.shapes[i]
                 sh.x1, sh.y1 = fn(sh.x1, sh.y1); sh.x2, sh.y2 = fn(sh.x2, sh.y2)
+            elif kind == 'grid' and i in self.grids:
+                g = self.grids[i]; g.x, g.y = fn(g.x, g.y)
             elif kind == 'text' and i in self.texts:
                 t = self.texts[i]; t.x, t.y = fn(t.x, t.y)
 
     def all_items(self):
         return ([('atom', i) for i in self.atoms] + [('bond', i) for i in self.bonds] +
                 [('arrow', i) for i in self.arrows] + [('text', i) for i in self.texts] +
-                [('shape', i) for i in self.shapes])
+                [('shape', i) for i in self.shapes] + [('grid', i) for i in self.grids])
 
     # ------------------------------------------------------------------------------------------- files
     def to_dict(self, sel=None):
@@ -642,6 +698,7 @@ class Doc:
             atoms = self.atoms_of(sel)
             keep |= {('atom', a) for a in atoms}
             keep |= {('bond', i) for i, b in self.bonds.items() if b.a in atoms and b.b in atoms}
+            keep |= {('fill', i) for i, f in self.fills.items() if set(f.atoms) <= atoms}
 
         def items(kind):
             return [dict(id=i, **asdict(v)) for i, v in self.table(kind).items() if keep is None or (kind, i) in keep]
@@ -666,6 +723,18 @@ class Doc:
                     if item['a'] not in idmap or item['b'] not in idmap:
                         continue
                     item['a'], item['b'] = idmap[item['a']], idmap[item['b']]
+                if kind == 'fill':                          # a ring fill follows its atoms, or goes with them
+                    if any(a not in idmap for a in item['atoms']):
+                        continue
+                    item['atoms'] = [idmap[a] for a in item['atoms']]
+                if kind == 'grid':                          # its columns point at atoms: follow them, drop the lost
+                    for side in ('reactants', 'products'):
+                        cols = []
+                        for col in item.get(side, []):
+                            col = dict(col, atoms=[idmap[a] for a in col.get('atoms', []) if a in idmap])
+                            if col['atoms']:
+                                cols.append(col)
+                        item[side] = cols
                 for k in ('x', 'x1', 'x2'):
                     if k in item:
                         item[k] += dx
