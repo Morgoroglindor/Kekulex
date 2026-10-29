@@ -539,3 +539,37 @@ def test_edit_selected_from_menu(win):
     assert all(b.order == 2 for b in c.doc.bonds.values())
     c.edit_selected('atom', charge=1)
     assert all(a.charge == 1 for a in c.doc.atoms.values())
+
+
+# ------------------------------------------------------------------------------------------------ names (Openclatura)
+@pytest.mark.parametrize('smiles, name', [
+    ('CCO', 'ethanol'), ('OC(=O)c1ccccc1', 'benzoic acid'), ('O=[N+]([O-])c1ccccc1', 'nitrobenzene'),
+    ('C[C@H](N)C(=O)O', '(2S)-2-aminopropanoic acid'), ('CN(C)c1ccncc1', 'N,N-dimethylpyridin-4-amine'),
+    ('CC(C)Cc1ccc(cc1)C(C)C(=O)O', '2-[4-(2-methylpropyl)phenyl]propanoic acid'),      # ( ) inside [ ]
+])
+def test_iupac_name(smiles, name):
+    assert chem.iupac_name(_doc(smiles)) == name
+
+
+def test_iupac_name_counts_nicknames_and_stereo():
+    d, _b = ethyl_with('CO2H')                              # CH3-CO2H drawn with a label
+    assert chem.iupac_name(d) == 'acetic acid'
+    assert chem.iupac_name(_doc('C/C=C/C')) == '(2E)-but-2-ene'
+
+
+def test_nest_enclosures():
+    assert chem.nest_enclosures('1-(2-(3-(4-methylphenyl)propyl)phenyl)ethanol') == \
+        '1-{2-[3-(4-methylphenyl)propyl]phenyl}ethanol'
+    assert chem.nest_enclosures('(2S)-2-aminopropanoic acid') == '(2S)-2-aminopropanoic acid'
+    assert chem.nest_enclosures('2,6(1H)-dicarboxylic acid') == '2,6(1H)-dicarboxylic acid'
+
+
+def test_structure_to_name_caption(win):
+    c = win.canvas
+    c.set_doc(_doc('Oc1ccc(cc1)[N+](=O)[O-]'))
+    win.info.refresh()
+    assert win.info.name.text() == '4-nitrophenol'
+    win.structure_to_iupac()
+    assert [t.text for t in c.doc.texts.values()] == ['4-nitrophenol']
+    win.info.paste('name')
+    assert len(c.doc.texts) == 2

@@ -39,7 +39,10 @@ class InfoPanel(QtWidgets.QWidget):
         self.exact = self._value(); self.average = self._value(); self.charge = self._value()
         self.analysis = self._value(); self.analysis.setWordWrap(True)
         self.mz = self._value(); self.mz.setWordWrap(True)
-        for label, w, key in (('Exact mass:', self.exact, 'exact'), ('m/z:', self.mz, 'mz'),
+        self.name = self._value(); self.name.setWordWrap(True)
+        self.name.setToolTip('Systematic (IUPAC) name, generated offline by Openclatura from the IUPAC 2013 rules. '
+                             'Check it before publishing.')
+        for label, w, key in (('Name:', self.name, 'name'), ('Exact mass:', self.exact, 'exact'), ('m/z:', self.mz, 'mz'),
                               ('Mol. weight:', self.average, 'mw'), ('Elem. anal.:', self.analysis, 'analysis')):
             r = QtWidgets.QHBoxLayout(); r.addWidget(w, 1); r.addWidget(self._paste_button(key))
             form.addRow(label, r)
@@ -114,6 +117,11 @@ class InfoPanel(QtWidgets.QWidget):
         info = getattr(self, 'info', None)
         if not info or not info.atoms:
             return
+        if key == 'name':
+            if not getattr(self, 'iupac', ''):
+                return
+            self.canvas.add_caption_below(self._target(), self.iupac)
+            return
         if key == 'formula':
             text = f'Chemical Formula: {info.formula}{chem.charge_text(info.charge)}'
         elif key == 'exact':
@@ -172,6 +180,8 @@ class InfoPanel(QtWidgets.QWidget):
         ids = choices[k][1] if 0 <= k < len(choices) else None
         info = chem.analyse(self.canvas.doc, ids)
         self.show_info(info)
+        self.iupac = chem.iupac_name(self.canvas.doc, ids) if info.atoms and not info.errors else ''
+        self.name.setText(self.iupac or ('–' if not info.atoms else '(no name found)'))
         if self.tabs.currentIndex() == 1:                   # properties only while their tab is shown
             rows = chem.properties(self.canvas.doc, ids) if info.atoms else []
             self.props.setRowCount(len(rows))

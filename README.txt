@@ -47,9 +47,12 @@ ChemDraw-like features (0.3.0)
                        the selected atoms and bonds, a colour inside the selected structure's rings (Custom... any
                        colour, Remove takes it off). Kept in .sed files and in pictures; not written to .cdxml yet.
   Structure menu       clean up, expand label, analysis caption (formula, exact mass, m/z with isotopes, MW,
-                       elemental analysis), analyze stoichiometry, check structure, name <-> structure through
-                       PubChem (online, only when asked: sends the typed name or the structure's InChIKey),
-                       R/S and E/Z labels, atom numbers, reaction interpretation.
+                       elemental analysis), analyze stoichiometry, check structure, Convert Structure to Name
+                       (Ctrl+Alt+N: systematic IUPAC name made offline by Openclatura, MIT licence, rule-based on
+                       the IUPAC 2013 recommendations, stereo included; also shown as Name in the Analysis tab -
+                       check it before publishing), name -> structure and common names through PubChem (online,
+                       only when asked: sends the typed name or the structure's InChIKey), R/S and E/Z labels,
+                       atom numbers, reaction interpretation.
   Stoichiometry grid   Structure > Analyze stoichiometry puts a Reactants / Products grid under the reaction
                        (structures left of the arrow and above / below it are reactants, right of it products).
                        Double-click it to type values, with or without units (250 mg, 1.5 mmol, 2 mL, 0.5 M,

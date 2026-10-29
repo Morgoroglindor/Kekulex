@@ -323,3 +323,55 @@ def properties(doc, atom_ids=None):
         ('Rule of five', 'passes' if violations <= 1 else f'{violations} violations',
          'Lipinski: MW ≤ 500, logP ≤ 5, ≤ 5 donors, ≤ 10 acceptors (one violation allowed)'),
     ]
+
+
+# ------------------------------------------------------------------------------------------------ names
+def nest_enclosures(name):
+    """IUPAC nesting of enclosing marks, innermost out: ( ), [ ], { }, ( ) ... A name that already has [ ] or { }
+    is left alone. '2-(4-(2-methylpropyl)phenyl)propanoic acid' -> '2-[4-(2-methylpropyl)phenyl]propanoic acid'."""
+    if '[' in name or '{' in name or name.count('(') != name.count(')'):
+        return name
+    pairs, stack = {}, []
+    for k, ch in enumerate(name):
+        if ch == '(':
+            stack.append(k)
+        elif ch == ')':
+            if not stack:
+                return name
+            pairs[stack.pop()] = k
+    height = {}                                             # how many levels of enclosures sit inside each pair
+
+    def measure(open_k):
+        if open_k not in height:
+            inner = [o for o in pairs if open_k < o < pairs[open_k]]
+            height[open_k] = 1 + max((measure(o) for o in inner), default=-1)
+        return height[open_k]
+    for o in pairs:
+        measure(o)
+    out = list(name)
+    marks = ('()', '[]', '{}')
+    for o, c in pairs.items():
+        m = marks[height[o] % 3]
+        out[o], out[c] = m[0], m[1]
+    return ''.join(out)
+
+
+def iupac_name(doc, atom_ids=None):
+    """A systematic (IUPAC) name for the structure, made offline by Openclatura (rule-based, IUPAC 2013 rules), or
+    '' when it cannot name it. Nicknames count in full; stereo comes from the wedges and double-bond geometry."""
+    full, grown = doc.expanded()
+    ids = expand_ids(grown, [a for a in doc.atoms if atom_ids is None or a in atom_ids])
+    mol, _order, _err = to_mol(full, ids)
+    if mol is None:
+        return ''
+    try:
+        import openclatura
+        smiles = Chem.MolToSmiles(Chem.RemoveHs(mol))
+        name = openclatura.name_smiles(smiles)
+    except Exception:
+        import logging
+        logging.getLogger('structureeditor').warning('no name for %s', Chem.MolToSmiles(mol), exc_info=True)
+        return ''
+    import logging
+    logging.getLogger('structureeditor').debug('named %s: %s', Chem.MolToSmiles(mol), name)
+    return nest_enclosures(name.strip()) if name else ''
