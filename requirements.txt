@@ -1,0 +1,5 @@
+# What the program needs to run (exact versions, so every installer build uses the same libraries).
+# PyQt6 and pillow as in LC_viewer / Spectra viewer. Update deliberately: change a version, run the tests (pytest), then build.
+PyQt6==6.11.0
+rdkit==2026.9.1
+pillow==13.0.0
