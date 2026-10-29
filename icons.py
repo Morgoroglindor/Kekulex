@@ -162,11 +162,125 @@ def _image(p):
     p.drawEllipse(QPointF(16, 9), 1.6, 1.6)
 
 
+def _bold(p):
+    p.save(); pen = QPen(p.pen()); pen.setWidthF(4.0); pen.setCapStyle(Qt.PenCapStyle.FlatCap); p.setPen(pen)
+    p.drawLine(QPointF(5, 18), QPointF(19, 6)); p.restore()
+
+
+def _dashed(p):
+    pen = QPen(p.pen()); pen.setDashPattern([2.0, 1.6]); p.save(); p.setPen(pen)
+    p.drawLine(QPointF(4, 19), QPointF(20, 5)); p.restore()
+
+
+def _wavy(p):
+    path = QPainterPath(QPointF(4, 19))
+    for k in range(6):                                      # half waves along the diagonal
+        x0, y0 = 4 + 16 * k / 6, 19 - 14 * k / 6
+        x1, y1 = 4 + 16 * (k + 1) / 6, 19 - 14 * (k + 1) / 6
+        s = 2.6 if k % 2 == 0 else -2.6
+        path.quadTo((x0 + x1) / 2 + s * 0.66, (y0 + y1) / 2 + s * 0.75, x1, y1)
+    p.drawPath(path)
+
+
+def _hashed(p):
+    a, b = QPointF(4, 19), QPointF(20, 5)
+    for k in range(1, 7):
+        c = a + (b - a) * (k / 6.5)
+        p.drawLine(c + QPointF(-1.8, -2.1), c + QPointF(1.8, 2.1))
+
+
+def _cyclopentadiene(p):
+    pts = _poly(5, r=8.5)
+    p.drawPolygon(QPolygonF(pts))
+    inner = _poly(5, r=6.0)
+    for k in (0, 2):
+        a, b = inner[k], inner[(k + 1) % 5]
+        p.drawLine(a + (b - a) * 0.15, b - (b - a) * 0.15)
+
+
+def _head(p, x, y, dx):
+    p.save(); p.setBrush(p.pen().color())
+    p.drawPolygon(QPolygonF([QPointF(x, y), QPointF(x - 5.5 * dx, y - 3.5), QPointF(x - 4 * dx, y), QPointF(x - 5.5 * dx, y + 3.5)]))
+    p.restore()
+
+
+def _retro(p):
+    p.drawLine(QPointF(3, 10), QPointF(17, 10)); p.drawLine(QPointF(3, 14), QPointF(17, 14))
+    p.drawPolyline(QPolygonF([QPointF(15, 6), QPointF(21, 12), QPointF(15, 18)]))
+
+
+def _resonance(p):
+    p.drawLine(QPointF(6, 12), QPointF(18, 12))
+    _head(p, 21.5, 12, 1); _head(p, 2.5, 12, -1)
+
+
+def _arrow_dashed(p):
+    pen = QPen(p.pen()); pen.setDashPattern([2.2, 1.6]); p.save(); p.setPen(pen)
+    p.drawLine(QPointF(3, 12), QPointF(17.5, 12)); p.restore()
+    _head(p, 21.5, 12, 1)
+
+
+def _curved(half):
+    def draw(p):
+        path = QPainterPath(QPointF(3, 18))
+        path.quadTo(12, 0, 19, 14)
+        p.drawPath(path)
+        p.save(); p.setBrush(p.pen().color())
+        pts = [QPointF(20.5, 19), QPointF(15.5, 13.5), QPointF(19, 14.5)] if half else \
+            [QPointF(20.5, 19), QPointF(15.5, 13.5), QPointF(19, 14.5), QPointF(22.5, 12.5)]
+        p.drawPolygon(QPolygonF(pts)); p.restore()
+    return draw
+
+
+def _shape(kind):
+    def draw(p):
+        r = QRectF(4, 5, 16, 14)
+        if kind == 'rect':
+            p.drawRect(r)
+        elif kind == 'roundrect':
+            p.drawRoundedRect(r, 4, 4)
+        elif kind == 'oval':
+            p.drawEllipse(r)
+        elif kind == 'line':
+            p.drawLine(QPointF(4, 19), QPointF(20, 5))
+        elif kind == 'brackets':
+            p.drawPolyline(QPolygonF([QPointF(8, 4), QPointF(5, 4), QPointF(5, 20), QPointF(8, 20)]))
+            p.drawPolyline(QPolygonF([QPointF(16, 4), QPointF(19, 4), QPointF(19, 20), QPointF(16, 20)]))
+        elif kind == 'parens':
+            for x, s in ((8, 1), (16, -1)):
+                path = QPainterPath(QPointF(x, 4)); path.quadTo(x - 5 * s, 12, x, 20); p.drawPath(path)
+        else:
+            for x, s in ((8, 1), (16, -1)):
+                path = QPainterPath(QPointF(x, 4)); path.quadTo(x - 3 * s, 4, x - 3 * s, 8); path.lineTo(x - 3 * s, 10)
+                path.quadTo(x - 3 * s, 12, x - 5 * s, 12); path.quadTo(x - 3 * s, 12, x - 3 * s, 14)
+                path.lineTo(x - 3 * s, 16); path.quadTo(x - 3 * s, 20, x, 20); p.drawPath(path)
+    return draw
+
+
+def _align(how):
+    def draw(p):
+        for k, (w, y) in enumerate(((14, 6), (9, 11), (12, 16))):
+            x = 4 if how == 'left' else 20 - w if how == 'right' else 12 - w / 2
+            p.drawLine(QPointF(x, y), QPointF(x + w, y))
+    return draw
+
+
+def _templates(p):                                         # a stack of hexagons
+    p.drawPolygon(QPolygonF(_poly(6, cx=9, cy=9, r=5.5)))
+    p.drawPolygon(QPolygonF(_poly(6, cx=15, cy=15, r=5.5)))
+
+
 DRAW = {'select': _select, 'bond1': _bond(1), 'bond2': _bond(2), 'bond3': _bond(3), 'wedge': _wedge, 'hash': _hash,
         'chain': _chain, 'ring3': _ring(3), 'ring4': _ring(4), 'ring5': _ring(5), 'ring6': _ring(6), 'ring7': _ring(7),
         'ring8': _ring(8), 'benzene': _benzene, 'erase': _erase, 'charge+': _charge(1), 'charge-': _charge(-1),
         'arrow': _arrow, 'equilibrium': _equilibrium, 'text': _text, 'new': _new, 'open': _open, 'save': _save,
-        'undo': _undo, 'redo': _redo, 'copy': _copy, 'clean': _clean, 'fit': _fit, 'image': _image}
+        'undo': _undo, 'redo': _redo, 'copy': _copy, 'clean': _clean, 'fit': _fit, 'image': _image,
+        'bold': _bold, 'dashed': _dashed, 'wavy': _wavy, 'hashed': _hashed, 'cyclopentadiene': _cyclopentadiene,
+        'retro': _retro, 'resonance': _resonance, 'arrow_dashed': _arrow_dashed, 'curved': _curved(False),
+        'curved_half': _curved(True), 'rect': _shape('rect'), 'roundrect': _shape('roundrect'), 'oval': _shape('oval'),
+        'line': _shape('line'), 'brackets': _shape('brackets'), 'parens': _shape('parens'), 'braces': _shape('braces'),
+        'align_left': _align('left'), 'align_center': _align('center'), 'align_right': _align('right'),
+        'templates': _templates}
 
 
 def _pixmap(name, scale, color):

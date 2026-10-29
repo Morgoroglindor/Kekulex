@@ -2,11 +2,12 @@
 structure_editor.py - Structure editor: draw chemical structures for figures and slides and read off their formula,
 exact mass and the m/z of the usual LC-MS adducts.
 
-    python structure_editor.py [drawing.sed | file.mol | file.sdf | file.smi]
+    python structure_editor.py [drawing.sed | drawing.cdxml | file.cdx | file.mol | file.sdf | file.smi]
 
-Left: the drawing tools and elements. Middle: the drawing. Right: formula, masses, adduct m/z, SMILES, InChIKey.
-Drawings are saved as .sed (JSON); structures go out as MOL / SMILES, pictures as PNG, SVG and PDF or to the
-clipboard (Ctrl+Shift+C) for PowerPoint / Word.
+Left: the tool palette (drop-down groups for bonds, rings, arrows and shapes) and the elements. Top: the file / edit
+bar and the text style bar. Middle: the page. Right: formula, masses, elemental analysis, adduct m/z with isotope
+pattern, SMILES, InChIKey. Drawings are saved as .sed (JSON) or ChemDraw .cdxml; structures go out as MOL / SMILES,
+pictures as PNG, SVG and PDF or to the clipboard (Ctrl+Shift+C) for PowerPoint / Word.
 """
 import json
 import os
@@ -15,9 +16,12 @@ import sys
 from PyQt6 import QtCore, QtGui, QtWidgets
 
 import applog
+import cdxml
 import chem
 import icons
+import model
 import render
+import templates
 import theme
 from canvas import Canvas
 from info_panel import InfoPanel
@@ -26,17 +30,34 @@ from version import __version__
 
 APP_NAME = 'Structure editor'
 MIME = 'application/x-structure-editor'
-OPEN_FILTER = ('Structures (*.sed *.mol *.sdf *.sd *.smi *.smiles);;Structure editor drawings (*.sed);;'
-               'MOL / SDF files (*.mol *.sdf *.sd);;SMILES files (*.smi *.smiles *.txt);;All files (*)')
-TOOLS = (('select', 'Select / move  (Esc)'), None,
-         ('bond1', 'Single bond  (1 over a bond)'), ('bond2', 'Double bond  (2 over a bond)'),
-         ('bond3', 'Triple bond  (3 over a bond)'), ('wedge', 'Wedged bond (toward you)'),
-         ('hash', 'Hashed bond (away from you)'), ('chain', 'Chain'), None,
-         ('benzene', 'Benzene'), ('ring3', 'Cyclopropane'), ('ring4', 'Cyclobutane'), ('ring5', 'Cyclopentane'),
-         ('ring6', 'Cyclohexane'), ('ring7', 'Cycloheptane'), ('ring8', 'Cyclooctane'), None,
-         ('charge+', 'Positive charge  (+ over an atom)'), ('charge-', 'Negative charge  (- over an atom)'),
-         ('erase', 'Eraser  (Delete over an item)'), None,
-         ('arrow', 'Reaction arrow'), ('equilibrium', 'Equilibrium arrow'), ('text', 'Text'))
+OPEN_FILTER = ('Structures and drawings (*.sed *.cdxml *.cdx *.mol *.sdf *.sd *.smi *.smiles);;'
+               'Structure editor drawings (*.sed);;ChemDraw files (*.cdxml *.cdx);;MOL / SDF files (*.mol *.sdf *.sd);;'
+               'SMILES files (*.smi *.smiles *.txt);;All files (*)')
+SAVE_FILTER = 'Structure editor drawing (*.sed);;ChemDraw XML (*.cdxml)'
+# The palette: single tools, and drop-down groups (the button shows the last one used; click its arrow for the rest)
+TOOLS = (('select', 'Select / move  (Space)'), ('erase', 'Eraser  (Delete over an item)'), None,
+         ('bond1', 'Single bond  (x; 1 over a bond)'), ('bond2', 'Double bond  (2 over a bond)'),
+         ('group', 'bonds', [('wedge', 'Wedged bond (toward you)  (w over a bond)'),
+                             ('hash', 'Hashed wedged bond (away from you)  (h over a bond)'),
+                             ('bold', 'Bold bond  (b over a bond)'), ('hashed', 'Hashed bond  (Shift+H over a bond)'),
+                             ('dashed', 'Dashed bond / dashed second line  (d over a bond)'),
+                             ('wavy', 'Wavy bond  (y over a bond)'), ('bond3', 'Triple bond  (3 over a bond)')]),
+         ('chain', 'Chain  (Shift+X)'), None,
+         ('benzene', 'Benzene  (j)'),
+         ('group', 'rings', [('ring6', 'Cyclohexane'), ('ring5', 'Cyclopentane'), ('ring3', 'Cyclopropane'),
+                             ('ring4', 'Cyclobutane'), ('ring7', 'Cycloheptane'), ('ring8', 'Cyclooctane'),
+                             ('cyclopentadiene', 'Cyclopentadiene  (Shift+J)')]), None,
+         ('charge+', 'Positive charge  (+ over an atom)'), ('charge-', 'Negative charge  (- over an atom)'), None,
+         ('group', 'arrows', [('arrow', 'Reaction arrow  (e)'), ('equilibrium', 'Equilibrium arrow'),
+                              ('retro', 'Retrosynthetic arrow'), ('resonance', 'Resonance arrow'),
+                              ('arrow_dashed', 'Dashed arrow'), ('curved', 'Curved arrow (electron pair)'),
+                              ('curved_half', 'Fish-hook arrow (one electron)')]),
+         ('group', 'shapes', [('brackets', 'Brackets [ ]'), ('parens', 'Parentheses ( )'), ('braces', 'Braces { }'),
+                              ('rect', 'Rectangle'), ('roundrect', 'Rounded rectangle'), ('oval', 'Oval'),
+                              ('line', 'Line')]),
+         ('text', 'Text: captions, and atom labels typed in place  (t)'))
+COLORS = (('Black', ''), ('Red', '#E01E1E'), ('Blue', '#1E4FE0'), ('Green', '#1E8C3A'), ('Orange', '#E07B00'),
+          ('Magenta', '#C0189A'), ('Cyan', '#0096B4'), ('Grey', '#808080'))
 ELEMENTS = ('C', 'H', 'N', 'O', 'S', 'P', 'F', 'Cl', 'Br', 'I')
 STYLE_FIELDS = (('bond_length', 'Bond length (pt)', 4, 60, 0.1), ('line_width', 'Line width (pt)', 0.1, 5, 0.05),
                 ('bold_width', 'Bold / wedge width (pt)', 0.3, 10, 0.1), ('hash_spacing', 'Hash spacing (pt)', 0.5, 10, 0.1),
@@ -45,11 +66,11 @@ STYLE_FIELDS = (('bond_length', 'Bond length (pt)', 4, 60, 0.1), ('line_width', 
 
 
 class StyleDialog(QtWidgets.QDialog):
-    """Format > Drawing style: bond length, line widths, font (ACS 1996 is the default)."""
+    """File > Document settings: bond length, line widths, font, page (ACS 1996 is the default)."""
 
     def __init__(self, style, parent=None):
         super().__init__(parent)
-        self.setWindowTitle('Drawing style')
+        self.setWindowTitle('Document settings')
         theme.register_window(self)
         lay = QtWidgets.QFormLayout(self)
         self.spins = {}
@@ -61,6 +82,8 @@ class StyleDialog(QtWidgets.QDialog):
         lay.addRow('Font:', self.font)
         self.color_atoms = QtWidgets.QCheckBox('Colour heteroatoms (N blue, O red ...)')
         lay.addRow('', self.color_atoms)
+        self.page = QtWidgets.QComboBox(); self.page.addItems(list(render.PAGES))
+        lay.addRow('Page:', self.page)
         acs = QtWidgets.QPushButton('ACS 1996 (journals)')
         acs.clicked.connect(lambda: self.load(render.ACS_STYLE))
         box = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Ok |
@@ -75,11 +98,13 @@ class StyleDialog(QtWidgets.QDialog):
             s.setValue(float(style[key]))
         self.font.setCurrentFont(QtGui.QFont(style['font']))
         self.color_atoms.setChecked(bool(style['color_atoms']))
+        self.page.setCurrentText(style.get('page', 'A4'))
 
     def style(self):
         s = {k: sp.value() for k, sp in self.spins.items()}
         s['font'] = self.font.currentFont().family()
         s['color_atoms'] = self.color_atoms.isChecked()
+        s['page'] = self.page.currentText()
         return s
 
 
@@ -100,6 +125,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, dock)
         self.canvas.changed.connect(self._on_change)
         self.canvas.tool_key.connect(self.set_tool)
+        self.canvas.message.connect(lambda m: self.statusBar().showMessage(m, 6000))
+        self.canvas.selection_changed.connect(self._sync_style_bar)
         self.canvas.zoom_changed.connect(lambda z: self.zoom_label.setText(f'{z * 100:.0f} %'))
         self._build_tools()
         self._build_menus()
@@ -153,22 +180,37 @@ class MainWindow(QtWidgets.QMainWindow):
             line = QtWidgets.QFrame(); line.setFrameShape(QtWidgets.QFrame.Shape.HLine)
             g.addWidget(line, row, 0, 1, 2)
             row += 1
-        for t in TOOLS:
-            if t is None:
-                gap(); continue
-            name, tip = t
+        def tool_action(name, tip):
             a = QtGui.QAction(icons.icon(name), tip, self, checkable=True)
             a.icon_name = name
             a.triggered.connect(lambda _c=False, n=name: self.set_tool(n))
             group.addAction(a)
             self.tool_actions[name] = a
-            b = QtWidgets.QToolButton(); b.setDefaultAction(a); b.setIconSize(QtCore.QSize(24, 24)); b.setAutoRaise(True)
-            b.setFixedSize(34, 32)
+            return a
+        self.group_buttons = {}
+        for t in TOOLS:
+            if t is None:
+                gap(); continue
+            b = QtWidgets.QToolButton(); b.setIconSize(QtCore.QSize(24, 24)); b.setAutoRaise(True)
+            if t[0] == 'group':                             # a drop-down: shows the last tool picked from it
+                _g, gname, members = t
+                menu = QtWidgets.QMenu(b)
+                for name, tip in members:
+                    a = tool_action(name, tip)
+                    menu.addAction(a)
+                    a.triggered.connect(lambda _c=False, a=a, b=b: b.setDefaultAction(a))
+                b.setMenu(menu)
+                b.setPopupMode(QtWidgets.QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+                b.setDefaultAction(self.tool_actions[members[0][0]])
+                self.group_buttons[gname] = b
+            else:
+                b.setDefaultAction(tool_action(*t))
+            b.setFixedSize(40, 32)
             place(b)
         gap()
         for el in ELEMENTS + ('…',):
             b = QtWidgets.QToolButton()
-            b.setText(el); b.setCheckable(el != '…'); b.setFixedSize(34, 26); b.setAutoRaise(True)
+            b.setText(el); b.setCheckable(el != '…'); b.setFixedSize(40, 26); b.setAutoRaise(True)
             f = b.font(); f.setBold(True); b.setFont(f)
             b.setToolTip('Other element…' if el == '…' else f'{el}: click atoms to make them {el}')
             if el == '…':
@@ -208,6 +250,90 @@ class MainWindow(QtWidgets.QMainWindow):
         self.smiles_box.setMaximumWidth(360)
         self.smiles_box.returnPressed.connect(self.insert_smiles_box)
         top.addWidget(self.smiles_box)
+        self._build_style_bar()
+
+    def _build_style_bar(self):
+        """The text style bar: font size, bold, italic, formula (subscript numbers), alignment, colour - for the
+        selected captions, or for the next ones typed."""
+        self.addToolBarBreak()
+        bar = self.addToolBar('Style')
+        bar.setObjectName('style')
+        bar.setMovable(False)
+        bar.setIconSize(QtCore.QSize(18, 18))
+        bar.addWidget(QtWidgets.QLabel(' Text: '))
+        self.size_box = QtWidgets.QComboBox()
+        self.size_box.setEditable(True)
+        self.size_box.addItems(['Default'] + [str(v) for v in (6, 7, 8, 9, 10, 11, 12, 14, 16, 18, 24, 36)])
+        self.size_box.setToolTip('Caption size (pt); Default = the document font size')
+        self.size_box.setFixedWidth(100)
+        self.size_box.textActivated.connect(self._size_chosen)
+        bar.addWidget(self.size_box)
+        self.style_buttons = {}
+        for key, text, tip in (('bold', 'B', 'Bold'), ('italic', 'I', 'Italic'),
+                               ('formula', 'X₂', 'Formula: numbers after letters as subscripts (H2SO4)')):
+            b = QtWidgets.QToolButton(); b.setText(text); b.setCheckable(True); b.setToolTip(tip); b.setAutoRaise(True)
+            f = b.font(); f.setBold(key == 'bold'); f.setItalic(key == 'italic'); b.setFont(f)
+            b.toggled.connect(lambda v, k=key: self._style_changed(k, v))
+            bar.addWidget(b)
+            self.style_buttons[key] = b
+        bar.addSeparator()
+        self.align_group = QtGui.QActionGroup(self)
+        for key, tip in (('left', 'Align left'), ('center', 'Centre'), ('right', 'Align right')):
+            a = QtGui.QAction(icons.icon('align_' + key), tip, self, checkable=True)
+            a.icon_name = 'align_' + key
+            a.setChecked(key == 'left')
+            a.triggered.connect(lambda _c=False, k=key: self._style_changed('align', k))
+            self.align_group.addAction(a); bar.addAction(a)
+            self.style_buttons['align_' + key] = a
+        bar.addSeparator()
+        self.color_button = QtWidgets.QToolButton()
+        self.color_button.setText('Colour'); self.color_button.setAutoRaise(True)
+        self.color_button.setToolTip('Colour of the selected atoms, bonds, arrows, shapes and text')
+        self.color_button.setPopupMode(QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.color_button.setMenu(self._color_menu())
+        bar.addWidget(self.color_button)
+
+    def _color_menu(self, parent=None):
+        menu = QtWidgets.QMenu('&Color', parent or self)
+        for name, c in COLORS:
+            pm = QtGui.QPixmap(14, 14); pm.fill(QtGui.QColor(c or '#000000'))
+            a = menu.addAction(QtGui.QIcon(pm), name)
+            a.triggered.connect(lambda _c=False, c=c: self.canvas.set_color(c))
+        menu.addSeparator()
+        other = menu.addAction('Other…')
+        other.triggered.connect(self._other_color)
+        return menu
+
+    def _other_color(self):
+        c = QtWidgets.QColorDialog.getColor(QtGui.QColor('#000000'), self, 'Colour')
+        if c.isValid():
+            self.canvas.set_color(c.name().upper())
+
+    def _size_chosen(self, text):
+        try:
+            size = 0.0 if text.lower().startswith('default') else float(text.replace(',', '.'))
+        except ValueError:
+            return
+        self._style_changed('size', size)
+
+    def _style_changed(self, key, value):
+        if getattr(self, '_syncing', False):
+            return
+        self.canvas.set_text_props(**{key: value})
+
+    def _sync_style_bar(self):
+        """Show the style of the selected caption (or of the next one)."""
+        texts = self.canvas.selected('text')
+        props = ({k: getattr(self.canvas.doc.texts[texts[0]], k) for k in self.canvas.text_props} if texts
+                 else self.canvas.text_props)
+        self._syncing = True
+        try:
+            for k in ('bold', 'italic', 'formula'):
+                self.style_buttons[k].setChecked(bool(props[k]))
+            self.style_buttons['align_' + props['align']].setChecked(True)
+            self.size_box.setCurrentText(f"{props['size']:g}" if props['size'] else 'Default')
+        finally:
+            self._syncing = False
 
     def _build_menus(self):
         mb = self.menuBar()
@@ -222,6 +348,8 @@ class MainWindow(QtWidgets.QMainWindow):
         m.addAction(self._act('Export &picture (PNG, SVG, PDF)…', self.export_picture, 'Ctrl+E'))
         m.addAction(self._act('Export &MOL…', self.export_mol))
         m.addSeparator()
+        m.addAction(self._act('&Document settings…', self.style_dialog))
+        m.addSeparator()
         m.addAction(self._act('E&xit', self.close, 'Ctrl+Q'))
 
         m = mb.addMenu('&Edit')
@@ -234,23 +362,54 @@ class MainWindow(QtWidgets.QMainWindow):
         m.addAction(self._act('&Paste', self.paste, 'Ctrl+V'))
         m.addAction(self._act('&Delete', self.canvas.delete_selection))
         m.addAction(self._act('Select &all', self.canvas.select_all, 'Ctrl+A'))
-        m.addSeparator()
-        m.addAction(self._act('Flip &horizontally', lambda: self.canvas.transform_selection('flip_h'), 'Ctrl+Shift+H'))
-        m.addAction(self._act('Flip &vertically', lambda: self.canvas.transform_selection('flip_v'), 'Ctrl+Shift+V'))
-        m.addAction(self._act('Rotate 15° clockwise', lambda: self.canvas.transform_selection('rot+'), 'Ctrl+R'))
-        m.addAction(self._act('Rotate 15° counter-clockwise', lambda: self.canvas.transform_selection('rot-'), 'Ctrl+Shift+R'))
-        m.addAction(self.a_clean)
 
         m = mb.addMenu('&View')
         m.addAction(self._act('Zoom &in', lambda: self.canvas.set_zoom(self.canvas.zoom * 1.25), 'Ctrl+='))
         m.addAction(self._act('Zoom &out', lambda: self.canvas.set_zoom(self.canvas.zoom / 1.25), 'Ctrl+-'))
         m.addAction(self._act('&Actual size (100 %)', lambda: self.canvas.set_zoom(1.0), 'Ctrl+1'))
         m.addAction(self.a_fit)
+        m.addAction(self._act('Whole &page', self.canvas.show_page, 'Ctrl+Shift+0'))
+        m.addSeparator()
+        self.a_stereo = self._toggle(m, 'Show &stereochemistry (R/S, E/Z)', 'show_stereo')
+        self.a_numbers = self._toggle(m, 'Show atom &numbers', 'show_atom_numbers')
         m.addSeparator()
         theme.add_menu(self, m, self._retheme)
 
+        m = mb.addMenu('&Object')
+        al = m.addMenu('&Align')
+        for text, how, key in (('&Left edges', 'left', 'Ctrl+Alt+L'), ('Horizontal &centres', 'hcenter', 'Ctrl+Alt+H'),
+                               ('&Right edges', 'right', 'Ctrl+Alt+R'), ('&Top edges', 'top', 'Ctrl+Alt+T'),
+                               ('&Vertical centres', 'vcenter', 'Ctrl+Alt+V'), ('&Bottom edges', 'bottom', 'Ctrl+Alt+B')):
+            al.addAction(self._act(text, lambda h=how: self.canvas.align(h), key))
+        di = m.addMenu('&Distribute')
+        di.addAction(self._act('&Horizontally', lambda: self.canvas.distribute('h')))
+        di.addAction(self._act('&Vertically', lambda: self.canvas.distribute('v')))
+        m.addSeparator()
+        m.addAction(self._act('Flip &horizontally', lambda: self.canvas.transform_selection('flip_h'), 'Ctrl+Shift+H'))
+        m.addAction(self._act('Flip &vertically', lambda: self.canvas.transform_selection('flip_v'), 'Ctrl+Shift+V'))
+        m.addAction(self._act('Rotate 15° clockwise', lambda: self.canvas.transform_selection('rot+'), 'Ctrl+R'))
+        m.addAction(self._act('Rotate 15° counter-clockwise', lambda: self.canvas.transform_selection('rot-'), 'Ctrl+Shift+R'))
+        m.addAction(self._act('R&otate…', self.rotate_dialog))
+        m.addAction(self._act('&Scale…', self.scale_dialog))
+        m.addSeparator()
+        m.addMenu(self._color_menu(m))
+
+        m = mb.addMenu('&Structure')
+        m.addAction(self.a_clean)
+        m.addAction(self._act('&Expand label', self.canvas.expand_labels, 'Ctrl+Shift+E'))
+        m.addAction(self._act('Show &analysis (formula, mass, m/z …)', self.canvas.add_analysis, 'Ctrl+Shift+A'))
+        m.addSeparator()
+        m.addAction(self.a_stereo); m.addAction(self.a_numbers)
+
+        m = mb.addMenu('&Templates')
+        for cat, items in templates.TEMPLATES.items():
+            sub = m.addMenu(cat)
+            for name, smiles in items:
+                a = sub.addAction(name)
+                a.triggered.connect(lambda _c=False, s=smiles: self.insert_text(s))
+
         m = mb.addMenu('F&ormat')
-        m.addAction(self._act('Drawing &style…', self.style_dialog))
+        m.addAction(self._act('&Document settings (bond length, lines, font, page)…', self.style_dialog))
         res = m.addMenu('Picture &resolution (PNG, clipboard)')
         grp = QtGui.QActionGroup(self)
         cur = int(self.settings.value('dpi', 600))
@@ -268,6 +427,33 @@ class MainWindow(QtWidgets.QMainWindow):
         m.addAction(self._act('&Keyboard shortcuts', self.show_shortcuts, 'Ctrl+/'))
         m.addAction(self._act('&About', self.about))
 
+    def _toggle(self, menu, text, key):
+        """A checkable menu item for a document display option (kept in the drawing, as ChemDraw does)."""
+        a = QtGui.QAction(text, self, checkable=True)
+        a.triggered.connect(lambda v: self._set_doc_option(key, v))
+        menu.addAction(a)
+        return a
+
+    def _set_doc_option(self, key, value):
+        self.canvas.snapshot()
+        self.canvas.doc.style[key] = bool(value)
+        self.canvas.edited()
+
+    def _sync_toggles(self):
+        s = render.style_of(self.canvas.doc)
+        self.a_stereo.setChecked(bool(s['show_stereo']))
+        self.a_numbers.setChecked(bool(s['show_atom_numbers']))
+
+    def rotate_dialog(self):
+        deg, ok = QtWidgets.QInputDialog.getDouble(self, 'Rotate', 'Degrees (clockwise):', 90, -360, 360, 1)
+        if ok:
+            self.canvas.rotate(deg)
+
+    def scale_dialog(self):
+        pct, ok = QtWidgets.QInputDialog.getDouble(self, 'Scale', 'Percent:', 100, 5, 2000, 1)
+        if ok:
+            self.canvas.scale_selection(pct / 100)
+
     def _retheme(self):
         for a in list(self.tool_actions.values()) + self.findChildren(QtGui.QAction):
             name = getattr(a, 'icon_name', None)
@@ -283,14 +469,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(self.canvas.hint())
 
     def other_element(self):
-        from canvas import parse_label
         text, ok = QtWidgets.QInputDialog.getText(self, 'Element', 'Element symbol (e.g. Na, Si, B, Se):')
         if ok and text.strip():
-            el, _c = parse_label(text.strip())
-            if el is None:
+            what = model.parse_label(text.strip())
+            if what is None or what[0] != 'element':
                 QtWidgets.QMessageBox.warning(self, APP_NAME, f'"{text}" is not an element symbol.')
                 return
-            self.set_tool('atom', el)
+            self.set_tool('atom', what[1])
             for a in self.tool_actions.values():
                 if a.isChecked():
                     a.setChecked(False)
@@ -299,6 +484,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_change(self):
         self.dirty = True
         self._title()
+        self._sync_toggles()
         self.a_undo.setEnabled(bool(self.canvas.undo_stack))
         self.a_redo.setEnabled(bool(self.canvas.redo_stack))
 
@@ -359,10 +545,14 @@ class MainWindow(QtWidgets.QMainWindow):
             path, _f = QtWidgets.QFileDialog.getOpenFileName(self, 'Open', self._dir(), OPEN_FILTER)
             if not path:
                 return
+        notes = []
         try:
             if path.lower().endswith('.sed'):
                 with open(path, encoding='utf-8') as f:
                     doc = Doc.from_dict(json.load(f))
+                self.path = path
+            elif path.lower().endswith('.cdxml'):
+                doc, notes = cdxml.read(path)
                 self.path = path
             else:
                 doc = Doc()
@@ -382,13 +572,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self.dirty = False
         self._remember(path)
         self._title()
+        self._sync_toggles()
+        if path.lower().endswith('.cdx'):
+            notes.append('the structures only (a .cdx file is read through RDKit; save it as .cdxml in ChemDraw to '
+                         'keep text, arrows and layout)')
+        if notes:
+            self.statusBar().showMessage('Not brought over from ' + os.path.basename(path) + ': ' + '; '.join(notes), 12000)
 
     def save(self):
         if not self.path:
             return self.save_as()
         try:
-            with open(self.path, 'w', encoding='utf-8') as f:
-                json.dump(self.canvas.doc.to_dict(), f, indent=1)
+            if self.path.lower().endswith('.cdxml'):
+                cdxml.write(self.canvas.doc, self.path, f'{APP_NAME} {__version__}')
+            else:
+                with open(self.path, 'w', encoding='utf-8') as f:
+                    json.dump(self.canvas.doc.to_dict(), f, indent=1)
         except OSError as e:
             QtWidgets.QMessageBox.warning(self, APP_NAME, f'Could not save:\n{e}')
             return False
@@ -399,11 +598,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def save_as(self):
         start = self.path or os.path.join(self._dir(), 'structure.sed')
-        path, _f = QtWidgets.QFileDialog.getSaveFileName(self, 'Save drawing', start, 'Structure editor drawing (*.sed)')
+        path, flt = QtWidgets.QFileDialog.getSaveFileName(self, 'Save drawing', start, SAVE_FILTER)
         if not path:
             return False
-        if not path.lower().endswith('.sed'):
-            path += '.sed'
+        if not path.lower().endswith(('.sed', '.cdxml')):
+            path += '.cdxml' if 'cdxml' in flt else '.sed'
         self.path = path
         return self.save()
 
@@ -452,7 +651,7 @@ class MainWindow(QtWidgets.QMainWindow):
                                                          'MOL file (*.mol)')
         if not path:
             return
-        block, _order = doc.to_molblock(title=base)
+        block, _order = doc.expanded()[0].to_molblock(title=base)    # nicknames written out in full
         with open(path, 'w', encoding='utf-8', newline='\n') as f:
             f.write(block)
         self.statusBar().showMessage(f'Exported {path}', 5000)
@@ -568,7 +767,20 @@ class MainWindow(QtWidgets.QMainWindow):
                 'alternating double bonds where they fit.</li>'
                 '<li><b>Hotkeys</b> as in ChemDraw: point at an atom or a bond and press a key (o = O, n = N, '
                 'Shift+O = OMe, 2 = C=O, a = phenyl; over a bond 2 = double, a = fused benzene, w = wedge). '
-                'Help &gt; Keyboard shortcuts lists them all. Double-click an atom to type any element and charge.</li>'
+                'Help &gt; Keyboard shortcuts lists them all.</li>'
+                '<li><b>Labels</b>: double-click an atom (or click it with the Text tool, or press Enter over it) and '
+                'type: an element (N, Cl), with a charge (O-, NH3+), or a nickname (OMe, CO2H, Boc, Ph, NHAc, OTs …). '
+                'Nicknames stay short on the drawing and count in full for the formula; Structure &gt; Expand label '
+                'draws them out.</li>'
+                '<li><b>Captions</b>: Text tool, click and type; Esc or a click elsewhere ends. The style bar sets size, '
+                'bold, italic, formula subscripts (X₂), alignment and colour.</li>'
+                '<li><b>Arrows and shapes</b>: the drop-down buttons hold reaction, equilibrium, retrosynthetic, '
+                'resonance, dashed, curved and fish-hook arrows, brackets, rectangles, ovals and lines; drag to draw.</li>'
+                '<li><b>Object</b> menu: align, distribute, flip, rotate, scale, colour. <b>Structure</b> menu: clean up, '
+                'expand label, analysis caption, R/S and E/Z labels. <b>Templates</b>: rings, heterocycles, amino '
+                'acids, sugars, nucleobases, solvents.</li>'
+                '<li><b>ChemDraw files</b>: .cdxml opens and saves (structures, captions, arrows, shapes, style); '
+                '.cdx opens the structures.</li>'
                 '<li><b>Select</b>: click, Shift+click or drag a box; drag to move; drop one atom on another to merge '
                 'them. Arrow keys nudge.</li>'
                 '<li><b>SMILES box</b> (top): paste a SMILES and press Enter. Ctrl+V pastes SMILES or MOL text too.</li>'
@@ -606,12 +818,16 @@ class MainWindow(QtWidgets.QMainWindow):
         fuse = [(k, ('benzene' if n == 6 else 'cyclopentadiene') if ar else f'{n}-membered ring')
                 for k, (n, ar) in cv.FUSE_KEYS.items()]
         bonds = [('1 / 2 / 3', 'single / double / triple'), ('l / r / c', 'double bond line left / right / centred'),
-                 ('w', 'wedge (again: reverse)'), ('h, Shift+W, Shift+H', 'hashed wedge')] + fuse
+                 ('w', 'wedge (again: reverse)'), ('h, Shift+W', 'hashed wedge'), ('b', 'bold'),
+                 ('d', 'dashed (on a double bond: dashed second line)'), ('y', 'wavy'), ('Shift+H', 'hashed')] + fuse
         tools = [(k, v) for k, v in cv.TOOL_KEYS.items()]
         menu = [('Ctrl+Shift+K', 'clean up structure'), ('Ctrl+Alt+C', 'copy as SMILES'),
                 ('Ctrl+Shift+C', 'copy as picture'), ('Ctrl+Shift+H / V', 'flip horizontally / vertically'),
                 ('Ctrl+R / Ctrl+Shift+R', 'rotate 15°'), ('Ctrl+E', 'export picture'), ('Ctrl+I', 'insert SMILES / MOL'),
                 ('Ctrl+= / Ctrl+- / Ctrl+0', 'zoom in / out / fit'), ('+ / -', 'charge (over an atom)'),
+                ('Enter', 'type the label of the atom under the mouse'),
+                ('Ctrl+Shift+E', 'expand label'), ('Ctrl+Shift+A', 'show analysis'),
+                ('Ctrl+Alt+L / H / R', 'align left / centres / right'), ('Ctrl+Alt+T / V / B', 'align top / middles / bottom'),
                 ('Delete', 'delete the item under the mouse or the selection'), ('Esc', 'clear the selection')]
         html = ('<p>Point at an atom or bond with the mouse and press the key (with any tool). Capital = Shift.</p>'
                 '<table><tr><td valign="top">' + table('Over an atom: label', [(k, v) for k, v in atoms]) +

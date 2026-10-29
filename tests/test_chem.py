@@ -19,7 +19,7 @@ def canon(smiles):
 
 
 def ion(info, label):
-    return dict((lab, mz) for lab, _z, mz in info.ions)[label]
+    return {i.label: i.mz for i in info.ions}[label]
 
 
 def test_caffeine_masses():
@@ -44,7 +44,7 @@ def test_charged_structure_is_its_own_ion():
     assert info.charge == 1 and info.formula == 'C4H12N'
     assert ion(info, '[M]+') == pytest.approx(74.096426, abs=2e-6)
     assert ion(info, '[M+H]2+') == pytest.approx((74.096426 + 1.007276) / 2, abs=2e-6)
-    assert not any('−' in lab for lab, _z, _m in info.ions)
+    assert not any('−' in i.label for i in info.ions)
 
 
 @pytest.mark.parametrize('smiles', ['C[C@@H](N)C(=O)O', 'C/C=C/C', 'C/C=C\\C', 'c1ccc2ccccc2c1', 'O=C([O-])CC[NH3+]',

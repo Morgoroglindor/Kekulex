@@ -29,9 +29,11 @@ class InfoPanel(QtWidgets.QWidget):
         form = QtWidgets.QFormLayout()
         form.setContentsMargins(0, 0, 0, 0)
         self.exact = self._value(); self.average = self._value(); self.charge = self._value()
+        self.analysis = self._value(); self.analysis.setWordWrap(True)
         form.addRow('Exact mass:', self.exact)
         form.addRow('Average MW:', self.average)
         form.addRow('Charge:', self.charge)
+        form.addRow('Elem. anal.:', self.analysis)
         lay.addLayout(form)
         self.table = QtWidgets.QTableWidget(0, 2)
         self.table.setHorizontalHeaderLabels(['Ion', 'm/z'])
@@ -43,7 +45,17 @@ class InfoPanel(QtWidgets.QWidget):
         self.table.setToolTip('Monoisotopic m/z (electron mass included). Ctrl+C copies the selected rows.')
         QtGui.QShortcut(QtGui.QKeySequence.StandardKey.Copy, self.table, self.copy_rows,
                         context=QtCore.Qt.ShortcutContext.WidgetShortcut)
-        lay.addWidget(self.table, 1)
+        lay.addWidget(self.table, 2)
+        self.pattern_title = QtWidgets.QLabel('Isotope pattern')
+        lay.addWidget(self.pattern_title)
+        self.pattern = QtWidgets.QTableWidget(0, 2)
+        self.pattern.setHorizontalHeaderLabels(['m/z', '%'])
+        self.pattern.verticalHeader().hide()
+        self.pattern.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
+        self.pattern.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.pattern.setToolTip('Isotope peaks of the ion selected above (relative to the highest)')
+        lay.addWidget(self.pattern, 1)
+        self.table.currentCellChanged.connect(lambda r, _c, _pr, _pc: self.show_pattern(r))
         for label, attr in (('SMILES', 'smiles'), ('InChIKey', 'inchikey')):
             lay.addWidget(QtWidgets.QLabel(label + ':'))
             r = QtWidgets.QHBoxLayout()
@@ -110,26 +122,47 @@ class InfoPanel(QtWidgets.QWidget):
         self.info = info
         if not info.atoms:
             self.formula.setText('–')
-            for w in (self.exact, self.average, self.charge):
+            for w in (self.exact, self.average, self.charge, self.analysis):
                 w.setText('–')
-            self.table.setRowCount(0)
+            self.table.setRowCount(0); self.pattern.setRowCount(0)
             self.smiles.clear(); self.inchikey.clear(); self.errors.clear()
             return
         self.formula.setText(info.formula_html)
         self.exact.setText(f'{info.exact:.5f}')
         self.average.setText(f'{info.average:.3f}')
         self.charge.setText(chem.charge_text(info.charge) or '0')
+        self.analysis.setText(info.analysis)
+        self.table.blockSignals(True)
         self.table.setRowCount(len(info.ions))
-        for r, (label, z, mz) in enumerate(info.ions):
-            a = QtWidgets.QTableWidgetItem(label)
-            b = QtWidgets.QTableWidgetItem(f'{mz:.4f}')
+        for r, ion in enumerate(info.ions):
+            a = QtWidgets.QTableWidgetItem(ion.label)
+            b = QtWidgets.QTableWidgetItem(f'{ion.mz:.4f}')
             b.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
-            if z < 0:
+            if ion.z < 0:
                 a.setForeground(QtGui.QColor('#1565C0')); b.setForeground(QtGui.QColor('#1565C0'))
             self.table.setItem(r, 0, a); self.table.setItem(r, 1, b)
+        self.table.blockSignals(False)
+        row = min(max(self.table.currentRow(), 0), len(info.ions) - 1)
+        self.show_pattern(row)
         self.smiles.setText(info.smiles); self.smiles.setCursorPosition(0)
         self.inchikey.setText(info.inchikey); self.inchikey.setCursorPosition(0)
         self.errors.setText('\n'.join(info.errors))
+
+    def show_pattern(self, row):
+        """The isotope peaks of ion row (M, M+1, M+2 ... with their relative heights)."""
+        info = getattr(self, 'info', None)
+        if info is None or not (0 <= row < len(info.ions)):
+            self.pattern.setRowCount(0)
+            return
+        ion = info.ions[row]
+        peaks = chem.isotope_pattern(ion.counts, ion.z)
+        self.pattern_title.setText(f'Isotope pattern of {ion.label}')
+        self.pattern.setRowCount(len(peaks))
+        for r, (mz, pct) in enumerate(peaks):
+            for c, text in enumerate((f'{mz:.4f}', f'{pct:.1f}')):
+                it = QtWidgets.QTableWidgetItem(text)
+                it.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
+                self.pattern.setItem(r, c, it)
 
     def copy_rows(self):
         rows = sorted({i.row() for i in self.table.selectedIndexes()}) or range(self.table.rowCount())

@@ -1,29 +1,38 @@
 """
-canvas.py - the drawing area: the tools, the mouse and keyboard, selection, undo / redo.
+canvas.py - the drawing area: the page, the tools, the mouse and keyboard, typing labels and captions in place,
+selection, arranging (align, distribute, rotate, scale, flip, colour), undo / redo.
 
     c = Canvas(); c.set_tool('bond1'); c.doc (the Doc being edited); c.changed (signal after every edit)
 
-Tools: select, bond1 / bond2 / bond3 / wedge / hash, chain, ring3 ... ring8 / benzene, atom (with c.element),
-charge+ / charge-, erase, arrow / equilibrium, text.
+Tools: select, bond tools (BOND_TOOLS), chain, ring3 ... ring8 / benzene / cyclopentadiene, atom (with c.element),
+charge+ / charge-, erase, arrow tools (ARROW_TOOLS), shape tools (SHAPE_TOOLS), text.
 Mouse: click or drag with a bond tool (from an atom, a bond or empty space); ring tools fuse onto a bond or an atom;
-right / middle drag pans, Ctrl + wheel zooms, the wheel scrolls.
-Keyboard: ChemDraw's hotkeys (ATOM_KEYS, SPROUT_KEYS, FUSE_KEYS, TOOL_KEYS below), + / - charge, Delete.
+right / middle drag pans, Ctrl + wheel zooms, the wheel scrolls. Double-click: an atom's label or a caption is typed in
+place; a bond selects its whole structure.
+Keyboard: ChemDraw's hotkeys (ATOM_KEYS, SPROUT_KEYS, FUSE_KEYS, BOND_STYLE_KEYS, TOOL_KEYS below), + / - charge, Delete.
 """
 import math
 
 from PyQt6.QtCore import QPointF, QRectF, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QPainter, QPen, QBrush, QPainterPath
-from PyQt6.QtWidgets import QInputDialog, QWidget
+from PyQt6.QtGui import QBrush, QColor, QFont, QPainter, QPainterPath, QPen
+from PyQt6.QtWidgets import QLineEdit, QPlainTextEdit, QWidget
 
 import model
 import render
 import theme
 from model import Doc
 
-RING_TOOLS = {'ring3': 3, 'ring4': 4, 'ring5': 5, 'ring6': 6, 'ring7': 7, 'ring8': 8, 'benzene': 6}
-BOND_TOOLS = {'bond1': (1, ''), 'bond2': (2, ''), 'bond3': (3, ''), 'wedge': (1, 'wedge'), 'hash': (1, 'hash')}
+RING_TOOLS = {'ring3': (3, False), 'ring4': (4, False), 'ring5': (5, False), 'ring6': (6, False), 'ring7': (7, False),
+              'ring8': (8, False), 'benzene': (6, True), 'cyclopentadiene': (5, True)}
+BOND_TOOLS = {'bond1': (1, '', ''), 'bond2': (2, '', ''), 'bond3': (3, '', ''), 'wedge': (1, 'wedge', ''),
+              'hash': (1, 'hash', ''), 'bold': (1, '', 'bold'), 'dashed': (1, '', 'dashed'), 'wavy': (1, '', 'wavy'),
+              'hashed': (1, '', 'hashed')}
+ARROW_TOOLS = {'arrow': 'forward', 'equilibrium': 'equilibrium', 'retro': 'retro', 'resonance': 'resonance',
+               'arrow_dashed': 'dashed', 'curved': 'curved', 'curved_half': 'curved_half'}
+SHAPE_TOOLS = {k: k for k in model.SHAPE_KINDS}
+CURVE = 0.3                                                 # a new curved arrow's bend
 # Hotkeys laid out as in ChemDraw (case matters: Shift+key is the capital), so the same fingers work in both.
-# Over an atom - the atom becomes this element or group (groups are drawn out in full):
+# Over an atom - the atom becomes this element or nickname:
 ATOM_KEYS = {'c': 'C', 'C': 'Cl', 'n': 'N', 'w': 'N', 'o': 'O', 'q': 'O', 's': 'S', 'S': 'Si', 'p': 'P', 'f': 'F',
              'h': 'H', 'i': 'I', 'l': 'Cl', 'b': 'Br', 'B': 'B', 'L': 'Li', 'm': 'Me', 'e': 'Et', 'A': 'Ac',
              'E': 'CO2Me', 'F': 'CF3', 'H': 'Cbz', 'M': 'MgBr', 'N': 'NO2', 'O': 'OMe', 'Q': 'Fmoc', 'P': 'Ph',
@@ -33,29 +42,75 @@ SPROUT_KEYS = {'1': ('C', 1, ''), '0': ('C', 1, ''), '2': ('O', 2, ''), '3': ('P
                'J': ('Ph', 1, ''), '4': ('C', 1, 'wedge'), '5': ('C', 1, 'hash'), '6': ('Cy', 1, ''),
                '7': ('cPent', 1, ''), '8': ('C', 2, ''), 'z': ('ethynyl', 1, ''), 'v': ('cPr', 1, ''),
                'u': ('cBu', 1, ''), 'K': ('tBu', 1, ''), 'k': ('SO2', 1, ''), 'j': ('Cp', 1, '')}
-# Over a bond - a fused ring (size, aromatic)
+# Over a bond - a fused ring (size, aromatic); a drawing style
 FUSE_KEYS = {'v': (3, False), '4': (4, False), '5': (5, False), '6': (6, False), '7': (7, False), '8': (8, False),
              'a': (6, True), 'z': (5, True)}
+BOND_STYLE_KEYS = {'b': 'bold', 'B': 'bold', 'd': 'dashed', 'D': 'dashed', 'y': 'wavy', 'H': 'hashed'}
 # Anywhere else - a tool
-TOOL_KEYS = {'j': 'benzene', 'x': 'bond1', 'X': 'chain', 'e': 'arrow', 't': 'text', ' ': 'select'}
+TOOL_KEYS = {'j': 'benzene', 'J': 'cyclopentadiene', 'x': 'bond1', 'X': 'chain', 'e': 'arrow', 't': 'text',
+             ' ': 'select'}
 DRAG_PX = 4                                                 # the mouse must move this far for a press to be a drag
+PAGE_BG, PAGE_SHADOW = QColor('#C8CCD1'), QColor(0, 0, 0, 40)
 HINTS = {
-    'select': 'Click or drag a box to select (Shift adds); drag the selection to move it; double-click an atom to type its label.',
-    'bond1': 'Click an atom to add a bond, drag to place it; click a bond to make it double, then triple.',
-    'bond2': 'Click or drag to draw a double bond; click a double bond to move its second line.',
-    'bond3': 'Click or drag to draw a triple bond.',
-    'wedge': 'Wedge (toward you): the narrow end is where you start. Click a wedge again to reverse it.',
-    'hash': 'Hashed bond (away from you): the narrow end is where you start. Click it again to reverse it.',
+    'select': 'Click or drag a box to select (Shift adds); drag the selection to move it; double-click an atom or text '
+              'to type, a bond to select its structure.',
+    'bond': 'Click an atom to add a bond, drag to place it; click a bond to change it (single -> double -> triple).',
     'chain': 'Drag to draw a zigzag chain; the number of bonds follows the mouse.',
     'ring': 'Click empty space for a ring, a bond to fuse a ring onto it, an atom to attach a ring there.',
-    'atom': 'Click an atom to change its element, or empty space to place one. ChemDraw hotkeys (F1) work with any tool.',
+    'atom': 'Click an atom to change its element, or empty space to place one. ChemDraw hotkeys (Ctrl+/) work with any tool.',
     'charge+': 'Click an atom to add a positive charge (+ key with any tool).',
     'charge-': 'Click an atom to add a negative charge (- key with any tool).',
-    'erase': 'Click (or drag over) atoms, bonds, arrows and text to delete them.',
-    'arrow': 'Drag to draw a reaction arrow.',
-    'equilibrium': 'Drag to draw an equilibrium arrow.',
-    'text': 'Click to add text (captions, compound numbers); click text to edit it.',
+    'erase': 'Click (or drag over) atoms, bonds, arrows, shapes and text to delete them.',
+    'arrow': 'Drag to draw the arrow. Click a curved arrow with a curved-arrow tool to bend it the other way.',
+    'shape': 'Drag to draw the shape (brackets come as a pair around what you frame).',
+    'text': 'Click empty space to type a caption, click an atom to type its label (N, OH, OMe, Boc, CO2H ...).',
 }
+
+
+class _LabelEdit(QLineEdit):
+    def __init__(self, canvas):
+        super().__init__(canvas)
+        self.canvas = canvas
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.returnPressed.connect(lambda: canvas.commit_editor())
+
+    def keyPressEvent(self, e):
+        if e.key() == Qt.Key.Key_Escape:
+            self.canvas.commit_editor(cancel=True)
+            return
+        super().keyPressEvent(e)
+
+    def focusOutEvent(self, e):
+        super().focusOutEvent(e)
+        self.canvas.commit_editor()
+
+
+class _TextEdit(QPlainTextEdit):
+    def __init__(self, canvas):
+        super().__init__(canvas)
+        self.canvas = canvas
+        self.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.textChanged.connect(self.fit)
+
+    def fit(self):
+        fm = self.fontMetrics()
+        lines = self.toPlainText().split('\n')
+        w = max([fm.horizontalAdvance(line) for line in lines] + [60]) + 24
+        h = fm.lineSpacing() * max(1, len(lines)) + 14
+        self.resize(w, h)
+
+    def keyPressEvent(self, e):
+        if e.key() == Qt.Key.Key_Escape or (e.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
+                                            and e.modifiers() & Qt.KeyboardModifier.ControlModifier):
+            self.canvas.commit_editor()
+            return
+        super().keyPressEvent(e)
+
+    def focusOutEvent(self, e):
+        super().focusOutEvent(e)
+        self.canvas.commit_editor()
 
 
 class Canvas(QWidget):
@@ -63,20 +118,23 @@ class Canvas(QWidget):
     selection_changed = pyqtSignal()
     zoom_changed = pyqtSignal(float)
     tool_key = pyqtSignal(str)                              # a tool hotkey was pressed (the window switches tools)
+    message = pyqtSignal(str)                               # something to show in the status bar
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.doc = Doc()
         self.tool = 'bond1'
         self.element = 'N'
-        self.zoom = 2.0                                     # 1.0 = real size on the screen
-        self.origin = QPointF(200, 200)                     # where model (0, 0) is on the widget, px
+        self.zoom = 1.5                                     # 1.0 = real size on the screen
+        self.origin = QPointF(40, 40)                       # where the page's top-left corner is on the widget, px
         self.sel = set()                                    # {(kind, id)}
         self.hover = None                                   # (kind, id)
         self.undo_stack, self.redo_stack = [], []
         self.press = None                                   # dict while a mouse button is down
-        self.preview = None                                 # what a drag would add: ('bond' | 'chain' | 'arrow' ...)
+        self.preview = None                                 # what a drag would add: (kind, points)
         self.mouse = QPointF()
+        self.editor = None                                  # (widget, 'label' | 'text', id, x, y) while typing
+        self.text_props = dict(align='left', size=0.0, bold=False, italic=False, formula=False, color='')
         self._renderer = None
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -99,6 +157,14 @@ class Canvas(QWidget):
         s = self.scale()
         return QPointF(self.origin.x() + x * s, self.origin.y() + y * s)
 
+    def rect_px(self, r):
+        """A QRectF in pt (model x bond length) as widget pixels."""
+        k = self.px_per_pt()
+        return QRectF(self.origin.x() + r.left() * k, self.origin.y() + r.top() * k, r.width() * k, r.height() * k)
+
+    def page_size(self):
+        return render.PAGES.get(render.style_of(self.doc)['page'], render.PAGES['A4'])
+
     def renderer(self):
         if self._renderer is None:
             self._renderer = render.Renderer(self.doc)
@@ -106,11 +172,22 @@ class Canvas(QWidget):
 
     # ------------------------------------------------------------------------------------------- editing
     def set_doc(self, doc):
+        self.commit_editor(cancel=True)
         self.doc = doc
+        self.place_on_page()
         self.sel.clear(); self.hover = None
         self.undo_stack.clear(); self.redo_stack.clear()
         self.edited(record=False)
         self.fit()
+
+    def place_on_page(self):
+        """Move a drawing that sticks out past the page's top or left edge (from a MOL / SMILES file) onto the page."""
+        b = render.Renderer(self.doc).bounds()
+        if b.isNull() or (b.left() >= 0 and b.top() >= 0):
+            return
+        BL = render.style_of(self.doc)['bond_length']
+        dx, dy = (72 - b.left()) / BL, (72 - b.top()) / BL
+        self.doc.transform(self.doc.all_items(), lambda x, y: (x + dx, y + dy))
 
     def snapshot(self):
         self.undo_stack.append(self.doc.copy())
@@ -128,6 +205,7 @@ class Canvas(QWidget):
         self.selection_changed.emit()
 
     def undo(self):
+        self.commit_editor()
         if self.undo_stack:
             self.redo_stack.append(self.doc)
             self.doc = self.undo_stack.pop()
@@ -140,18 +218,26 @@ class Canvas(QWidget):
             self.edited()
 
     def set_tool(self, tool, element=None):
+        self.commit_editor()
         self.tool = tool
         if element:
             self.element = element
         self.preview = None
-        self.setCursor(Qt.CursorShape.ArrowCursor if tool == 'select' else Qt.CursorShape.CrossCursor)
+        self.setCursor(Qt.CursorShape.ArrowCursor if tool == 'select' else
+                       Qt.CursorShape.IBeamCursor if tool == 'text' else Qt.CursorShape.CrossCursor)
         self.update()
 
     def hint(self):
-        return HINTS['ring' if self.tool in RING_TOOLS else self.tool]
+        t = self.tool
+        key = ('ring' if t in RING_TOOLS else 'bond' if t in BOND_TOOLS else 'arrow' if t in ARROW_TOOLS else
+               'shape' if t in SHAPE_TOOLS else t)
+        return HINTS.get(key, '')
 
     def selected_atoms(self):
         return self.doc.atoms_of(self.sel)
+
+    def selected(self, kind):
+        return [i for k, i in self.sel if k == kind and i in self.doc.table(kind)]
 
     def set_selection(self, items):
         self.sel = set(items)
@@ -160,6 +246,14 @@ class Canvas(QWidget):
 
     def select_all(self):
         self.set_selection(self.doc.all_items())
+
+    def select_fragment(self, atom):
+        for comp in self.doc.fragments():
+            if atom in comp:
+                atoms = set(comp)
+                items = [('atom', a) for a in atoms] + [('bond', i) for i, b in self.doc.bonds.items() if b.a in atoms]
+                self.set_selection(items)
+                return
 
     def delete_selection(self):
         if not self.sel:
@@ -172,12 +266,13 @@ class Canvas(QWidget):
         self.edited()
 
     def insert_items(self, items_dict=None, mols=()):
-        """Paste: a to_dict() result and / or RDKit molecules, placed right of what is there; selects the new items."""
+        """Paste: a to_dict() result and / or RDKit molecules, placed right of what is there (on an empty page: near
+        its top left); selects the new items."""
         self.snapshot()
         r = render.Renderer(self.doc).bounds()
         BL = render.style_of(self.doc)['bond_length']
-        x = (r.right() / BL + 3) if not r.isNull() else 0.0
-        y = (r.center().y() / BL) if not r.isNull() else 0.0
+        x = (r.right() / BL + 3) if not r.isNull() else 108 / BL
+        y = (r.center().y() / BL) if not r.isNull() else 144 / BL
         new = []
         if items_dict:
             tmp = Doc.from_dict(items_dict)
@@ -199,36 +294,197 @@ class Canvas(QWidget):
         self.edited()
         self.ensure_visible()
 
+    # ------------------------------------------------------------------------------------------- arranging
+    def _targets(self):
+        return list(self.sel) or self.doc.all_items()
+
+    def _center(self, items):
+        pts = self.doc.points_of(items)
+        return ((min(p[0] for p in pts) + max(p[0] for p in pts)) / 2,
+                (min(p[1] for p in pts) + max(p[1] for p in pts)) / 2) if pts else None
+
     def transform_selection(self, fn_name):
         """'flip_h' | 'flip_v' | 'rot+' | 'rot-' on the selection (everything when nothing is selected)."""
-        items = list(self.sel) or self.doc.all_items()
-        pts = self.doc.points_of(items)
-        if not pts:
+        if fn_name in ('rot+', 'rot-'):
+            self.rotate(15 if fn_name == 'rot+' else -15)
             return
-        cx = (min(p[0] for p in pts) + max(p[0] for p in pts)) / 2
-        cy = (min(p[1] for p in pts) + max(p[1] for p in pts)) / 2
+        items = self._targets()
+        c = self._center(items)
+        if c is None:
+            return
+        cx, cy = c
         self.snapshot()
-        if fn_name == 'flip_h':
-            fn = lambda x, y: (2 * cx - x, y)
-        elif fn_name == 'flip_v':
-            fn = lambda x, y: (x, 2 * cy - y)
-        else:
-            a = math.radians(15 if fn_name == 'rot+' else -15)
-            c, s = math.cos(a), math.sin(a)
-            fn = lambda x, y: (cx + (x - cx) * c - (y - cy) * s, cy + (x - cx) * s + (y - cy) * c)
+        fn = (lambda x, y: (2 * cx - x, y)) if fn_name == 'flip_h' else (lambda x, y: (x, 2 * cy - y))
         self.doc.transform(items, fn)
-        if fn_name in ('flip_h', 'flip_v'):                 # wedges and hashes swap, so the flipped drawing is
-            for kind, i in items:                           # still the same molecule (not its mirror image)
-                if kind == 'bond' and self.doc.bonds[i].stereo:
-                    b = self.doc.bonds[i]
-                    b.stereo = 'hash' if b.stereo == 'wedge' else 'wedge'
+        for kind, i in items:                               # wedges and hashes swap, so the flipped drawing is still
+            if kind == 'bond' and self.doc.bonds[i].stereo:  # the same molecule (not its mirror image)
+                b = self.doc.bonds[i]
+                b.stereo = 'hash' if b.stereo == 'wedge' else 'wedge'
+            elif kind == 'arrow' and self.doc.arrows[i].bend:
+                self.doc.arrows[i].bend *= -1
+        self.edited()
+
+    def rotate(self, degrees):
+        items = self._targets()
+        c = self._center(items)
+        if c is None:
+            return
+        cx, cy = c
+        a = math.radians(degrees)
+        co, si = math.cos(a), math.sin(a)
+        self.snapshot()
+        self.doc.transform(items, lambda x, y: (cx + (x - cx) * co - (y - cy) * si, cy + (x - cx) * si + (y - cy) * co))
+        self.edited()
+
+    def scale_selection(self, factor):
+        items = self._targets()
+        c = self._center(items)
+        if c is None or factor <= 0:
+            return
+        cx, cy = c
+        self.snapshot()
+        self.doc.transform(items, lambda x, y: (cx + (x - cx) * factor, cy + (y - cy) * factor))
+        self.edited()
+
+    def object_groups(self):
+        """The selected objects for Align / Distribute: each structure (its selected atoms and bonds), each arrow,
+        text and shape - as [(items, QRectF in pt)]."""
+        rend = self.renderer()
+        atoms = self.selected_atoms()
+        groups = []
+        for comp in self.doc.fragments(atoms):
+            cs = set(comp)
+            items = [('atom', a) for a in cs] + [('bond', i) for i, b in self.doc.bonds.items() if b.a in cs and b.b in cs]
+            rect = QRectF()
+            for it in items:
+                r = rend.item_rect(*it)
+                rect = r if rect.isNull() else rect.united(r)
+            groups.append((items, rect))
+        for kind in ('arrow', 'text', 'shape'):
+            for i in self.selected(kind):
+                groups.append(([(kind, i)], rend.item_rect(kind, i)))
+        return groups
+
+    def align(self, how):
+        """'left' | 'hcenter' | 'right' | 'top' | 'vcenter' | 'bottom' the selected objects to each other."""
+        groups = self.object_groups()
+        if len(groups) < 2:
+            self.message.emit('Select two or more objects (structures, arrows, text, shapes) to align.')
+            return
+        BL = self.renderer().BL
+        rects = [r for _i, r in groups]
+        target = {'left': min(r.left() for r in rects), 'right': max(r.right() for r in rects),
+                  'top': min(r.top() for r in rects), 'bottom': max(r.bottom() for r in rects),
+                  'hcenter': sum(r.center().x() for r in rects) / len(rects),
+                  'vcenter': sum(r.center().y() for r in rects) / len(rects)}[how]
+        self.snapshot()
+        for items, r in groups:
+            cur = {'left': r.left(), 'right': r.right(), 'top': r.top(), 'bottom': r.bottom(),
+                   'hcenter': r.center().x(), 'vcenter': r.center().y()}[how]
+            d = (target - cur) / BL
+            dx, dy = (d, 0.0) if how in ('left', 'right', 'hcenter') else (0.0, d)
+            self.doc.transform(items, lambda x, y: (x + dx, y + dy))
+        self.edited()
+
+    def distribute(self, axis):
+        """Equal gaps between the selected objects, left to right ('h') or top to bottom ('v')."""
+        groups = self.object_groups()
+        if len(groups) < 3:
+            self.message.emit('Select three or more objects to distribute.')
+            return
+        BL = self.renderer().BL
+        key = (lambda g: g[1].center().x()) if axis == 'h' else (lambda g: g[1].center().y())
+        groups.sort(key=key)
+        size = (lambda r: r.width()) if axis == 'h' else (lambda r: r.height())
+        start = groups[0][1].left() if axis == 'h' else groups[0][1].top()
+        end = groups[-1][1].right() if axis == 'h' else groups[-1][1].bottom()
+        gap = (end - start - sum(size(r) for _i, r in groups)) / (len(groups) - 1)
+        self.snapshot()
+        pos = start
+        for items, r in groups:
+            cur = r.left() if axis == 'h' else r.top()
+            d = (pos - cur) / BL
+            dx, dy = (d, 0.0) if axis == 'h' else (0.0, d)
+            self.doc.transform(items, lambda x, y: (x + dx, y + dy))
+            pos += size(r) + gap
+        self.edited()
+
+    def set_color(self, color):
+        """Colour the selection ('' = back to the drawing's colour)."""
+        if not self.sel:
+            self.message.emit('Select what to colour first.')
+            return
+        self.snapshot()
+        atoms = self.selected_atoms()
+        for a in atoms:
+            self.doc.atoms[a].color = color
+        for i, b in self.doc.bonds.items():
+            if ('bond', i) in self.sel or (b.a in atoms and b.b in atoms):
+                b.color = color
+        for kind in ('arrow', 'text', 'shape'):
+            for i in self.selected(kind):
+                self.doc.table(kind)[i].color = color
+        self.edited()
+
+    def set_text_props(self, **props):
+        """Change the selected captions (and what new captions get)."""
+        self.text_props.update(props)
+        texts = self.selected('text')
+        if texts:
+            self.snapshot()
+            for i in texts:
+                for k, v in props.items():
+                    setattr(self.doc.texts[i], k, v)
+            self.edited()
+
+    def expand_labels(self):
+        """Write the selected nicknames (all, when nothing is selected) out as atoms."""
+        atoms = [a for a in (self.selected_atoms() or self.doc.atoms) if self.doc.atoms[a].label in model.NICKNAMES]
+        if not atoms:
+            self.message.emit('No nickname (OMe, Boc, Ph ...) to expand.')
+            return
+        self.snapshot()
+        for a in atoms:
+            self.doc.put_group(a, model.NICKNAMES[self.doc.atoms[a].label])
+        self.edited()
+
+    def add_analysis(self):
+        """A caption under each selected structure (all, when nothing is selected): formula, exact mass, m/z,
+        molecular weight and elemental analysis - like a property label."""
+        import chem
+        atoms = self.selected_atoms() or set(self.doc.atoms)
+        frags = [c for c in self.doc.fragments() if atoms & set(c)]
+        if not frags:
+            self.message.emit('Draw a structure first.')
+            return
+        self.snapshot()
+        rend = self.renderer()
+        BL = rend.BL
+        for comp in frags:
+            info = chem.analyse(self.doc, comp)
+            rect = QRectF()
+            for a in comp:
+                r = rend.item_rect('atom', a)
+                rect = r if rect.isNull() else rect.united(r)
+            below = rect.bottom()                           # under the structure and any caption already under it
+            for kind in ('text', 'shape', 'arrow'):
+                for i in self.doc.table(kind):
+                    r = rend.item_rect(kind, i)
+                    if r.right() > rect.left() and r.left() < rect.right() and rect.top() < r.top() < below + 3 * BL:
+                        below = max(below, r.bottom())
+            rect.setBottom(below)
+            peaks = chem.isotope_pattern(info.counts, 0)[:3]
+            mz = ', '.join(f'{m:.2f} ({p:.1f}%)' for m, p in peaks)
+            text = (f'Chemical Formula: {info.formula}{chem.charge_text(info.charge)}\nExact Mass: {info.exact:.2f}\n'
+                    f'm/z: {mz}\nMolecular Weight: {info.average:.2f}\nElemental Analysis: {info.analysis}')
+            self.doc.add_text(rect.center().x() / BL, (rect.bottom() + 6) / BL, text, align='center', formula=True)
         self.edited()
 
     def clean_up(self):
         """Lay out the selected structures (all, when nothing is selected) again with RDKit, keeping their place."""
         import chem
-        from rdkit.Chem import rdDepictor
         from rdkit import Chem
+        from rdkit.Chem import rdDepictor
         atoms = self.selected_atoms() or set(self.doc.atoms)
         frags = [set(c) for c in self.doc.fragments() if atoms & set(c)]   # whole structures, even if half selected
         if not frags:
@@ -276,11 +532,13 @@ class Canvas(QWidget):
         self.zoom_changed.emit(z)
 
     def fit(self):
-        """Show the whole drawing (at most 3x; an empty drawing: 2x with the origin near the middle)."""
+        """Show the whole drawing (at most 3x); an empty drawing: the top of the page at 150 %."""
         b = render.Renderer(self.doc).bounds()
         if b.isNull():
-            self.zoom = 2.0
-            self.origin = QPointF(self.width() / 2, self.height() / 2)
+            self.zoom = 1.5
+            W, _H = self.page_size()
+            k = self.px_per_pt()
+            self.origin = QPointF(max(20.0, (self.width() - W * k) / 2), 20.0)
         else:
             k = self.logicalDpiX() / 72.0
             z = min((self.width() - 60) / max(b.width() * k, 1), (self.height() - 60) / max(b.height() * k, 1), 3.0)
@@ -290,13 +548,19 @@ class Canvas(QWidget):
         self.update()
         self.zoom_changed.emit(self.zoom)
 
+    def show_page(self):
+        """The whole page in the window."""
+        W, H = self.page_size()
+        k = self.logicalDpiX() / 72.0
+        self.zoom = max(0.25, min((self.width() - 40) / (W * k), (self.height() - 40) / (H * k)))
+        kk = self.px_per_pt()
+        self.origin = QPointF((self.width() - W * kk) / 2, (self.height() - H * kk) / 2)
+        self.update()
+        self.zoom_changed.emit(self.zoom)
+
     def ensure_visible(self):
         b = render.Renderer(self.doc).bounds()
-        if b.isNull():
-            return
-        k = self.px_per_pt()
-        r = QRectF(self.origin.x() + b.left() * k, self.origin.y() + b.top() * k, b.width() * k, b.height() * k)
-        if not QRectF(self.rect()).contains(r):
+        if not b.isNull() and not QRectF(self.rect()).contains(self.rect_px(b)):
             self.fit()
 
     # ------------------------------------------------------------------------------------------- hit testing
@@ -309,12 +573,13 @@ class Canvas(QWidget):
             return ('atom', a)
         rend = self.renderer()
         BL = rend.BL
+        pt = QPointF(x * BL, y * BL)
         for i in self.doc.texts:
-            if rend.text_rect(i).adjusted(-1, -1, 1, 1).contains(QPointF(x * BL, y * BL)):
+            if rend.text_rect(i).adjusted(-1, -1, 1, 1).contains(pt):
                 return ('text', i)
-        for a2 in self.doc.atoms:                           # a label wider than the atom circle (NH2, OH)
+        for a2 in self.doc.atoms:                           # a label wider than the atom circle (NH2, OMe)
             r = rend.label_rect(a2)
-            if r is not None and r.adjusted(-1, -1, 1, 1).contains(QPointF(x * BL, y * BL)):
+            if r is not None and r.adjusted(-1, -1, 1, 1).contains(pt):
                 return ('atom', a2)
         b = self.doc.find_bond(x, y, max(0.14, 5 / s))
         if b is not None:
@@ -322,13 +587,20 @@ class Canvas(QWidget):
         ar = self.doc.find_arrow(x, y, max(0.15, 6 / s))
         if ar is not None:
             return ('arrow', ar)
+        sh = self.doc.find_shape(x, y, max(0.12, 5 / s))
+        if sh is not None:
+            return ('shape', sh)
         return None
 
     # ------------------------------------------------------------------------------------------- painting
     def paintEvent(self, _e):
         p = QPainter(self)
-        p.fillRect(self.rect(), QColor('#FFFFFF'))
+        p.fillRect(self.rect(), PAGE_BG)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        W, H = self.page_size()
+        page = self.rect_px(QRectF(0, 0, W, H))
+        p.fillRect(page.translated(3, 3), PAGE_SHADOW)
+        p.fillRect(page, QColor('#FFFFFF'))
         p.translate(self.origin)
         k = self.px_per_pt()
         p.scale(k, k)
@@ -342,36 +614,53 @@ class Canvas(QWidget):
         if self.hover and self.hover not in self.sel:
             self._mark(p, rend, *self.hover, soft, BL)
         rend.paint(p, errors=True)
+        if self.sel:                                        # the selection's frame, as a dashed box
+            r = QRectF()
+            for it in self.sel:
+                if it[1] in self.doc.table(it[0]):
+                    ir = rend.item_rect(*it)
+                    r = ir if r.isNull() else r.united(ir)
+            if not r.isNull():
+                p.setPen(QPen(accent, 0.6 / max(self.zoom, 0.3), Qt.PenStyle.DashLine)); p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawRect(r.adjusted(-3, -3, 3, 3))
         if self.preview:
             self._paint_preview(p, BL, accent)
         if self.press and self.press.get('band'):
             p.resetTransform()
-            pen = QPen(accent, 1, Qt.PenStyle.DashLine)
-            p.setPen(pen)
+            p.setPen(QPen(accent, 1, Qt.PenStyle.DashLine))
             fill = QColor(accent); fill.setAlpha(25)
             p.setBrush(fill)
             p.drawRect(QRectF(self.press['pos'], self.mouse).normalized())
         p.end()
 
     def _mark(self, p, rend, kind, i, color, BL):
+        if i not in self.doc.table(kind):
+            return
         p.setPen(Qt.PenStyle.NoPen); p.setBrush(QBrush(color))
-        if kind == 'atom' and i in self.doc.atoms:
+        if kind == 'atom':
             at = self.doc.atoms[i]
             r = rend.label_rect(i)
             if r is not None and rend.labels[i]['clip']:
                 p.drawRoundedRect(r.adjusted(-1.5, -1.5, 1.5, 1.5), 2, 2)
             else:
                 p.drawEllipse(QPointF(at.x * BL, at.y * BL), 0.2 * BL, 0.2 * BL)
-        elif kind == 'bond' and i in self.doc.bonds:
+        elif kind == 'bond':
             b = self.doc.bonds[i]
             pa, pb = self.doc.atoms[b.a], self.doc.atoms[b.b]
             p.setPen(QPen(color, 0.32 * BL, cap=Qt.PenCapStyle.RoundCap)); p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawLine(QPointF(pa.x * BL, pa.y * BL), QPointF(pb.x * BL, pb.y * BL))
-        elif kind == 'arrow' and i in self.doc.arrows:
-            a = self.doc.arrows[i]
+        elif kind == 'arrow':
+            path = QPainterPath()
+            pts = model.arrow_points(self.doc.arrows[i])
+            path.moveTo(pts[0][0] * BL, pts[0][1] * BL)
+            for x, y in pts[1:]:
+                path.lineTo(x * BL, y * BL)
             p.setPen(QPen(color, 0.3 * BL, cap=Qt.PenCapStyle.RoundCap)); p.setBrush(Qt.BrushStyle.NoBrush)
-            p.drawLine(QPointF(a.x1 * BL, a.y1 * BL), QPointF(a.x2 * BL, a.y2 * BL))
-        elif kind == 'text' and i in self.doc.texts:
+            p.drawPath(path)
+        elif kind == 'shape':
+            p.setPen(QPen(color, 0.25 * BL)); p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawPath(rend.shape_paths(i))
+        elif kind == 'text':
             p.drawRoundedRect(rend.text_rect(i).adjusted(-2, -1, 2, 1), 2, 2)
 
     def _paint_preview(self, p, BL, accent):
@@ -379,20 +668,110 @@ class Canvas(QWidget):
         pen = QPen(accent, 1.2, cap=Qt.PenCapStyle.RoundCap, join=Qt.PenJoinStyle.RoundJoin)
         p.setPen(pen); p.setBrush(Qt.BrushStyle.NoBrush)
         path = QPainterPath()
-        if kind in ('bond', 'chain', 'arrow', 'equilibrium', 'ring'):
-            path.moveTo(pts[0][0] * BL, pts[0][1] * BL)
-            for x, y in pts[1:]:
-                path.lineTo(x * BL, y * BL)
-            if kind == 'ring':
-                path.closeSubpath()
+        if kind in SHAPE_TOOLS:
+            tmp = Doc()
+            tmp.style = self.doc.style
+            tmp.add_shape(*pts[0], *pts[1], kind)
+            p.drawPath(render.Renderer(tmp).shape_paths(next(iter(tmp.shapes))))
+            return
+        if kind in ('curved', 'curved_half'):
+            ar = model.Arrow(*pts[0], *pts[1], kind, CURVE)
+            pts = model.arrow_points(ar)
+        path.moveTo(pts[0][0] * BL, pts[0][1] * BL)
+        for x, y in pts[1:]:
+            path.lineTo(x * BL, y * BL)
+        if kind == 'ring':
+            path.closeSubpath()
         p.drawPath(path)
         if kind == 'chain':
             p.resetTransform()
             p.setPen(accent)
             p.drawText(self.mouse + QPointF(12, -8), str(len(pts) - 1))
 
+    # ------------------------------------------------------------------------------------------- typing in place
+    def _editor_font(self, size_pt, bold=False, italic=False):
+        f = QFont(render.style_of(self.doc)['font'])
+        f.setPixelSize(max(9, round(size_pt * self.px_per_pt())))
+        f.setBold(bold); f.setItalic(italic)
+        return f
+
+    def edit_label(self, a):
+        """Type an atom's label in place (an element, a charge, OH / NH2, or a nickname such as OMe, Boc, CO2H)."""
+        self.commit_editor()
+        at = self.doc.atoms[a]
+        w = _LabelEdit(self)
+        w.setFont(self._editor_font(render.style_of(self.doc)['font_size']))
+        w.setText(at.label or (at.el + (render.Renderer._charge_text(at.charge).replace('−', '-') if at.charge else '')))
+        w.selectAll()
+        width = max(70, w.fontMetrics().horizontalAdvance('MMMMM'))
+        c = self.to_px(at.x, at.y)
+        w.setGeometry(round(c.x() - width / 2), round(c.y() - w.sizeHint().height() / 2), width, w.sizeHint().height())
+        self.editor = (w, 'label', a, at.x, at.y)
+        w.show(); w.setFocus()
+
+    def edit_text(self, i=None, x=0.0, y=0.0):
+        """Type a caption in place: a new one at (x, y), or caption i. Esc or a click elsewhere ends typing."""
+        self.commit_editor()
+        props = dict(self.text_props) if i is None else {k: getattr(self.doc.texts[i], k) for k in self.text_props}
+        size = props['size'] or render.style_of(self.doc)['font_size']
+        w = _TextEdit(self)
+        w.setFont(self._editor_font(size, props['bold'], props['italic']))
+        if i is not None:
+            t = self.doc.texts[i]
+            w.setPlainText(t.text)
+            r = self.rect_px(self.renderer().text_rect(i))
+            pos = r.topLeft()
+        else:
+            pos = self.to_px(x, y)
+        w.fit()
+        w.move(round(pos.x()) - 6, round(pos.y()) - 6)
+        self.editor = (w, 'text', i, x, y)
+        w.show(); w.setFocus()
+        w.selectAll() if i is not None else None
+
+    def commit_editor(self, cancel=False):
+        if not self.editor:
+            return
+        w, kind, i, x, y = self.editor
+        self.editor = None
+        text = w.text() if kind == 'label' else w.toPlainText()
+        w.hide(); w.deleteLater()
+        self.setFocus()
+        if cancel:
+            return
+        if kind == 'label':
+            if i not in self.doc.atoms or not text.strip():
+                return
+            what = model.parse_label(text)
+            if what is None:
+                self.message.emit(f'"{text}" is not an element or a known nickname (OMe, Boc, CO2H, Ph ...).')
+                return
+            self.snapshot()
+            at = self.doc.atoms[i]
+            if what[0] == 'nickname':
+                self.doc.set_nickname(i, what[1])
+            else:
+                at.label, at.el, at.charge = '', what[1], what[2]
+            self.edited()
+            return
+        if i is None:
+            if text.strip():
+                self.snapshot()
+                self.doc.add_text(x, y, text, **self.text_props)
+                self.edited()
+        elif i in self.doc.texts and text != self.doc.texts[i].text:
+            self.snapshot()
+            if text.strip():
+                self.doc.texts[i].text = text
+            else:
+                del self.doc.texts[i]
+            self.edited()
+
     # ------------------------------------------------------------------------------------------- mouse
     def mousePressEvent(self, e):
+        if self.editor:                                     # a click elsewhere ends typing (and does nothing else)
+            self.commit_editor()
+            return
         self.setFocus()
         if e.button() in (Qt.MouseButton.MiddleButton, Qt.MouseButton.RightButton):
             self.press = dict(pan=True, pos=e.position(), origin=QPointF(self.origin))
@@ -419,7 +798,6 @@ class Canvas(QWidget):
                     self.selection_changed.emit()
             if 'move' in self.press:
                 self.press['start'] = self.to_model(pos)
-                self.press['snap'] = None
             self.update()
         elif self.tool == 'erase':
             self.snapshot()
@@ -489,11 +867,15 @@ class Canvas(QWidget):
                 ex, ey = self._bond_end(sx, sy, x, y, pr['item'])
                 self.preview = ('bond', [(sx, sy), (ex, ey)])
             self.update()
-        elif t in ('arrow', 'equilibrium'):
+        elif t in ARROW_TOOLS:
             sx, sy = self.to_model(pr['pos'])
             ang = model.snap_angle(model.angle_of(x - sx, y - sy), 15)
             L = math.hypot(x - sx, y - sy)
-            self.preview = (t, [(sx, sy), (sx + L * math.cos(ang), sy + L * math.sin(ang))])
+            end = (x, y) if ARROW_TOOLS[t].startswith('curved') else (sx + L * math.cos(ang), sy + L * math.sin(ang))
+            self.preview = (ARROW_TOOLS[t], [(sx, sy), end])
+            self.update()
+        elif t in SHAPE_TOOLS:
+            self.preview = (t, [self.to_model(pr['pos']), (x, y)])
             self.update()
 
     def _start_point(self, item):
@@ -525,10 +907,11 @@ class Canvas(QWidget):
         for i, a in self.doc.arrows.items():
             if r.contains(self.to_px(a.x1, a.y1)) and r.contains(self.to_px(a.x2, a.y2)):
                 items.add(('arrow', i))
-        k = self.px_per_pt()
+        for i, s in self.doc.shapes.items():
+            if r.contains(self.to_px(s.x1, s.y1)) and r.contains(self.to_px(s.x2, s.y2)):
+                items.add(('shape', i))
         for i in self.doc.texts:
-            tr = self.renderer().text_rect(i)
-            if r.intersects(QRectF(self.origin.x() + tr.left() * k, self.origin.y() + tr.top() * k, tr.width() * k, tr.height() * k)):
+            if r.intersects(self.rect_px(self.renderer().text_rect(i))):
                 items.add(('text', i))
         self.sel = (self.sel | items) if add else items
         self.update()
@@ -567,20 +950,27 @@ class Canvas(QWidget):
             if kind == 'bond':
                 a = item[1] if item and item[0] == 'atom' else self.doc.atom_at_or_new(*pts[0])
                 b = self.doc.atom_at_or_new(*pts[1], exclude={a})
-                order, stereo = BOND_TOOLS[t]
+                order, stereo, style = BOND_TOOLS[t]
                 bid = self.doc.add_bond(a, b, order, stereo)
-                if bid is not None and self.doc.bonds[bid].a != a and stereo:
-                    bd = self.doc.bonds[bid]; bd.a, bd.b = bd.b, bd.a
+                if bid is not None:
+                    bd = self.doc.bonds[bid]
+                    if stereo and bd.a != a:
+                        bd.a, bd.b = bd.b, bd.a
+                    bd.style = style
             elif kind == 'chain':
                 prev = item[1] if item and item[0] == 'atom' else self.doc.atom_at_or_new(*pts[0])
                 for px, py in pts[1:]:
                     nxt = self.doc.atom_at_or_new(px, py, exclude={prev})
                     self.doc.add_bond(prev, nxt)
                     prev = nxt
-            elif kind in ('arrow', 'equilibrium'):
+            elif kind in model.ARROW_KINDS:
                 (x1, y1), (x2, y2) = pts
                 if math.hypot(x2 - x1, y2 - y1) > 0.3:
-                    self.doc.add_arrow(x1, y1, x2, y2, kind)
+                    self.doc.add_arrow(x1, y1, x2, y2, kind, CURVE if kind.startswith('curved') else 0.0)
+            elif kind in SHAPE_TOOLS:
+                (x1, y1), (x2, y2) = pts
+                if math.hypot(x2 - x1, y2 - y1) > 0.2:
+                    self.doc.add_shape(x1, y1, x2, y2, kind)
             self.edited()
             return
         if not pr['moved']:
@@ -589,36 +979,58 @@ class Canvas(QWidget):
     def click(self, item, x, y):
         """A click (no drag) with the current tool on item (None: empty space at model x, y)."""
         t, doc = self.tool, self.doc
-        if t in ('arrow', 'equilibrium'):
-            self.snapshot(); doc.add_arrow(x, y, x + 2.5, y, t); self.edited(); return
-        if t == 'text':
-            self.edit_text(item[1] if item and item[0] == 'text' else None, x, y)
+        if t in ARROW_TOOLS:
+            kind = ARROW_TOOLS[t]
+            if item and item[0] == 'arrow' and kind.startswith('curved') and doc.arrows[item[1]].kind.startswith('curved'):
+                self.snapshot(); doc.arrows[item[1]].bend *= -1; self.edited()
+                return
+            self.snapshot()
+            doc.add_arrow(x, y, x + 2.5, y, kind, CURVE if kind.startswith('curved') else 0.0)
+            self.edited()
             return
-        if item and item[0] == 'text':
+        if t in SHAPE_TOOLS:
+            return
+        if t == 'text':
+            if item and item[0] == 'atom':
+                self.edit_label(item[1])
+            else:
+                self.edit_text(item[1] if item and item[0] == 'text' else None, x, y)
+            return
+        if item and item[0] in ('text', 'shape', 'arrow'):
             return
         if t in BOND_TOOLS or t == 'chain':
-            order, stereo = BOND_TOOLS.get(t, (1, ''))
+            order, stereo, style = BOND_TOOLS.get(t, (1, '', ''))
             self.snapshot()
             if item is None:
                 a = doc.add_atom(x - math.cos(math.radians(30)) / 2, y + 0.25)
                 b = doc.atom_at_or_new(doc.atoms[a].x + math.cos(math.radians(30)), doc.atoms[a].y - 0.5, exclude={a})
-                doc.add_bond(a, b, order, stereo)
+                bid = doc.add_bond(a, b, order, stereo)
+                doc.bonds[bid].style = style
             elif item[0] == 'atom':
                 a = item[1]
                 ang = doc.next_bond_angle(a)
                 at = doc.atoms[a]
                 b = doc.atom_at_or_new(at.x + math.cos(ang), at.y + math.sin(ang), exclude={a})
                 bid = doc.add_bond(a, b, order, stereo)
-                if bid is not None and stereo and doc.bonds[bid].a != a:
-                    bd = doc.bonds[bid]; bd.a, bd.b = bd.b, bd.a
-            elif item[0] == 'bond':
+                if bid is not None:
+                    bd = doc.bonds[bid]
+                    if stereo and bd.a != a:
+                        bd.a, bd.b = bd.b, bd.a
+                    bd.style = style
+            else:
                 bd = doc.bonds[item[1]]
                 if stereo:
                     if bd.stereo == stereo:
                         bd.a, bd.b = bd.b, bd.a
-                    bd.stereo, bd.order = stereo, 1
-                elif t == 'bond1' or t == 'chain':
-                    bd.stereo = ''
+                    bd.stereo, bd.order, bd.style = stereo, 1, ''
+                elif style:
+                    if style == 'dashed' and bd.order == 2:  # a dashed second line (aromatic / partial bond)
+                        bd.style = '' if bd.style == 'dashed' else 'dashed'
+                    else:
+                        bd.style = '' if bd.style == style and bd.order == 1 else style
+                        bd.order, bd.stereo = 1, ''
+                elif t in ('bond1', 'chain'):
+                    bd.stereo = bd.style = ''
                     bd.order = 1 if bd.order == 3 else bd.order + 1
                     bd.side = None
                 elif t == 'bond2':
@@ -628,31 +1040,28 @@ class Canvas(QWidget):
                             bd.side = -cur if cur else 1
                         else:
                             bd.side = 0 if bd.side else None
-                    bd.order, bd.stereo = 2, ''
+                    bd.order, bd.stereo, bd.style = 2, '', ''
                 else:
-                    bd.order, bd.stereo = 3, ''
-            else:
-                self.undo_stack.pop(); return
+                    bd.order, bd.stereo, bd.style = 3, '', ''
             self.edited()
         elif t in RING_TOOLS:
-            n = RING_TOOLS[t]
+            n, aromatic = RING_TOOLS[t]
             self.snapshot()
             if item is None:
                 pts = doc.ring_points(n, (x, y), math.radians(-90))
             elif item[0] == 'bond':
                 pts = doc.ring_on_bond(item[1], n)
-            elif item[0] == 'atom':
-                pts = doc.ring_on_atom(item[1], n)
             else:
-                self.undo_stack.pop(); return
-            doc.add_ring(pts, aromatic=(t == 'benzene'))
+                pts = doc.ring_on_atom(item[1], n)
+            doc.add_ring(pts, aromatic=aromatic)
             self.edited()
         elif t == 'atom':
             self.snapshot()
             if item is None:
                 doc.add_atom(x, y, self.element)
             elif item[0] == 'atom':
-                doc.atoms[item[1]].el = self.element
+                at = doc.atoms[item[1]]
+                at.el, at.label = self.element, ''
             else:
                 self.undo_stack.pop(); return
             self.edited()
@@ -667,6 +1076,8 @@ class Canvas(QWidget):
             self.edit_label(item[1])
         elif item and item[0] == 'text':
             self.edit_text(item[1])
+        elif item and item[0] == 'bond' and self.tool == 'select':
+            self.select_fragment(self.doc.bonds[item[1]].a)
 
     def wheelEvent(self, e):
         d = e.angleDelta()
@@ -676,6 +1087,8 @@ class Canvas(QWidget):
             self.origin += QPointF(d.y() / 2, 0); self.update()
         else:
             self.origin += QPointF(d.x() / 2, d.y() / 2); self.update()
+        if self.editor:
+            self.commit_editor()
 
     def leaveEvent(self, _e):
         if self.hover:
@@ -696,6 +1109,9 @@ class Canvas(QWidget):
                 self.snapshot(); self.doc.remove(*h); self.hover = None; self.edited()
             else:
                 self.delete_selection()
+            return
+        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and h and h[0] == 'atom':
+            self.edit_label(h[1])                           # Enter over an atom: type its label (as in ChemDraw)
             return
         if key in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down) and self.sel:
             step = 0.5 if mods & Qt.KeyboardModifier.ShiftModifier else 0.05
@@ -724,10 +1140,10 @@ class Canvas(QWidget):
             if ch in ATOM_KEYS:
                 name = ATOM_KEYS[ch]
                 self.snapshot()
-                if name in model.GROUPS:
-                    doc.put_group(a, model.GROUPS[name])
+                if name in model.NICKNAMES:
+                    doc.set_nickname(a, name)
                 else:
-                    doc.atoms[a].el = name
+                    doc.atoms[a].el, doc.atoms[a].label = name, ''
                 self.edited()
                 return True
             if ch in SPROUT_KEYS:
@@ -743,7 +1159,7 @@ class Canvas(QWidget):
         if h and h[0] == 'bond':
             bd = doc.bonds[h[1]]
             if ch in ('1', '2', '3'):
-                self.snapshot(); bd.order, bd.stereo, bd.side = int(ch), '', None; self.edited()
+                self.snapshot(); bd.order, bd.stereo, bd.style, bd.side = int(ch), '', '', None; self.edited()
                 return True
             if ch in ('l', 'r', 'c') and bd.order == 2:     # second line left / right of the bond (on screen), centred
                 self.snapshot(); bd.side = {'l': -1, 'r': 1, 'c': 0}[ch]; self.edited()
@@ -752,12 +1168,21 @@ class Canvas(QWidget):
                 n, aromatic = FUSE_KEYS[ch]
                 self.snapshot(); doc.add_ring(doc.ring_on_bond(h[1], n), aromatic); self.edited()
                 return True
-            if ch in ('w', 'h', 'W', 'H'):
+            if ch in ('w', 'h', 'W'):
                 stereo = 'wedge' if ch == 'w' else 'hash'
                 self.snapshot()
                 if bd.stereo == stereo:
                     bd.a, bd.b = bd.b, bd.a
-                bd.stereo, bd.order = stereo, 1
+                bd.stereo, bd.order, bd.style = stereo, 1, ''
+                self.edited()
+                return True
+            if ch in BOND_STYLE_KEYS:
+                self.snapshot()
+                style = BOND_STYLE_KEYS[ch]
+                if style == 'dashed' and bd.order == 2:
+                    bd.style = 'dashed'
+                else:
+                    bd.style, bd.order, bd.stereo = style, 1, ''
                 self.edited()
                 return True
             return False
@@ -765,54 +1190,3 @@ class Canvas(QWidget):
             self.tool_key.emit(TOOL_KEYS[ch])
             return True
         return False
-
-    # ------------------------------------------------------------------------------------------- dialogs
-    def edit_label(self, a):
-        at = self.doc.atoms[a]
-        cur = at.el + (render.Renderer._charge_text(at.charge) if at.charge else '')
-        text, ok = QInputDialog.getText(self, 'Atom', 'Element (e.g. N, Cl, Na+, O-):', text=cur)
-        if not ok or not text.strip():
-            return
-        el, charge = parse_label(text.strip())
-        if el is None:
-            from PyQt6.QtWidgets import QMessageBox
-            QMessageBox.warning(self, 'Atom', f'"{text}" is not an element symbol.')
-            return
-        self.snapshot()
-        at.el, at.charge = el, charge
-        self.edited()
-
-    def edit_text(self, i=None, x=0.0, y=0.0):
-        cur = self.doc.texts[i].text if i is not None else ''
-        text, ok = QInputDialog.getMultiLineText(self, 'Text', 'Text:', cur)
-        if not ok:
-            return
-        self.snapshot()
-        if i is None:
-            if text.strip():
-                self.doc.add_text(x, y, text)
-        elif text.strip():
-            self.doc.texts[i].text = text
-        else:
-            del self.doc.texts[i]
-        self.edited()
-
-
-def parse_label(text):
-    """'Na+' -> ('Na', 1), 'o' -> ('O', 0), 'N2+' -> ('N', 2); (None, 0) when not an element."""
-    import re
-    from rdkit import Chem
-    m = re.fullmatch(r'([A-Za-z]{1,2})\s*(\d*)\s*([+\-−]*)', text)
-    if not m:
-        return None, 0
-    sym = m.group(1)[0].upper() + m.group(1)[1:].lower()
-    try:
-        if Chem.GetPeriodicTable().GetAtomicNumber(sym) <= 0:
-            return None, 0
-    except RuntimeError:
-        return None, 0
-    signs = m.group(3).replace('−', '-')
-    n = int(m.group(2)) if m.group(2) else (len(signs) or 0)
-    if not signs:
-        return sym, 0
-    return sym, n if signs[0] == '+' else -n

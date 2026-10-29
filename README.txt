@@ -24,6 +24,26 @@ Drawing (Help > How to draw in the program says the same)
   SMILES box       paste a SMILES, Enter. Ctrl+V pastes SMILES or MOL text. File > Open reads .mol, .sdf, .smi.
   Clean up         Ctrl+Shift+K lays the selected structures out again (RDKit), keeping stereo.
 
+ChemDraw-like features (0.3.0)
+  Page view            the drawing sits on an A4 / Letter page (File > Document settings); View > Whole page.
+  Nicknames            atom labels OMe, CO2H, Boc, Ph, NO2, OTs, TMS ... stay short on the drawing (turned round,
+                       MeO2C, when bonded on the right) and count in full for formula / SMILES / MOL;
+                       Structure > Expand label draws them out. Labels and captions are typed in place.
+  Bond styles          wedge, hashed wedge, bold, hashed, dashed (dashed second line on a double bond), wavy.
+  Arrows               reaction, equilibrium, retrosynthetic, resonance, dashed, curved, fish-hook (click a curved
+                       arrow again with its tool to bend it the other way).
+  Shapes               brackets, parentheses, braces, rectangle, rounded rectangle, oval, line.
+  Captions             size, bold, italic, formula style (H2SO4 with subscripts), left / centre / right, colour.
+  Object menu          align (edges, centres), distribute, flip, rotate (15 degrees or any angle), scale, colour.
+  Structure menu       clean up, expand label, analysis caption (formula, exact mass, m/z with isotopes, MW,
+                       elemental analysis), R/S and E/Z labels, atom numbers.
+  Templates            rings, heterocycles, L-amino acids, sugars, nucleobases, betalain building blocks,
+                       solvents and reagents.
+  ChemDraw files       .cdxml opens and saves (structures, nicknames, bond styles, captions, arrows, shapes, colours,
+                       document style); .cdx opens the structures (through RDKit). Not read: stoichiometry tables,
+                       TLC plates, orbitals, spectra.
+  Masses panel         elemental analysis, and the isotope pattern of the ion picked in the m/z table.
+
 Figures
   Ctrl+Shift+C copies the selection (or everything) as a picture (PNG + SVG on the clipboard) for PowerPoint / Word;
   Format > Picture resolution and Transparent background apply. File > Export picture writes PNG, SVG or PDF.
@@ -40,7 +60,9 @@ Masses (panel on the right)
 Files
   structure_editor.py   window + entry point: tools, menus, files, clipboard, export, style dialog
   canvas.py        the drawing area: tools, mouse, keys, selection, undo / redo, clean up
-  model.py         the drawing (atoms, bonds, arrows, text) and its geometry; MOL writing; RDKit molecules in
+  model.py         the drawing (atoms, bonds, arrows, text, shapes, nicknames) and its geometry; MOL; RDKit in
+  cdxml.py         ChemDraw .cdxml reading and writing
+  templates.py     the Templates menu (SMILES)
   render.py        drawing with QPainter in points (screen and every export the same); PNG / SVG / PDF
   chem.py          formula, masses, adducts, SMILES, InChIKey (RDKit); reading SMILES / MOL / SDF
   info_panel.py    the formula and masses panel

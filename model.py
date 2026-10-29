@@ -9,7 +9,8 @@ the MOL conversion RDKit reads.
     Doc.from_dict(doc.to_dict()) # the .sed file is this dict as JSON
 
 Coordinates are in bond lengths (one bond = 1.0) with y pointing down, as on the screen. Every item (atom, bond, arrow,
-text) has an integer id from one counter, so a selection can hold any of them as (kind, id).
+text, shape) has an integer id from one counter, so a selection can hold any of them as (kind, id). An atom with a
+label is a nickname (OMe, Boc ...): drawn as that text, written out in full by expanded() for the chemistry.
 """
 import copy
 import math
@@ -28,6 +29,61 @@ GROUPS = {'Me': 'C', 'Et': 'CC', 'Ac': 'C(C)=O', 'CO2Me': 'C(=O)OC', 'CF3': 'C(F
           'Boc': 'C(=O)OC(C)(C)C', 'N3': 'N=[N+]=[N-]', 'tBu': 'C(C)(C)C', 'SO2': 'S(=O)=O', 'Cy': 'C1CCCCC1',
           'cPent': 'C1CCCC1', 'cPr': 'C1CC1', 'cBu': 'C1CCC1', 'Cp': 'C1C=CC=C1', 'ethynyl': 'C#C'}
 ACCEPTS_CHARGE_AS_BOND = {'N', 'O', 'P', 'S', 'Se', 'As', 'F', 'Cl', 'Br', 'I'}   # N+ / O+ gain a bond, C+ / B- lose one
+# Nicknames: an atom shows the short label (OMe, Boc ...) and counts as the whole group for the formula and SMILES.
+NICKNAMES = {k: v for k, v in GROUPS.items() if k not in ('SO2', 'Cy', 'cPent', 'cPr', 'cBu', 'Cp', 'ethynyl')}
+NICKNAMES.update({
+    'CO2H': 'C(=O)O', 'COOH': 'C(=O)O', 'CO2Et': 'C(=O)OCC', 'CHO': 'C=O', 'CN': 'C#N', 'OAc': 'OC(C)=O',
+    'NHAc': 'NC(C)=O', 'SO3H': 'S(=O)(=O)O', 'SO2Me': 'S(=O)(=O)C', 'TMS': '[Si](C)(C)C', 'TBS': '[Si](C)(C)C(C)(C)C',
+    'TBDMS': '[Si](C)(C)C(C)(C)C', 'TIPS': '[Si](C(C)C)(C(C)C)C(C)C', 'Ts': 'S(=O)(=O)c1ccc(C)cc1',
+    'Ms': 'S(=O)(=O)C', 'Tf': 'S(=O)(=O)C(F)(F)F', 'OTs': 'OS(=O)(=O)c1ccc(C)cc1', 'OMs': 'OS(=O)(=O)C',
+    'OTf': 'OS(=O)(=O)C(F)(F)F', 'Bn': 'Cc1ccccc1', 'Bz': 'C(=O)c1ccccc1', 'OBn': 'OCc1ccccc1', 'OEt': 'OCC',
+    'OPh': 'Oc1ccccc1', 'iPr': 'C(C)C', 'nPr': 'CCC', 'Pr': 'CCC', 'nBu': 'CCCC', 'Bu': 'CCCC', 'sBu': 'C(C)CC',
+    'iBu': 'CC(C)C', 'NMe2': 'N(C)C', 'NEt2': 'N(CC)CC', 'NHMe': 'NC', 'NHBoc': 'NC(=O)OC(C)(C)C',
+    'NHCbz': 'NC(=O)OCc1ccccc1', 'NHFmoc': 'NC(=O)OCC1c2ccccc2-c2ccccc21', 'PMB': 'Cc1ccc(OC)cc1',
+    'THP': 'C1CCCCO1', 'CONH2': 'C(N)=O', 'SMe': 'SC', 'CH2OH': 'CO', 'CCl3': 'C(Cl)(Cl)Cl', 'Tr': 'C(c1ccccc1)(c1ccccc1)c1ccccc1',
+    'Ph3P': 'P(c1ccccc1)(c1ccccc1)c1ccccc1', 'PPh3': 'P(c1ccccc1)(c1ccccc1)c1ccccc1', 'Piv': 'C(=O)C(C)(C)C',
+    'OPiv': 'OC(=O)C(C)(C)C', 'Mes': 'c1c(C)cc(C)cc1C', 'Np': 'c1cccc2ccccc12', 'Py': 'c1ccccn1'})
+LABEL_TOKEN = r'[A-Z][a-z]*\d*'
+
+
+def _token_ok(tok):
+    letters = tok.rstrip('0123456789')
+    return letters in VALENCE or letters in NICKNAMES or letters in ('Mg', 'Li', 'Na', 'K', 'Zn', 'Cu')
+
+
+def label_order(label, reverse):
+    """The label's tokens in reading order for an atom bonded on its right (reverse: CO2Me -> MeO2C, NO2 -> O2N), and
+    the index of the token that sits on the atom. Labels that do not split into chemical tokens (TMS, iPr) never turn."""
+    import re
+    toks = re.findall(LABEL_TOKEN + r'|[^A-Z]+', label)
+    if reverse and len(toks) > 1 and ''.join(toks) == label and all(re.fullmatch(LABEL_TOKEN, t) and _token_ok(t) for t in toks):
+        return toks[::-1], len(toks) - 1
+    return toks, 0
+
+
+def parse_label(text):
+    """What a typed atom label means: ('element', symbol, charge) - also 'OH', 'NH2', 'Na+', 'O-' -, ('nickname', label)
+    or None."""
+    import re
+    from rdkit import Chem
+    text = text.strip().replace('−', '-')
+    if text in NICKNAMES:
+        return ('nickname', text)
+    m = re.fullmatch(r'([A-Za-z][a-z]?)(?:H\d*)?\s*(\d*)\s*([+\-]*)', text)
+    if m:
+        sym = m.group(1)[0].upper() + m.group(1)[1:].lower()
+        try:
+            ok = Chem.GetPeriodicTable().GetAtomicNumber(sym) > 0
+        except RuntimeError:
+            ok = False
+        if ok:
+            signs = m.group(3)
+            n = int(m.group(2)) if m.group(2) else len(signs)
+            return ('element', sym, 0 if not signs else (n if signs[0] == '+' else -n))
+    low = {k.lower(): k for k in NICKNAMES}
+    if text.lower() in low:
+        return ('nickname', low[text.lower()])
+    return None
 
 
 @dataclass
@@ -36,6 +92,8 @@ class Atom:
     y: float
     el: str = 'C'
     charge: int = 0
+    label: str = ''                                         # a nickname (OMe, Boc ...) shown instead of the element
+    color: str = ''                                         # '' = the drawing's colour
 
 
 @dataclass
@@ -45,25 +103,52 @@ class Bond:
     order: int = 1                                          # 1, 2, 3
     stereo: str = ''                                        # '' | 'wedge' | 'hash' (the narrow end is atom a)
     side: int | None = None                                 # double bond: None = automatic, 0 = centred, +1 / -1 = side
+    style: str = ''                                         # '' | 'bold' | 'dashed' | 'wavy' | 'hashed' (single bonds;
+    color: str = ''                                         # 'dashed' on a double bond dashes its second line)
+
+
+ARROW_KINDS = ('forward', 'equilibrium', 'retro', 'resonance', 'dashed', 'curved', 'curved_half')
 
 
 @dataclass
 class Arrow:
-    x1: float
+    x1: float                                               # tail
     y1: float
-    x2: float
+    x2: float                                               # head
     y2: float
-    kind: str = 'forward'                                   # 'forward' | 'equilibrium'
+    kind: str = 'forward'                                   # one of ARROW_KINDS
+    bend: float = 0.0                                       # curved arrows: bulge, as a fraction of the length (+/- side)
+    color: str = ''
 
 
 @dataclass
 class Text:
-    x: float                                                # top-left corner
+    x: float                                                # left edge, centre or right edge (align); top of the text
     y: float
     text: str
+    align: str = 'left'                                     # 'left' | 'center' | 'right'
+    size: float = 0.0                                       # pt; 0 = the drawing's font size
+    bold: bool = False
+    italic: bool = False
+    formula: bool = False                                   # numbers after letters drawn as subscripts (H2SO4)
+    color: str = ''
 
 
-KINDS = {'atom': Atom, 'bond': Bond, 'arrow': Arrow, 'text': Text}
+SHAPE_KINDS = ('rect', 'roundrect', 'oval', 'line', 'brackets', 'parens', 'braces')
+
+
+@dataclass
+class Shape:
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+    kind: str = 'rect'                                      # one of SHAPE_KINDS (brackets come as a pair)
+    color: str = ''
+
+
+KINDS = {'atom': Atom, 'bond': Bond, 'arrow': Arrow, 'text': Text, 'shape': Shape}
+PLURAL = {'atom': 'atoms', 'bond': 'bonds', 'arrow': 'arrows', 'text': 'texts', 'shape': 'shapes'}
 
 
 def angle_of(dx, dy):
@@ -81,6 +166,7 @@ class Doc:
         self.bonds = {}
         self.arrows = {}
         self.texts = {}
+        self.shapes = {}
         self.style = {}                                     # overrides of render.DEFAULT_STYLE
         self._next = 1
 
@@ -90,7 +176,8 @@ class Doc:
         return self._next - 1
 
     def table(self, kind):
-        return {'atom': self.atoms, 'bond': self.bonds, 'arrow': self.arrows, 'text': self.texts}[kind]
+        return {'atom': self.atoms, 'bond': self.bonds, 'arrow': self.arrows, 'text': self.texts,
+                'shape': self.shapes}[kind]
 
     def add_atom(self, x, y, el='C', charge=0):
         i = self._id()
@@ -113,14 +200,19 @@ class Doc:
         self.bonds[i] = Bond(a, b, order, stereo)
         return i
 
-    def add_arrow(self, x1, y1, x2, y2, kind='forward'):
+    def add_arrow(self, x1, y1, x2, y2, kind='forward', bend=0.0):
         i = self._id()
-        self.arrows[i] = Arrow(x1, y1, x2, y2, kind)
+        self.arrows[i] = Arrow(x1, y1, x2, y2, kind, bend)
         return i
 
-    def add_text(self, x, y, text):
+    def add_text(self, x, y, text, **props):
         i = self._id()
-        self.texts[i] = Text(x, y, text)
+        self.texts[i] = Text(x, y, text, **props)
+        return i
+
+    def add_shape(self, x1, y1, x2, y2, kind='rect'):
+        i = self._id()
+        self.shapes[i] = Shape(x1, y1, x2, y2, kind)
         return i
 
     def bond_between(self, a, b):
@@ -175,7 +267,7 @@ class Doc:
         del self.atoms[src]
 
     def is_empty(self):
-        return not (self.atoms or self.arrows or self.texts)
+        return not (self.atoms or self.arrows or self.texts or self.shapes)
 
     # ------------------------------------------------------------------------------------------- hit testing
     def find_atom(self, x, y, r, exclude=()):
@@ -200,7 +292,28 @@ class Doc:
     def find_arrow(self, x, y, r):
         best, bd = None, r
         for i, a in self.arrows.items():
-            d = seg_dist(x, y, a.x1, a.y1, a.x2, a.y2)
+            pts = arrow_points(a)
+            d = min(seg_dist(x, y, *pts[k], *pts[k + 1]) for k in range(len(pts) - 1))
+            if d <= bd:
+                best, bd = i, d
+        return best
+
+    def find_shape(self, x, y, r):
+        """A shape whose outline (not its inside: it may frame a structure) passes within r of (x, y)."""
+        best, bd = None, r
+        for i, s in self.shapes.items():
+            x1, x2 = sorted((s.x1, s.x2)); y1, y2 = sorted((s.y1, s.y2))
+            if s.kind == 'line':
+                d = seg_dist(x, y, s.x1, s.y1, s.x2, s.y2)
+            elif s.kind == 'oval':
+                rx, ry = max((x2 - x1) / 2, 1e-6), max((y2 - y1) / 2, 1e-6)
+                cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+                d = abs(math.hypot((x - cx) / rx, (y - cy) / ry) - 1) * min(rx, ry)
+            elif s.kind in ('brackets', 'parens', 'braces'):
+                d = min(seg_dist(x, y, x1, y1, x1, y2), seg_dist(x, y, x2, y1, x2, y2))
+            else:
+                d = min(seg_dist(x, y, x1, y1, x2, y1), seg_dist(x, y, x2, y1, x2, y2), seg_dist(x, y, x2, y2, x1, y2),
+                        seg_dist(x, y, x1, y2, x1, y1))
             if d <= bd:
                 best, bd = i, d
         return best
@@ -219,7 +332,10 @@ class Doc:
         return tuple(v - abs(at.charge) for v in base if v - abs(at.charge) >= 0)
 
     def implicit_h(self, a):
-        """Hydrogens the atom carries without them being drawn (0 for elements without a usual valence)."""
+        """Hydrogens the atom carries without them being drawn (0 for elements without a usual valence and for
+        nicknames, whose hydrogens are in the group)."""
+        if self.atoms[a].label:
+            return 0
         vals = self._valences(a)
         if not vals:
             return 0
@@ -230,6 +346,8 @@ class Doc:
         return 0
 
     def valence_error(self, a):
+        if self.atoms[a].label:
+            return False
         vals = self._valences(a)
         return bool(vals) and self.bond_sum(a) > max(vals)
 
@@ -416,7 +534,7 @@ class Doc:
         Chem.Kekulize(mol, clearAromaticFlags=True)
         at = self.atoms[a]
         first = mol.GetAtomWithIdx(0)
-        at.el, at.charge = first.GetSymbol(), first.GetFormalCharge()
+        at.el, at.charge, at.label = first.GetSymbol(), first.GetFormalCharge(), ''
         if mol.GetNumAtoms() == 1:
             return [a]
         rdDepictor.Compute2DCoords(mol)
@@ -439,6 +557,13 @@ class Doc:
             order = {Chem.BondType.DOUBLE: 2, Chem.BondType.TRIPLE: 3}.get(b.GetBondType(), 1)
             self.add_bond(ids[b.GetBeginAtomIdx()], ids[b.GetEndAtomIdx()], order)
         return ids
+
+    def set_nickname(self, a, label):
+        """Atom a shows label (a key of NICKNAMES); its element becomes the group's attaching atom."""
+        from rdkit import Chem
+        first = Chem.MolFromSmiles(NICKNAMES[label]).GetAtomWithIdx(0)
+        at = self.atoms[a]
+        at.label, at.el, at.charge = label, first.GetSymbol(), 0
 
     def sprout(self, a, smiles='C', order=1, stereo=''):
         """A new bond from atom a (in the next free direction) to the group smiles; returns the new atom."""
@@ -482,6 +607,8 @@ class Doc:
         for kind, i in sel:
             if kind == 'arrow' and i in self.arrows:
                 ar = self.arrows[i]; pts += [(ar.x1, ar.y1), (ar.x2, ar.y2)]
+            elif kind == 'shape' and i in self.shapes:
+                sh = self.shapes[i]; pts += [(sh.x1, sh.y1), (sh.x2, sh.y2)]
             elif kind == 'text' and i in self.texts:
                 pts.append((self.texts[i].x, self.texts[i].y))
         return pts
@@ -494,12 +621,16 @@ class Doc:
             if kind == 'arrow' and i in self.arrows:
                 ar = self.arrows[i]
                 ar.x1, ar.y1 = fn(ar.x1, ar.y1); ar.x2, ar.y2 = fn(ar.x2, ar.y2)
+            elif kind == 'shape' and i in self.shapes:
+                sh = self.shapes[i]
+                sh.x1, sh.y1 = fn(sh.x1, sh.y1); sh.x2, sh.y2 = fn(sh.x2, sh.y2)
             elif kind == 'text' and i in self.texts:
                 t = self.texts[i]; t.x, t.y = fn(t.x, t.y)
 
     def all_items(self):
         return ([('atom', i) for i in self.atoms] + [('bond', i) for i in self.bonds] +
-                [('arrow', i) for i in self.arrows] + [('text', i) for i in self.texts])
+                [('arrow', i) for i in self.arrows] + [('text', i) for i in self.texts] +
+                [('shape', i) for i in self.shapes])
 
     # ------------------------------------------------------------------------------------------- files
     def to_dict(self, sel=None):
@@ -514,8 +645,8 @@ class Doc:
 
         def items(kind):
             return [dict(id=i, **asdict(v)) for i, v in self.table(kind).items() if keep is None or (kind, i) in keep]
-        return dict(format='structure-editor', version=1, style=dict(self.style), atoms=items('atom'),
-                    bonds=items('bond'), arrows=items('arrow'), texts=items('text'))
+        return dict(format='structure-editor', version=2, style=dict(self.style),
+                    **{PLURAL[k]: items(k) for k in KINDS})
 
     @classmethod
     def from_dict(cls, d):
@@ -527,8 +658,8 @@ class Doc:
     def insert_dict(self, d, dx=0.0, dy=0.0, keep_ids=False):
         """Add the items of a to_dict() result (shifted by dx, dy); returns the new items as [(kind, id)]."""
         new, idmap = [], {}
-        for kind in ('atom', 'bond', 'arrow', 'text'):
-            for item in d.get(kind + 's', []):
+        for kind in KINDS:
+            for item in d.get(PLURAL[kind], []):
                 item = dict(item)
                 old = item.pop('id')
                 if kind == 'bond':
@@ -554,6 +685,21 @@ class Doc:
 
     def copy(self):
         return copy.deepcopy(self)
+
+    def expanded(self):
+        """A copy with every nickname written out as atoms (for the formula, SMILES, MOL): (doc, {atom id: the ids it
+        became}). Atom ids of the drawing stay the same in the copy."""
+        d = self.copy()
+        grown = {}
+        for a in [a for a, at in d.atoms.items() if at.label]:
+            smiles = NICKNAMES.get(d.atoms[a].label)
+            if smiles is None:
+                d.atoms[a].label = ''
+                continue
+            before = set(d.atoms)
+            d.put_group(a, smiles)
+            grown[a] = set(d.atoms) - before
+        return d, grown
 
     def to_molblock(self, atom_ids=None, title=''):
         """V2000 MOL block of the structures (or of the atoms in atom_ids) with wedges and charges; y up, 1.5 A bonds.
@@ -615,6 +761,21 @@ class Doc:
             self.bonds[i] = Bond(ids[b.GetBeginAtomIdx()], ids[b.GetEndAtomIdx()], order, stereo)
             new.append(('bond', i))
         return new
+
+
+def arrow_points(ar, n=16):
+    """Points along an arrow's shaft (a straight arrow: its two ends; a curved one: n + 1 points on its arc)."""
+    if ar.kind not in ('curved', 'curved_half') or not ar.bend:
+        return [(ar.x1, ar.y1), (ar.x2, ar.y2)]
+    cx, cy = curve_control(ar)
+    return [((1 - t) ** 2 * ar.x1 + 2 * (1 - t) * t * cx + t * t * ar.x2,
+             (1 - t) ** 2 * ar.y1 + 2 * (1 - t) * t * cy + t * t * ar.y2) for t in (k / n for k in range(n + 1))]
+
+
+def curve_control(ar):
+    """Control point of a curved arrow's quadratic arc: off the middle of tail-head by bend x length (left normal +)."""
+    dx, dy = ar.x2 - ar.x1, ar.y2 - ar.y1
+    return (ar.x1 + ar.x2) / 2 + dy * ar.bend * 2, (ar.y1 + ar.y2) / 2 - dx * ar.bend * 2
 
 
 def seg_dist(px, py, x1, y1, x2, y2):
