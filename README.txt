@@ -12,7 +12,14 @@ Drawing (Help > How to draw in the program says the same)
   Wedge / hash     start at the stereocentre; click again to reverse. The SMILES and InChIKey carry the stereo.
   Chain            drag; the number of bonds follows the mouse.
   Rings            empty space: new ring; a bond: fused ring (on the outside); an atom: attached ring.
-  Keys over atoms  C N O S P F H I, L = Cl, B = Br, + / - charge, Delete. Over bonds: 1 2 3.
+  Hotkeys          ChemDraw's layout (taken from ChemDraw's hotkeys.xml; case matters, capital = Shift). Point at:
+                   an atom - c n o s p f h i l(Cl) b(Br), Shift+C Cl, Shift+S Si, Shift+O OMe, Shift+N NO2,
+                     Shift+P Ph, y Boc, e Et, m Me ... (groups are drawn out in full); 1 bond, 2 C=O, 4 / 5 wedge /
+                     hash, 6 / 7 / v / u rings, a phenyl, z ethynyl, Shift+K tBu, 9 two methyls; + / - charge
+                   a bond - 1 2 3 order, l / r / c double-bond side, w wedge, h hash, 4-8 / v fused ring,
+                     a fused benzene, z fused cyclopentadiene
+                   nothing - j benzene tool, x bond, Shift+X chain, e arrow, t text, Space select
+                   Help > Keyboard shortcuts lists all of them.
   Select           click / Shift+click / drag a box; drag to move; drop one atom on another to merge; arrows nudge.
   SMILES box       paste a SMILES, Enter. Ctrl+V pastes SMILES or MOL text. File > Open reads .mol, .sdf, .smi.
   Clean up         Ctrl+Shift+K lays the selected structures out again (RDKit), keeping stereo.

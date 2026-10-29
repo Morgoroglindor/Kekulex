@@ -7,7 +7,7 @@ Tools: select, bond1 / bond2 / bond3 / wedge / hash, chain, ring3 ... ring8 / be
 charge+ / charge-, erase, arrow / equilibrium, text.
 Mouse: click or drag with a bond tool (from an atom, a bond or empty space); ring tools fuse onto a bond or an atom;
 right / middle drag pans, Ctrl + wheel zooms, the wheel scrolls.
-Keyboard over an atom: C N O S P F H I, L = Cl, B = Br, + / - charge, Delete; over a bond: 1 2 3 = order.
+Keyboard: ChemDraw's hotkeys (ATOM_KEYS, SPROUT_KEYS, FUSE_KEYS, TOOL_KEYS below), + / - charge, Delete.
 """
 import math
 
@@ -22,8 +22,22 @@ from model import Doc
 
 RING_TOOLS = {'ring3': 3, 'ring4': 4, 'ring5': 5, 'ring6': 6, 'ring7': 7, 'ring8': 8, 'benzene': 6}
 BOND_TOOLS = {'bond1': (1, ''), 'bond2': (2, ''), 'bond3': (3, ''), 'wedge': (1, 'wedge'), 'hash': (1, 'hash')}
-KEY_ELEMENTS = {Qt.Key.Key_C: 'C', Qt.Key.Key_N: 'N', Qt.Key.Key_O: 'O', Qt.Key.Key_S: 'S', Qt.Key.Key_P: 'P',
-                Qt.Key.Key_F: 'F', Qt.Key.Key_H: 'H', Qt.Key.Key_I: 'I', Qt.Key.Key_L: 'Cl', Qt.Key.Key_B: 'Br'}
+# Hotkeys laid out as in ChemDraw (case matters: Shift+key is the capital), so the same fingers work in both.
+# Over an atom - the atom becomes this element or group (groups are drawn out in full):
+ATOM_KEYS = {'c': 'C', 'C': 'Cl', 'n': 'N', 'w': 'N', 'o': 'O', 'q': 'O', 's': 'S', 'S': 'Si', 'p': 'P', 'f': 'F',
+             'h': 'H', 'i': 'I', 'l': 'Cl', 'b': 'Br', 'B': 'B', 'L': 'Li', 'm': 'Me', 'e': 'Et', 'A': 'Ac',
+             'E': 'CO2Me', 'F': 'CF3', 'H': 'Cbz', 'M': 'MgBr', 'N': 'NO2', 'O': 'OMe', 'Q': 'Fmoc', 'P': 'Ph',
+             'y': 'Boc', 'Z': 'N3'}
+# Over an atom - a new bond from it to (group, bond order, stereo); '9' adds two methyls
+SPROUT_KEYS = {'1': ('C', 1, ''), '0': ('C', 1, ''), '2': ('O', 2, ''), '3': ('Ph', 1, ''), 'a': ('Ph', 1, ''),
+               'J': ('Ph', 1, ''), '4': ('C', 1, 'wedge'), '5': ('C', 1, 'hash'), '6': ('Cy', 1, ''),
+               '7': ('cPent', 1, ''), '8': ('C', 2, ''), 'z': ('ethynyl', 1, ''), 'v': ('cPr', 1, ''),
+               'u': ('cBu', 1, ''), 'K': ('tBu', 1, ''), 'k': ('SO2', 1, ''), 'j': ('Cp', 1, '')}
+# Over a bond - a fused ring (size, aromatic)
+FUSE_KEYS = {'v': (3, False), '4': (4, False), '5': (5, False), '6': (6, False), '7': (7, False), '8': (8, False),
+             'a': (6, True), 'z': (5, True)}
+# Anywhere else - a tool
+TOOL_KEYS = {'j': 'benzene', 'x': 'bond1', 'X': 'chain', 'e': 'arrow', 't': 'text', ' ': 'select'}
 DRAG_PX = 4                                                 # the mouse must move this far for a press to be a drag
 HINTS = {
     'select': 'Click or drag a box to select (Shift adds); drag the selection to move it; double-click an atom to type its label.',
@@ -34,7 +48,7 @@ HINTS = {
     'hash': 'Hashed bond (away from you): the narrow end is where you start. Click it again to reverse it.',
     'chain': 'Drag to draw a zigzag chain; the number of bonds follows the mouse.',
     'ring': 'Click empty space for a ring, a bond to fuse a ring onto it, an atom to attach a ring there.',
-    'atom': 'Click an atom to change its element, or empty space to place one. Keys C N O S P F H I L(Cl) B(Br) work with any tool.',
+    'atom': 'Click an atom to change its element, or empty space to place one. ChemDraw hotkeys (F1) work with any tool.',
     'charge+': 'Click an atom to add a positive charge (+ key with any tool).',
     'charge-': 'Click an atom to add a negative charge (- key with any tool).',
     'erase': 'Click (or drag over) atoms, bonds, arrows and text to delete them.',
@@ -48,6 +62,7 @@ class Canvas(QWidget):
     changed = pyqtSignal()                                  # the drawing was edited
     selection_changed = pyqtSignal()
     zoom_changed = pyqtSignal(float)
+    tool_key = pyqtSignal(str)                              # a tool hotkey was pressed (the window switches tools)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -692,21 +707,64 @@ class Canvas(QWidget):
             return
         if mods & ~Qt.KeyboardModifier.ShiftModifier:
             return super().keyPressEvent(e)
-        if h and h[0] == 'atom':
-            at = self.doc.atoms[h[1]]
-            if key in KEY_ELEMENTS:
-                el = KEY_ELEMENTS[key]
-                self.snapshot(); at.el = el; self.edited(); return
-            if key in (Qt.Key.Key_Plus, Qt.Key.Key_Equal, Qt.Key.Key_Minus, Qt.Key.Key_Underscore):
-                self.snapshot()
-                at.charge += 1 if key in (Qt.Key.Key_Plus, Qt.Key.Key_Equal) else -1
-                self.edited(); return
-        if h and h[0] == 'bond' and key in (Qt.Key.Key_1, Qt.Key.Key_2, Qt.Key.Key_3):
-            self.snapshot()
-            bd = self.doc.bonds[h[1]]
-            bd.order, bd.stereo, bd.side = {Qt.Key.Key_1: 1, Qt.Key.Key_2: 2, Qt.Key.Key_3: 3}[key], '', None
-            self.edited(); return
+        if self.hotkey(e.text(), h):
+            return
         super().keyPressEvent(e)
+
+    def hotkey(self, ch, h):
+        """A ChemDraw-style hotkey ch over the hovered item h (None: a tool key). True if it did something."""
+        doc = self.doc
+        if not ch:
+            return False
+        if h and h[0] == 'atom':
+            a = h[1]
+            if ch in ('+', '=', '-', '_'):
+                self.snapshot(); doc.atoms[a].charge += 1 if ch in ('+', '=') else -1; self.edited()
+                return True
+            if ch in ATOM_KEYS:
+                name = ATOM_KEYS[ch]
+                self.snapshot()
+                if name in model.GROUPS:
+                    doc.put_group(a, model.GROUPS[name])
+                else:
+                    doc.atoms[a].el = name
+                self.edited()
+                return True
+            if ch in SPROUT_KEYS:
+                group, order, stereo = SPROUT_KEYS[ch]
+                self.snapshot()
+                doc.sprout(a, model.GROUPS.get(group, group), order, stereo)
+                self.edited()
+                return True
+            if ch == '9':
+                self.snapshot(); doc.sprout(a); doc.sprout(a); self.edited()
+                return True
+            return False
+        if h and h[0] == 'bond':
+            bd = doc.bonds[h[1]]
+            if ch in ('1', '2', '3'):
+                self.snapshot(); bd.order, bd.stereo, bd.side = int(ch), '', None; self.edited()
+                return True
+            if ch in ('l', 'r', 'c') and bd.order == 2:     # second line left / right of the bond (on screen), centred
+                self.snapshot(); bd.side = {'l': -1, 'r': 1, 'c': 0}[ch]; self.edited()
+                return True
+            if ch in FUSE_KEYS:
+                n, aromatic = FUSE_KEYS[ch]
+                self.snapshot(); doc.add_ring(doc.ring_on_bond(h[1], n), aromatic); self.edited()
+                return True
+            if ch in ('w', 'h', 'W', 'H'):
+                stereo = 'wedge' if ch == 'w' else 'hash'
+                self.snapshot()
+                if bd.stereo == stereo:
+                    bd.a, bd.b = bd.b, bd.a
+                bd.stereo, bd.order = stereo, 1
+                self.edited()
+                return True
+            return False
+        if h is None and ch in TOOL_KEYS:
+            self.tool_key.emit(TOOL_KEYS[ch])
+            return True
+        return False
 
     # ------------------------------------------------------------------------------------------- dialogs
     def edit_label(self, a):

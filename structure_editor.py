@@ -99,6 +99,7 @@ class MainWindow(QtWidgets.QMainWindow):
                          QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetFloatable)
         self.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, dock)
         self.canvas.changed.connect(self._on_change)
+        self.canvas.tool_key.connect(self.set_tool)
         self.canvas.zoom_changed.connect(lambda z: self.zoom_label.setText(f'{z * 100:.0f} %'))
         self._build_tools()
         self._build_menus()
@@ -264,6 +265,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         m = mb.addMenu('&Help')
         m.addAction(self._act('&How to draw', self.show_help, 'F1'))
+        m.addAction(self._act('&Keyboard shortcuts', self.show_shortcuts, 'Ctrl+/'))
         m.addAction(self._act('&About', self.about))
 
     def _retheme(self):
@@ -564,8 +566,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 '<li><b>Chain</b>: drag; the number of bonds follows the mouse.</li>'
                 '<li><b>Rings</b>: click empty space, a bond (fused ring) or an atom (attached ring). Benzene puts '
                 'alternating double bonds where they fit.</li>'
-                '<li><b>Atoms</b>: point at an atom and press C, N, O, S, P, F, H, I, L (Cl), B (Br), + or -; '
-                'or pick an element on the left and click atoms. Double-click an atom to type any element and charge.</li>'
+                '<li><b>Hotkeys</b> as in ChemDraw: point at an atom or a bond and press a key (o = O, n = N, '
+                'Shift+O = OMe, 2 = C=O, a = phenyl; over a bond 2 = double, a = fused benzene, w = wedge). '
+                'Help &gt; Keyboard shortcuts lists them all. Double-click an atom to type any element and charge.</li>'
                 '<li><b>Select</b>: click, Shift+click or drag a box; drag to move; drop one atom on another to merge '
                 'them. Arrow keys nudge.</li>'
                 '<li><b>SMILES box</b> (top): paste a SMILES and press Enter. Ctrl+V pastes SMILES or MOL text too.</li>'
@@ -579,6 +582,51 @@ class MainWindow(QtWidgets.QMainWindow):
         box = QtWidgets.QMessageBox(self)
         box.setWindowTitle('How to draw'); box.setTextFormat(QtCore.Qt.TextFormat.RichText); box.setText(text)
         box.exec()
+
+    def show_shortcuts(self):
+        """The hotkey tables, built from canvas.py's own tables (so they cannot drift apart)."""
+        import canvas as cv
+
+        def key(k):
+            return {' ': 'Space'}.get(k, f'Shift+{k}' if k.isalpha() and k.isupper() else k)
+
+        def table(title, rows):
+            cells = ''.join(f'<tr><td nowrap><b>{key(k)}</b>&nbsp;&nbsp;</td><td nowrap>{v}</td></tr>' for k, v in rows)
+            return f'<h4>{title}</h4><table cellspacing="0" cellpadding="2">{cells}</table>'
+        sprout = {'C': 'bond', 'O': 'C=O (2)', 'Ph': 'phenyl', 'Cy': 'cyclohexyl', 'cPent': 'cyclopentyl',
+                  'ethynyl': 'ethynyl', 'cPr': 'cyclopropyl', 'cBu': 'cyclobutyl', 'tBu': 'tert-butyl', 'SO2': 'sulfonyl',
+                  'Cp': 'cyclopentadienyl'}
+        atoms = sorted(cv.ATOM_KEYS.items(), key=lambda kv: (kv[0].lower(), kv[0].isupper()))
+        sprouts = []
+        for k, (g, order, stereo) in cv.SPROUT_KEYS.items():
+            what = 'wedged bond' if stereo == 'wedge' else 'hashed bond' if stereo == 'hash' else \
+                '=CH2 (methylidene)' if order == 2 and g == 'C' else sprout.get(g, g)
+            sprouts.append((k, what))
+        sprouts.append(('9', 'two methyls'))
+        fuse = [(k, ('benzene' if n == 6 else 'cyclopentadiene') if ar else f'{n}-membered ring')
+                for k, (n, ar) in cv.FUSE_KEYS.items()]
+        bonds = [('1 / 2 / 3', 'single / double / triple'), ('l / r / c', 'double bond line left / right / centred'),
+                 ('w', 'wedge (again: reverse)'), ('h, Shift+W, Shift+H', 'hashed wedge')] + fuse
+        tools = [(k, v) for k, v in cv.TOOL_KEYS.items()]
+        menu = [('Ctrl+Shift+K', 'clean up structure'), ('Ctrl+Alt+C', 'copy as SMILES'),
+                ('Ctrl+Shift+C', 'copy as picture'), ('Ctrl+Shift+H / V', 'flip horizontally / vertically'),
+                ('Ctrl+R / Ctrl+Shift+R', 'rotate 15°'), ('Ctrl+E', 'export picture'), ('Ctrl+I', 'insert SMILES / MOL'),
+                ('Ctrl+= / Ctrl+- / Ctrl+0', 'zoom in / out / fit'), ('+ / -', 'charge (over an atom)'),
+                ('Delete', 'delete the item under the mouse or the selection'), ('Esc', 'clear the selection')]
+        html = ('<p>Point at an atom or bond with the mouse and press the key (with any tool). Capital = Shift.</p>'
+                '<table><tr><td valign="top">' + table('Over an atom: label', [(k, v) for k, v in atoms]) +
+                '</td><td width="24"></td><td valign="top">' + table('Over an atom: add', sprouts) +
+                table('Over a bond', bonds) + '</td><td width="24"></td><td valign="top">' +
+                table('Anywhere: tool', [(k, v.replace('bond1', 'bond').replace('benzene', 'benzene ring'))
+                                         for k, v in tools]) + table('Menus and others', menu) + '</td></tr></table>')
+        d = QtWidgets.QDialog(self)
+        d.setWindowTitle('Keyboard shortcuts')
+        theme.register_window(d)
+        lay = QtWidgets.QVBoxLayout(d)
+        view = QtWidgets.QTextBrowser(); view.setHtml(html)
+        lay.addWidget(view)
+        d.resize(900, 640)
+        d.exec()
 
     def about(self):
         from rdkit import rdBase

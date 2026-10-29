@@ -20,7 +20,13 @@ MOL_BOND = 1.5                                              # bond length writte
 
 # Usual valences (the lowest that fits the bonds is used) and what a charge does to them
 VALENCE = {'H': (1,), 'B': (3,), 'C': (4,), 'N': (3, 5), 'O': (2,), 'F': (1,), 'Si': (4,), 'P': (3, 5), 'S': (2, 4, 6),
-           'Cl': (1, 3, 5, 7), 'Se': (2, 4, 6), 'Br': (1, 3, 5), 'I': (1, 3, 5, 7), 'As': (3, 5), 'Te': (2, 4, 6)}
+           'Cl': (1, 3, 5, 7), 'Se': (2, 4, 6), 'Br': (1, 3, 5), 'I': (1, 3, 5, 7), 'As': (3, 5), 'Te': (2, 4, 6),
+           'Li': (1,), 'Na': (1,), 'K': (1,), 'Mg': (2,)}
+# Groups the hotkeys put on an atom, drawn out in full; the first atom of each SMILES is the one that attaches
+GROUPS = {'Me': 'C', 'Et': 'CC', 'Ac': 'C(C)=O', 'CO2Me': 'C(=O)OC', 'CF3': 'C(F)(F)F', 'Cbz': 'C(=O)OCc1ccccc1',
+          'MgBr': '[Mg]Br', 'NO2': '[N+](=O)[O-]', 'OMe': 'OC', 'Fmoc': 'C(=O)OCC1c2ccccc2-c2ccccc21', 'Ph': 'c1ccccc1',
+          'Boc': 'C(=O)OC(C)(C)C', 'N3': 'N=[N+]=[N-]', 'tBu': 'C(C)(C)C', 'SO2': 'S(=O)=O', 'Cy': 'C1CCCCC1',
+          'cPent': 'C1CCCC1', 'cPr': 'C1CC1', 'cBu': 'C1CCC1', 'Cp': 'C1C=CC=C1', 'ethynyl': 'C#C'}
 ACCEPTS_CHARGE_AS_BOND = {'N', 'O', 'P', 'S', 'Se', 'As', 'F', 'Cl', 'Br', 'I'}   # N+ / O+ gain a bond, C+ / B- lose one
 
 
@@ -377,27 +383,74 @@ class Doc:
         n = len(ids)
         edges = [(ids[k], ids[(k + 1) % n]) for k in range(n)]
         bonds = [self.add_bond(u, v) for u, v in edges]
-        if aromatic and n % 2 == 0:
+        if aromatic:                                        # an odd ring (cyclopentadiene) gets (n - 1) / 2 doubles
+            def doubles(par):
+                return list(range(par, n - n % 2, 2))
+
             def has_double(atom, skip):
                 return any(self.bonds[b].order >= 2 for _o, b in self.neighbors(atom) if b not in skip)
 
             def conflicts(par):
                 c = 0
-                for k in range(par, n, 2):
+                for k in doubles(par):
                     u, v = edges[k]
                     if self.bonds[bonds[k]].order == 1 and (has_double(u, bonds) or has_double(v, bonds)):
                         c += 1
-                for k in range(1 - par, n, 2):
+                for k in set(range(n)) - set(doubles(par)):
                     if self.bonds[bonds[k]].order >= 2:
                         c += 1
                 return c
             par = min((0, 1), key=conflicts)
-            for k in range(par, n, 2):
+            for k in doubles(par):
                 u, v = edges[k]
                 b = self.bonds[bonds[k]]
                 if b.order == 1 and not has_double(u, bonds) and not has_double(v, bonds):
                     b.order = 2
         return ids
+
+    def put_group(self, a, smiles):
+        """Atom a becomes the first atom of the group (a SMILES); the rest is laid out away from a's bonds."""
+        from rdkit import Chem
+        from rdkit.Chem import rdDepictor
+        mol = Chem.MolFromSmiles(smiles)
+        Chem.Kekulize(mol, clearAromaticFlags=True)
+        at = self.atoms[a]
+        first = mol.GetAtomWithIdx(0)
+        at.el, at.charge = first.GetSymbol(), first.GetFormalCharge()
+        if mol.GetNumAtoms() == 1:
+            return [a]
+        rdDepictor.Compute2DCoords(mol)
+        conf = mol.GetConformer()
+        pos = [conf.GetAtomPosition(k) for k in range(mol.GetNumAtoms())]
+        pts = [(p.x - pos[0].x, -(p.y - pos[0].y)) for p in pos]   # y down, atom 0 at the origin
+        L = sorted(math.hypot(pts[b.GetBeginAtomIdx()][0] - pts[b.GetEndAtomIdx()][0],
+                              pts[b.GetBeginAtomIdx()][1] - pts[b.GetEndAtomIdx()][1]) for b in mol.GetBonds())
+        L = L[len(L) // 2] or 1.0
+        cx = sum(x for x, _y in pts[1:]) / (len(pts) - 1); cy = sum(y for _x, y in pts[1:]) / (len(pts) - 1)
+        fx, fy = self.free_direction(a) if self.neighbors(a) else (1.0, 0.0)
+        rot = angle_of(fx, fy) - angle_of(cx, cy)
+        c, s = math.cos(rot), math.sin(rot)
+        ids = [a]
+        for k in range(1, len(pts)):
+            x, y = pts[k][0] / L, pts[k][1] / L
+            atom = mol.GetAtomWithIdx(k)
+            ids.append(self.add_atom(at.x + x * c - y * s, at.y + x * s + y * c, atom.GetSymbol(), atom.GetFormalCharge()))
+        for b in mol.GetBonds():
+            order = {Chem.BondType.DOUBLE: 2, Chem.BondType.TRIPLE: 3}.get(b.GetBondType(), 1)
+            self.add_bond(ids[b.GetBeginAtomIdx()], ids[b.GetEndAtomIdx()], order)
+        return ids
+
+    def sprout(self, a, smiles='C', order=1, stereo=''):
+        """A new bond from atom a (in the next free direction) to the group smiles; returns the new atom."""
+        at = self.atoms[a]
+        ang = self.next_bond_angle(a)
+        b = self.atom_at_or_new(at.x + math.cos(ang), at.y + math.sin(ang), exclude={a})
+        bid = self.add_bond(a, b, order, stereo)
+        if bid is not None and stereo and self.bonds[bid].a != a:
+            bd = self.bonds[bid]; bd.a, bd.b = bd.b, bd.a
+        if smiles != 'C' and not self.neighbors(b)[1:]:
+            self.put_group(b, smiles)
+        return b
 
     def chain_points(self, x0, y0, x1, y1):
         """Zigzag chain from (x0, y0) toward (x1, y1) (direction snapped to 30 degrees): the points after the first."""

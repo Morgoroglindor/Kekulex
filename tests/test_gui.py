@@ -161,3 +161,44 @@ def test_open_mol_and_save_sed(win, tmp_path):
     assert win.save()
     win.open(str(tmp_path / 'pyr.sed'))
     assert chem.analyse(win.canvas.doc).smiles == 'c1ccncc1'
+
+
+def key(c, text, item):
+    c.hover = item
+    QTest.keyClicks(c, text)
+
+
+@pytest.mark.parametrize('keys, smiles', [('O', 'COC'), ('N', 'C[N+](=O)[O-]'), ('P', 'Cc1ccccc1'),
+                                          ('2', 'CC=O'), ('4', 'CCC'), ('9', 'CC(C)C'), ('K', 'CCC(C)(C)C'),
+                                          ('l', 'CCl'), ('C', 'CCl'), ('b', 'CBr'), ('y', 'CC(=O)OC(C)(C)C')])
+def test_chemdraw_atom_hotkeys(win, keys, smiles):
+    """Ethane, then the key over its last atom (letters replace the atom, digits add a group to it)."""
+    c = win.canvas
+    win.set_tool('bond1'); click(c, 0, 0)
+    end = max(c.doc.atoms)
+    key(c, keys, ('atom', end))
+    assert chem.analyse(c.doc).smiles == chem.analyse(_doc(smiles)).smiles
+
+
+def _doc(smiles):
+    d = Doc(); d.insert_rdkit(chem.mol_from_text(smiles)); return d
+
+
+def test_chemdraw_bond_hotkeys(win):
+    c = win.canvas
+    win.set_tool('ring6'); click(c, 0, 0)
+    b = next(iter(c.doc.bonds))
+    key(c, 'a', ('bond', b))                               # fused benzene
+    assert len(c.doc.atoms) == 10
+    key(c, '2', ('bond', b))
+    assert c.doc.bonds[b].order == 2
+    key(c, 'l', ('bond', b)); assert c.doc.bonds[b].side == -1
+    key(c, 'c', ('bond', b)); assert c.doc.bonds[b].side == 0
+    key(c, 'w', ('bond', b)); assert c.doc.bonds[b].stereo == 'wedge' and c.doc.bonds[b].order == 1
+
+
+def test_chemdraw_tool_hotkeys(win):
+    c = win.canvas
+    for k, tool in (('j', 'benzene'), ('x', 'bond1'), ('X', 'chain'), ('e', 'arrow'), ('t', 'text'), (' ', 'select')):
+        key(c, k, None)
+        assert c.tool == tool and win.tool_actions[tool].isChecked()
