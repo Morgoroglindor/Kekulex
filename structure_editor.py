@@ -16,6 +16,8 @@ import sys
 from PyQt6 import QtCore, QtGui, QtWidgets
 
 import applog
+import biodraw
+import biopolymer
 import cdxml
 import chem
 import icons
@@ -56,7 +58,9 @@ TOOLS = (('lasso', 'Lasso: select free-hand'), ('select', 'Select / move  (Space
          ('group', 'shapes', [('brackets', 'Brackets [ ]'), ('parens', 'Parentheses ( )'), ('braces', 'Braces { }'),
                               ('rect', 'Rectangle'), ('roundrect', 'Rounded rectangle'), ('oval', 'Oval'),
                               ('line', 'Line')]),
-         ('text', 'Text: captions, and atom labels typed in place  (t)'))
+         ('text', 'Text: captions, and atom labels typed in place  (t)'), None,
+         ('sequence', 'Biopolymer sequence: click where it goes, then type or paste it (FASTA, H-Ala-Gly-OH, HELM)'),
+         ('group', 'bio', list(biodraw.NAMES.items())))
 COLORS = (('Black', ''), ('Red', '#E01E1E'), ('Blue', '#1E4FE0'), ('Green', '#1E8C3A'), ('Orange', '#E07B00'),
           ('Magenta', '#C0189A'), ('Cyan', '#0096B4'), ('Grey', '#808080'))
 HIGHLIGHT_COLORS = ('#2EE62E', '#2EE6F0', '#FFEA2E', '#F2994A', '#FF5252', '#B5E62E', '#8AD8FF', '#E8D44D',
@@ -70,49 +74,80 @@ ELEMENTS = ('C', 'H', 'N', 'O', 'S', 'P', 'F', 'Cl', 'Br', 'I')
 STYLE_FIELDS = (('bond_length', 'Bond length (pt)', 4, 60, 0.1), ('line_width', 'Line width (pt)', 0.1, 5, 0.05),
                 ('bold_width', 'Bold / wedge width (pt)', 0.3, 10, 0.1), ('hash_spacing', 'Hash spacing (pt)', 0.5, 10, 0.1),
                 ('bond_spacing', 'Double bond spacing (× bond length)', 0.05, 0.5, 0.01),
-                ('margin', 'Margin around labels (pt)', 0, 6, 0.1), ('font_size', 'Font size (pt)', 4, 48, 0.5))
+                ('margin', 'Margin around labels (pt)', 0, 6, 0.1), ('font_size', 'Atom label size (pt)', 4, 48, 0.5),
+                ('caption_size', 'Caption size (pt)', 4, 72, 0.5))
 
 
 class StyleDialog(QtWidgets.QDialog):
-    """File > Document settings: bond length, line widths, font, page (ACS 1996 is the default)."""
+    """File > Document settings: a style sheet to start from (ACS 1996, RSC, Wiley, Nature, slides ...), then bond
+    length, line widths, fonts, page size and orientation."""
 
     def __init__(self, style, parent=None):
         super().__init__(parent)
         self.setWindowTitle('Document settings')
         theme.register_window(self)
         lay = QtWidgets.QFormLayout(self)
+        self.sheet = QtWidgets.QComboBox()
+        self.sheet.addItem('(as set below)')
+        self.sheet.addItems(list(render.STYLE_SHEETS))
+        self.sheet.setToolTip('Load the settings of a journal or document style; they can still be changed below')
+        self.sheet.textActivated.connect(self._sheet_chosen)
+        lay.addRow('Style sheet:', self.sheet)
         self.spins = {}
         for key, label, lo, hi, step in STYLE_FIELDS:
             s = QtWidgets.QDoubleSpinBox(); s.setRange(lo, hi); s.setSingleStep(step); s.setDecimals(2)
             lay.addRow(label + ':', s)
             self.spins[key] = s
         self.font = QtWidgets.QFontComboBox()
-        lay.addRow('Font:', self.font)
+        lay.addRow('Atom label font:', self.font)
+        self.label_bold = QtWidgets.QCheckBox('Bold atom labels')
+        lay.addRow('', self.label_bold)
+        self.caption_font = QtWidgets.QFontComboBox()
+        lay.addRow('Caption font:', self.caption_font)
+        self.terminal = QtWidgets.QCheckBox('Show terminal carbon labels (CH3)')
+        lay.addRow('', self.terminal)
         self.color_atoms = QtWidgets.QCheckBox('Colour heteroatoms (N blue, O red ...)')
         lay.addRow('', self.color_atoms)
         self.page = QtWidgets.QComboBox(); self.page.addItems(list(render.PAGES))
-        lay.addRow('Page:', self.page)
-        acs = QtWidgets.QPushButton('ACS 1996 (journals)')
-        acs.clicked.connect(lambda: self.load(render.ACS_STYLE))
+        self.orientation = QtWidgets.QComboBox(); self.orientation.addItems(['Portrait', 'Landscape'])
+        row = QtWidgets.QHBoxLayout(); row.addWidget(self.page, 1); row.addWidget(self.orientation, 1)
+        lay.addRow('Page:', row)
         box = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Ok |
                                          QtWidgets.QDialogButtonBox.StandardButton.Cancel)
-        box.addButton(acs, QtWidgets.QDialogButtonBox.ButtonRole.ResetRole)
         box.accepted.connect(self.accept); box.rejected.connect(self.reject)
         lay.addRow(box)
         self.load(style)
 
-    def load(self, style):
+    def _sheet_chosen(self, name):
+        if name in render.STYLE_SHEETS:
+            s = dict(render.DEFAULT_STYLE)
+            s.update(render.STYLE_SHEETS[name])
+            s['page'], s['orientation'] = self.page.currentText(), self.orientation.currentText().lower()
+            self.load(s, keep_sheet=True)
+
+    def load(self, style, keep_sheet=False):
         for key, s in self.spins.items():
             s.setValue(float(style[key]))
         self.font.setCurrentFont(QtGui.QFont(style['font']))
+        self.caption_font.setCurrentFont(QtGui.QFont(style['caption_font']))
+        self.label_bold.setChecked(bool(style['label_bold']))
+        self.terminal.setChecked(bool(style['show_terminal_carbons']))
         self.color_atoms.setChecked(bool(style['color_atoms']))
         self.page.setCurrentText(style.get('page', 'A4'))
+        self.orientation.setCurrentText(str(style.get('orientation', 'portrait')).capitalize())
+        if not keep_sheet:
+            self.sheet.setCurrentIndex(0)
 
     def style(self):
+        """The settings shown (the document's other options, such as stereo labels, are left as they are)."""
         s = {k: sp.value() for k, sp in self.spins.items()}
         s['font'] = self.font.currentFont().family()
+        s['caption_font'] = self.caption_font.currentFont().family()
+        s['label_bold'] = self.label_bold.isChecked()
+        s['show_terminal_carbons'] = self.terminal.isChecked()
         s['color_atoms'] = self.color_atoms.isChecked()
         s['page'] = self.page.currentText()
+        s['orientation'] = self.orientation.currentText().lower()
         return s
 
 
@@ -136,6 +171,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.canvas.message.connect(lambda m: self.statusBar().showMessage(m, 6000))
         self.canvas.selection_changed.connect(self._sync_style_bar)
         self.canvas.context_menu.connect(self.object_menu)
+        self.canvas.edit_object.connect(self.edit_object)
         self.canvas.zoom_changed.connect(lambda z: self.zoom_label.setText(f'{z * 100:.0f} %'))
         self._build_tools()
         self._build_color_bars()
@@ -335,6 +371,7 @@ class MainWindow(QtWidgets.QMainWindow):
             m.addAction(self.a_undo); m.addAction(self.a_redo)
             m.addSeparator()
             m.addAction('&Paste', self.paste)
+            self._paste_special_menu(m.addMenu('Paste S&pecial'))
             m.addAction('Convert &Name to Structure…', self.name_to_structure)
             m.addAction('Select &All', c.select_all)
             m.addSeparator()
@@ -377,6 +414,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 am.addAction('Edit &label…', lambda a=item[1]: c.edit_label(a))
             if any(c.doc.atoms[a].label for a in atoms):
                 am.addAction('E&xpand label', c.expand_labels)
+            if any(c.doc.atoms[a].charge_pos for a in atoms):
+                am.addAction('&Reset charge position', c.reset_charge_positions)
             self._swatch_menu(am, '&Highlight', HIGHLIGHT_COLORS, c.set_highlight)
         bonds = [i for i, b in c.doc.bonds.items() if ('bond', i) in c.sel or (b.a in atoms and b.b in atoms)]
         if bonds:
@@ -406,7 +445,12 @@ class MainWindow(QtWidgets.QMainWindow):
             jm = tm.addMenu('&Justification')
             for text, al_ in (('&Left', 'left'), ('&Centre', 'center'), ('&Right', 'right')):
                 jm.addAction(text, lambda a_=al_: c.set_text_props(align=a_))
-        if 'shape' in sel_kinds:
+        bio_shapes = [i for i in c.selected('shape') if c.doc.shapes[i].kind in model.BIO_KINDS]
+        if bio_shapes:
+            self._bio_object_menu(m, bio_shapes)
+        if 'seq' in sel_kinds:
+            self._biopolymer_menu(m.addMenu('Bio&polymer'))
+        if len(bio_shapes) < len(c.selected('shape')):
             km = m.addMenu('Brac&ket / shape')
             for text, kind in (('&Brackets', 'brackets'), ('&Parentheses', 'parens'), ('Bra&ces', 'braces'),
                                ('&Rectangle', 'rect'), ('R&ounded rectangle', 'roundrect'), ('O&val', 'oval')):
@@ -426,10 +470,162 @@ class MainWindow(QtWidgets.QMainWindow):
             an = m.addMenu('A&nalysis')
             an.addAction('Show &analysis', c.add_analysis)
             an.addAction('Analyze &stoichiometry', c.analyze_stoichiometry)
+            an.addAction('Predict ¹&H NMR…', lambda: self.open_nmr('1H'))
+            an.addAction('Predict ¹³&C NMR…', lambda: self.open_nmr('13C'))
             an.addAction('Convert Structure to &Name', self.structure_to_iupac)
             an.addAction('Common na&me (PubChem, online)', self.structure_to_name)
             an.addAction(self.a_stereo)
         m.exec(global_pos)
+
+    # ------------------------------------------------------------------------------------------- biopolymers
+    def _fill_bio_menu(self):
+        """The Biopolymer menu's lower part follows the selection (rebuilt each time it opens)."""
+        m = self.bio_menu
+        for a in m.actions()[self._bio_menu_fixed:]:
+            m.removeAction(a)
+        self._biopolymer_menu(m)
+        m.addSeparator()
+        bm = m.addMenu('&BioDraw objects')
+        for kind, name in biodraw.NAMES.items():
+            bm.addAction(icons.icon(kind), name, lambda k=kind: self.set_tool(k))
+
+    def _biopolymer_menu(self, m):
+        """Sequence commands (menu bar and right-click): edit, style, numbers, expand, copy as, analysis."""
+        c = self.canvas
+        seqs = c.selected('seq')
+        first = c.doc.seqs[seqs[0]] if seqs else None
+        a = m.addAction('&Edit sequence…', lambda: self.edit_object('seq', seqs[0]) if seqs else None)
+        a.setEnabled(bool(seqs))
+        a = m.addAction('&Toggle standard amino acid style (A / Ala)',
+                        lambda: c.set_sequence_props(three_letter=not first.three_letter))
+        a.setEnabled(bool(first) and first.polymer == 'PEPTIDE')
+        a = m.addAction('Show residue &numbers', lambda: c.set_sequence_props(show_ids=not first.show_ids))
+        a.setCheckable(True); a.setChecked(bool(first and first.show_ids)); a.setEnabled(bool(seqs))
+        a = m.addAction('&Residues per line…', self.sequence_per_line); a.setEnabled(bool(seqs))
+        a = m.addAction('E&xpand to structure', c.expand_sequences); a.setEnabled(bool(seqs))
+        a = m.addAction('Show &analysis (formula, mass, charge states)', self.sequence_analysis_caption)
+        a.setEnabled(bool(seqs))
+        ca = m.addMenu('&Copy As')
+        ca.setEnabled(bool(seqs))
+        ca.addAction('&HELM', lambda: self.copy_sequence('helm'))
+        ca.addAction('HELM (&natural analog, FASTA)', lambda: self.copy_sequence('fasta'))
+        ca.addAction('&Three-letter text', lambda: self.copy_sequence('three'))
+
+    def _paste_special_menu(self, m):
+        for text, polymer in (('FASTA &Peptide', 'PEPTIDE'), ('FASTA &DNA', 'DNA'), ('FASTA &RNA', 'RNA'),
+                              ('&Biopolymer (H-Ala-Gly-Pro-NH2)', 'PEPTIDE'), ('&HELM', None)):
+            m.addAction(text, lambda p=polymer: self.paste_sequence(p))
+
+    def _bio_object_menu(self, m, shapes):
+        c = self.canvas
+        bm = m.addMenu('Bio &object')
+        self._swatch_menu(bm, '&Fill colour', HIGHLIGHT_COLORS[:6] + RING_FILL_COLORS[:6], self.set_bio_fill)
+        if any(c.doc.shapes[i].kind in model.BIO_LINEAR for i in shapes):
+            bm.addAction('&Thicker', lambda: self.bio_thickness(1.2))
+            bm.addAction('Th&inner', lambda: self.bio_thickness(1 / 1.2))
+        plasmids = [i for i in shapes if c.doc.shapes[i].kind == 'plasmid']
+        if plasmids:
+            bm.addAction('&Plasmid map: size, regions, markers…', lambda: self.edit_object('shape', plasmids[0]))
+
+    def set_bio_fill(self, color):
+        c = self.canvas
+        shapes = [i for i in c.selected('shape') if c.doc.shapes[i].kind in model.BIO_KINDS]
+        if shapes:
+            c.snapshot()
+            for i in shapes:
+                c.doc.shapes[i].fill = color
+            c.edited()
+
+    def bio_thickness(self, factor):
+        c = self.canvas
+        shapes = [i for i in c.selected('shape') if c.doc.shapes[i].kind in model.BIO_LINEAR]
+        if shapes:
+            c.snapshot()
+            for i in shapes:
+                sh = c.doc.shapes[i]
+                sh.params = dict(sh.params, height=round(biodraw.thickness(sh) * factor, 3))
+            c.edited()
+
+    def edit_object(self, kind, i):
+        """Double-click (or the sequence tool) on a sequence or a plasmid map: its editor."""
+        from bio_dialog import PlasmidDialog, SequenceDialog
+        c = self.canvas
+        if kind == 'seq':
+            seq = c.doc.seqs.get(i) if i >= 0 else None
+            d = SequenceDialog(seq, self)
+            if d.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+                return
+            if seq is None:
+                c.add_sequence(d.values(), getattr(c, 'pending_pos', None))
+            else:
+                c.update_sequence(i, d.values())
+        elif kind == 'shape' and i in c.doc.shapes:
+            sh = c.doc.shapes[i]
+            d = PlasmidDialog(sh.params, self)
+            if d.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+                c.snapshot()
+                sh.params = dict(sh.params, **d.params)
+                c.edited()
+
+    def insert_sequence(self):
+        self.canvas.pending_pos = None
+        self.edit_object('seq', -1)
+
+    def paste_sequence(self, polymer, text=None):
+        """Edit > Paste Special: the clipboard's text as a sequence (polymer None: HELM or detect)."""
+        text = QtWidgets.QApplication.clipboard().text() if text is None else text
+        try:
+            pol, residues, extras = biopolymer.parse(text, polymer)
+        except ValueError as e:
+            QtWidgets.QMessageBox.information(self, APP_NAME, f'The clipboard does not hold a sequence: {e}')
+            return
+        self.canvas.add_sequence(dict(polymer=pol, residues=residues, **extras))
+
+    def copy_sequence(self, how):
+        """Edit > Copy As: HELM, FASTA (the natural analogs) or three-letter text of the selected sequences."""
+        c = self.canvas
+        seqs = c.selected('seq') or list(c.doc.seqs)
+        if not seqs:
+            self.statusBar().showMessage('Select a sequence first.', 4000)
+            return
+        out = []
+        for i in seqs:
+            q = c.doc.seqs[i]
+            out.append(biopolymer.helm(q) if how == 'helm' else biopolymer.fasta(q) if how == 'fasta'
+                       else biopolymer.three_letter(q))
+        QtWidgets.QApplication.clipboard().setText('\n'.join(out))
+        self.statusBar().showMessage('Copied: ' + out[0][:120], 5000)
+
+    def sequence_per_line(self):
+        c = self.canvas
+        seqs = c.selected('seq')
+        if not seqs:
+            return
+        n, ok = QtWidgets.QInputDialog.getInt(self, 'Residues per line', 'Residues per line:',
+                                              c.doc.seqs[seqs[0]].per_line, 1, 500)
+        if ok:
+            c.set_sequence_props(per_line=n)
+
+    def sequence_analysis_caption(self):
+        """A caption under each selected sequence: formula, exact mass, MW and its charge states."""
+        c = self.canvas
+        for i in c.selected('seq'):
+            q = c.doc.seqs[i]
+            info = biopolymer.analyse(q)
+            if info.errors:
+                self.statusBar().showMessage(info.errors[0], 6000)
+                continue
+            sign = 1 if q.polymer == 'PEPTIDE' else -1
+            ions = [ion for ion in info.ions if ion.z * sign > 0 and 'H]' in ion.label and '2M' not in ion.label
+                    and 'H2O' not in ion.label]
+            text = (f'{biopolymer.summary(q)}\nChemical Formula: {info.formula}\nExact Mass: {info.exact:.4f}\n'
+                    f'Molecular Weight: {info.average:.2f}\n'
+                    + ', '.join(f'{ion.label} {ion.mz:.4f}' for ion in ions[:6]))
+            rend = c.renderer()
+            rect = rend.item_rect('seq', i)
+            c.snapshot()
+            c.doc.add_text(rect.left() / rend.BL, rect.bottom() / rend.BL + 0.4, text)
+            c.edited()
 
     def _swatch_menu(self, parent, title, colors, apply):
         sub = parent.addMenu(title)
@@ -535,7 +731,11 @@ class MainWindow(QtWidgets.QMainWindow):
     def _build_menus(self):
         mb = self.menuBar()
         m = mb.addMenu('&File')
-        m.addAction(self.a_new); m.addAction(self.a_open)
+        m.addAction(self.a_new)
+        ns = m.addMenu('New from &Style Sheet')
+        for name in render.STYLE_SHEETS:
+            ns.addAction(name, lambda n=name: self.new_from_style_sheet(n))
+        m.addAction(self.a_open)
         self.recent_menu = m.addMenu('Open &recent')
         self.recent_menu.aboutToShow.connect(self._fill_recent)
         m.addAction(self.a_save)
@@ -545,7 +745,9 @@ class MainWindow(QtWidgets.QMainWindow):
         m.addAction(self._act('Export &picture (PNG, SVG, PDF)…', self.export_picture, 'Ctrl+E'))
         m.addAction(self._act('Export &MOL…', self.export_mol))
         m.addSeparator()
-        m.addAction(self._act('&Document settings…', self.style_dialog))
+        m.addAction(self._act('&Document settings (page size, style)…', self.style_dialog))
+        m.addAction(self._act('Print Pre&view…', self.print_preview))
+        m.addAction(self._act('&Print…', self.print_document, 'Ctrl+P'))
         m.addSeparator()
         m.addAction(self._act('E&xit', self.close, 'Ctrl+Q'))
 
@@ -557,6 +759,11 @@ class MainWindow(QtWidgets.QMainWindow):
         m.addAction(self.a_copy_img)
         m.addAction(self._act('Copy as &SMILES', self.copy_smiles, 'Ctrl+Alt+C'))
         m.addAction(self._act('&Paste', self.paste, 'Ctrl+V'))
+        self._paste_special_menu(m.addMenu('Paste S&pecial'))
+        ca = m.addMenu('Copy &As')
+        ca.addAction('&HELM', lambda: self.copy_sequence('helm'))
+        ca.addAction('HELM (&natural analog, FASTA)', lambda: self.copy_sequence('fasta'))
+        ca.addAction('&Three-letter text (H-Ala-Gly-OH)', lambda: self.copy_sequence('three'))
         m.addAction(self._act('&Delete', self.canvas.delete_selection))
         m.addAction(self._act('Select &all', self.canvas.select_all, 'Ctrl+A'))
 
@@ -607,12 +814,23 @@ class MainWindow(QtWidgets.QMainWindow):
         m.addAction(self._act('Analyze &stoichiometry', self.canvas.analyze_stoichiometry))
         m.addAction(self._act('Check s&tructure', self.check_structure))
         m.addSeparator()
+        m.addAction(self._act('Predict ¹&H NMR…', lambda: self.open_nmr('1H')))
+        m.addAction(self._act('Predict ¹³&C NMR…', lambda: self.open_nmr('13C')))
         m.addAction(self._act('Convert Structure to &Name', self.structure_to_iupac, 'Ctrl+Alt+N',
                               tip='Systematic IUPAC name, made offline (Openclatura), pasted under the structure'))
         m.addAction(self._act('&Name to structure (PubChem, online)…', self.name_to_structure, 'Ctrl+Shift+N'))
         m.addAction(self._act('Common na&me (PubChem, online)', self.structure_to_name))
         m.addSeparator()
         m.addAction(self.a_stereo); m.addAction(self.a_numbers); m.addAction(self.a_reaction)
+
+        m = mb.addMenu('Bio&polymer')
+        m.addAction(self._act('&Insert sequence…', self.insert_sequence, 'Ctrl+Shift+Q',
+                              tip='A peptide, DNA or RNA sequence: type or paste FASTA, H-Ala-Gly-OH or HELM'))
+        self._paste_special_menu(m.addMenu('Paste S&pecial'))
+        m.addSeparator()
+        self.bio_menu = m
+        m.aboutToShow.connect(self._fill_bio_menu)
+        self._bio_menu_fixed = len(m.actions())
 
         m = mb.addMenu('&Templates')
         for cat, items in templates.TEMPLATES.items():
@@ -623,6 +841,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         m = mb.addMenu('F&ormat')
         m.addAction(self._act('&Document settings (bond length, lines, font, page)…', self.style_dialog))
+        aps = m.addMenu('&Apply Style Sheet')
+        for name in render.STYLE_SHEETS:
+            aps.addAction(name, lambda n=name: self.apply_style_sheet(n))
         res = m.addMenu('Picture &resolution (PNG, clipboard)')
         grp = QtGui.QActionGroup(self)
         cur = int(self.settings.value('dpi', 600))
@@ -683,6 +904,26 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.information(self, APP_NAME, f'PubChem has no compound called "{name}".')
             return
         self.insert_text(smiles)
+
+    def open_nmr(self, nucleus):
+        """The NMR prediction window for the selected structure (or the one structure drawn)."""
+        import nmr
+        if not nmr.available():
+            QtWidgets.QMessageBox.information(self, APP_NAME, 'NMR prediction needs the CSP5 module, which is not '
+                                              'installed with this copy of the program.')
+            return
+        ids = self.info._target()
+        if not ids:
+            QtWidgets.QMessageBox.information(self, APP_NAME, 'Draw (or select) a structure first.')
+            return
+        if len(self.canvas.doc.fragments(ids)) > 1:
+            QtWidgets.QMessageBox.information(self, APP_NAME, 'Select one structure (click one of its bonds twice, or '
+                                              'drag around it) for its NMR prediction.')
+            return
+        from nmr_dialog import NMRDialog
+        d = NMRDialog(self.canvas, ids, nucleus, self)
+        d.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)   # kept alive by its parent until closed
+        d.show()
 
     def structure_to_iupac(self):
         """The systematic name of the selected structure (offline, Openclatura), pasted under it as a caption."""
@@ -868,6 +1109,10 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             if self.path.lower().endswith('.cdxml'):
                 cdxml.write(self.canvas.doc, self.path, f'{APP_NAME} {__version__}')
+                doc = self.canvas.doc
+                if doc.seqs or any(sh.kind in model.BIO_KINDS for sh in doc.shapes.values()):
+                    self.statusBar().showMessage('Sequences and bio objects are not written to .cdxml: save as .sed '
+                                                 'to keep them (or expand sequences to structures first).', 10000)
             else:
                 with open(self.path, 'w', encoding='utf-8') as f:
                     json.dump(self.canvas.doc.to_dict(), f, indent=1)
@@ -987,7 +1232,11 @@ class MainWindow(QtWidgets.QMainWindow):
         if md.hasFormat(MIME):
             self.canvas.insert_items(json.loads(bytes(md.data(MIME)).decode('utf-8')))
         elif md.hasText():
-            self.insert_text(md.text())
+            text = md.text().strip()
+            if text.upper().startswith(('PEPTIDE1{', 'RNA1{')):     # HELM: a sequence
+                self.paste_sequence(None, text)
+            else:
+                self.insert_text(md.text())
 
     def insert_text(self, text):
         mols = []
@@ -1036,8 +1285,71 @@ class MainWindow(QtWidgets.QMainWindow):
         d = StyleDialog(render.style_of(self.canvas.doc), self)
         if d.exec():
             self.canvas.snapshot()
-            self.canvas.doc.style = d.style()
+            self.canvas.doc.style = {**self.canvas.doc.style, **d.style()}
             self.canvas.edited()
+
+    def apply_style_sheet(self, name):
+        """Format > Apply Style Sheet: the drawing takes a journal / document style (structures scale with the bond
+        length, as all coordinates are in bond lengths); page and display options stay."""
+        self.canvas.snapshot()
+        self.canvas.doc.style = {**self.canvas.doc.style, **render.STYLE_SHEETS[name]}
+        self.canvas.edited()
+        self.statusBar().showMessage(f'Style sheet: {name}', 4000)
+
+    def new_from_style_sheet(self, name):
+        if self._maybe_save():
+            doc = Doc()
+            doc.style = dict(render.STYLE_SHEETS[name])
+            self.path = None
+            self.canvas.set_doc(doc)
+            self.dirty = False
+            self._title()
+
+    # ------------------------------------------------------------------------------------------- printing
+    def _print_on(self, printer):
+        """Draw the page on a printer: the document's page at its real size, shrunk only if the paper is smaller."""
+        doc = self.canvas.doc
+        W, H = render.page_size(render.style_of(doc))
+        p = QtGui.QPainter(printer)
+        paper = printer.pageLayout().fullRectPoints()
+        k = min(1.0, paper.width() / W, paper.height() / H)
+        dev = printer.resolution() / 72.0
+        p.scale(dev * k, dev * k)
+        render.Renderer(doc).paint(p)
+        p.end()
+
+    def _printer(self):
+        from PyQt6.QtPrintSupport import QPrinter
+        printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+        printer.setFullPage(True)
+        s = render.style_of(self.canvas.doc)
+        size = {'A4': QtGui.QPageSize.PageSizeId.A4, 'A3': QtGui.QPageSize.PageSizeId.A3,
+                'A5': QtGui.QPageSize.PageSizeId.A5, 'B5': QtGui.QPageSize.PageSizeId.B5,
+                'Letter': QtGui.QPageSize.PageSizeId.Letter, 'Legal': QtGui.QPageSize.PageSizeId.Legal,
+                'Tabloid': QtGui.QPageSize.PageSizeId.Tabloid}.get(s['page'], QtGui.QPageSize.PageSizeId.A4)
+        printer.setPageSize(QtGui.QPageSize(size))
+        printer.setPageOrientation(QtGui.QPageLayout.Orientation.Landscape if s['orientation'] == 'landscape'
+                                   else QtGui.QPageLayout.Orientation.Portrait)
+        printer.setDocName(os.path.basename(self.path) if self.path else 'Structure')
+        return printer
+
+    def print_document(self):
+        from PyQt6.QtPrintSupport import QPrintDialog
+        if self.canvas.doc.is_empty():
+            QtWidgets.QMessageBox.information(self, APP_NAME, 'There is nothing to print.')
+            return
+        printer = self._printer()
+        dlg = QPrintDialog(printer, self)
+        if dlg.exec():
+            self._print_on(printer)
+            self.statusBar().showMessage('Sent to the printer.', 4000)
+
+    def print_preview(self):
+        from PyQt6.QtPrintSupport import QPrintPreviewDialog
+        dlg = QPrintPreviewDialog(self._printer(), self)
+        dlg.paintRequested.connect(self._print_on)
+        dlg.resize(900, 1000)
+        dlg.exec()
 
     def show_help(self):
         text = ('<h3>Drawing</h3><ul>'
@@ -1062,7 +1374,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 '<li><b>Object</b> menu: align, distribute, flip, rotate, scale, colour. <b>Structure</b> menu: clean up, '
                 'expand label, analysis caption, R/S and E/Z labels. <b>Templates</b>: rings, heterocycles, amino '
                 'acids, sugars, nucleobases, solvents.</li>'
-                '<li><b>ChemDraw files</b>: .cdxml opens and saves (structures, captions, arrows, shapes, style); '
+                '<li><b>Biology</b>: the sequence tool (or Biopolymer &gt; Insert sequence) takes FASTA, '
+                'H-Ala-Gly-OH or HELM text for peptides, DNA and RNA; double-click a sequence to edit it (cyclic, '
+                'disulfide / lactam bridges, termini); Biopolymer &gt; Expand to structure, Copy As HELM / FASTA, '
+                'Show analysis with the charge states. The bio drop-down draws membranes, DNA, receptors, '
+                'organelles, cells and plasmid maps (click or drag).</li>'
+                '<li><b>ChemDraw files</b>:.cdxml opens and saves (structures, captions, arrows, shapes, style); '
                 '.cdx opens the structures.</li>'
                 '<li><b>Select</b>: click, Shift+click or drag a box; drag to move; drop one atom on another to merge '
                 'them. Arrow keys nudge.</li>'

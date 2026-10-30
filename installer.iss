@@ -3,7 +3,7 @@
 #define AppName "Structure editor"
 ; the version comes from version.py (BUILD_INSTALLER.bat passes /DAppVersion=...); this is only the fallback
 #ifndef AppVersion
-#define AppVersion "0.5.1"
+#define AppVersion "0.6.0"
 #endif
 #define AppExe "StructureEditor.exe"
 

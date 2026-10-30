@@ -265,7 +265,7 @@ def test_template_menu_inserts(win):
     names = dict(templates.TEMPLATES['Reagents'])
     win.insert_text(names['DMAP'])
     assert chem.analyse(win.canvas.doc).formula == 'C7H10N2'
-    assert not any('Amino' in c or 'Sugar' in c or 'Nucleo' in c or 'Betalain' in c for c in templates.TEMPLATES)
+    assert not any('Betalain' in c for c in templates.TEMPLATES)     # bio templates are back (tests/test_bio.py)
 
 
 # ------------------------------------------------------------------------------------------------ stoichiometry

@@ -110,6 +110,8 @@ class InfoPanel(QtWidgets.QWidget):
         choices = self._choices()
         k = self.which.currentIndex()
         ids = choices[k][1] if 0 <= k < len(choices) else None
+        if isinstance(ids, tuple):                          # a sequence: callers put captions under it
+            return ids
         return set(ids) if ids else set(self.canvas.doc.atoms)
 
     def paste(self, key):
@@ -159,6 +161,15 @@ class InfoPanel(QtWidgets.QWidget):
                 out.append((f'Structure {k}: {chem.analyse(doc, f).formula}', set(f)))
             if frags:
                 out.append(('All structures together', None))
+        import biopolymer
+        chosen = self.canvas.selected('seq')
+        seqs = [('seq', i) for i in chosen] + [('seq', i) for i in doc.seqs if i not in chosen]
+        for k, key in enumerate(seqs, 1):                   # biopolymer sequences (a selected one first)
+            label = f'Sequence {k}: {biopolymer.summary(doc.seqs[key[1]])}'
+            if chosen and not sel:
+                out.insert(k - 1, (label, key))
+            else:
+                out.append((label, key))
         return out
 
     def refresh(self, keep_choice=False):
@@ -178,6 +189,16 @@ class InfoPanel(QtWidgets.QWidget):
             self.which.blockSignals(False)
         k = self.which.currentIndex()
         ids = choices[k][1] if 0 <= k < len(choices) else None
+        if isinstance(ids, tuple):                          # a biopolymer sequence: its molecule, charge states
+            import biopolymer
+            q = self.canvas.doc.seqs[ids[1]]
+            info = biopolymer.analyse(q)
+            self.info = info
+            self.show_info(info)
+            self.iupac = ''
+            self.name.setText(biopolymer.three_letter(q) if len(q.residues) <= 30 else biopolymer.summary(q))
+            self.props.setRowCount(0)
+            return
         info = chem.analyse(self.canvas.doc, ids)
         self.show_info(info)
         self.iupac = chem.iupac_name(self.canvas.doc, ids) if info.atoms and not info.errors else ''

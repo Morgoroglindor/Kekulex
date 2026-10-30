@@ -20,7 +20,7 @@ MERGE = 0.3                                                 # a new atom this cl
 MOL_BOND = 1.5                                              # bond length written into MOL files (A, RDKit's own)
 
 # Usual valences (the lowest that fits the bonds is used) and what a charge does to them
-VALENCE = {'H': (1,), 'B': (3,), 'C': (4,), 'N': (3, 5), 'O': (2,), 'F': (1,), 'Si': (4,), 'P': (3, 5), 'S': (2, 4, 6),
+VALENCE = {'H': (1,), 'B': (3,), 'C': (4,), 'N': (3,), 'O': (2,), 'F': (1,), 'Si': (4,), 'P': (3, 5), 'S': (2, 4, 6),
            'Cl': (1, 3, 5, 7), 'Se': (2, 4, 6), 'Br': (1, 3, 5), 'I': (1, 3, 5, 7), 'As': (3, 5), 'Te': (2, 4, 6),
            'Li': (1,), 'Na': (1,), 'K': (1,), 'Mg': (2,)}
 # Groups the hotkeys put on an atom, drawn out in full; the first atom of each SMILES is the one that attaches
@@ -28,7 +28,10 @@ GROUPS = {'Me': 'C', 'Et': 'CC', 'Ac': 'C(C)=O', 'CO2Me': 'C(=O)OC', 'CF3': 'C(F
           'MgBr': '[Mg]Br', 'NO2': '[N+](=O)[O-]', 'OMe': 'OC', 'Fmoc': 'C(=O)OCC1c2ccccc2-c2ccccc21', 'Ph': 'c1ccccc1',
           'Boc': 'C(=O)OC(C)(C)C', 'N3': 'N=[N+]=[N-]', 'tBu': 'C(C)(C)C', 'SO2': 'S(=O)=O', 'Cy': 'C1CCCCC1',
           'cPent': 'C1CCCC1', 'cPr': 'C1CC1', 'cBu': 'C1CCC1', 'Cp': 'C1C=CC=C1', 'ethynyl': 'C#C'}
-ACCEPTS_CHARGE_AS_BOND = {'N', 'O', 'P', 'S', 'Se', 'As', 'F', 'Cl', 'Br', 'I'}   # N+ / O+ gain a bond, C+ / B- lose one
+# Valence electrons, for charged atoms: an ion makes min(e, 8 - e) bonds with e = electrons - charge (the octet), as
+# ChemDraw counts them: NH2 -> NH3+ -> NH2 2+, C+ and C- take three bonds, O+ three, O- one, B- four.
+VALENCE_ELECTRONS = {'B': 3, 'C': 4, 'N': 5, 'O': 6, 'F': 7, 'Si': 4, 'P': 5, 'S': 6, 'Cl': 7, 'Se': 6, 'Br': 7,
+                     'I': 7, 'As': 5, 'Te': 6, 'Li': 1, 'Na': 1, 'K': 1, 'Mg': 2}
 # Nicknames: an atom shows the short label (OMe, Boc ...) and counts as the whole group for the formula and SMILES.
 NICKNAMES = {k: v for k, v in GROUPS.items() if k not in ('SO2', 'Cy', 'cPent', 'cPr', 'cBu', 'Cp', 'ethynyl')}
 NICKNAMES.update({
@@ -95,6 +98,8 @@ class Atom:
     label: str = ''                                         # a nickname (OMe, Boc ...) shown instead of the element
     color: str = ''                                         # '' = the drawing's colour
     highlight: str = ''                                     # a coloured disc behind the atom ('' = none)
+    charge_pos: list | None = None                          # where its charge sign was dragged: [dx, dy] from the
+                                                            # atom in bond lengths; None = placed automatically
 
 
 @dataclass
@@ -137,6 +142,11 @@ class Text:
 
 
 SHAPE_KINDS = ('rect', 'roundrect', 'oval', 'line', 'brackets', 'parens', 'braces')
+# BioDraw-like objects (drawn by render.bio_paint in their box; the "linear" ones along the line x1,y1 -> x2,y2)
+BIO_KINDS = ('membrane', 'membrane_arc', 'micelle', 'dna', 'helix', 'receptor', 'channel', 'enzyme', 'gprotein',
+             'antibody', 'ribosome', 'trna', 'mrna', 'mito', 'nucleus', 'cell', 'bacterium', 'virus', 'cloud',
+             'plasmid')
+BIO_LINEAR = ('membrane', 'dna', 'helix', 'mrna')
 
 
 @dataclass
@@ -145,7 +155,28 @@ class Shape:
     y1: float
     x2: float
     y2: float
-    kind: str = 'rect'                                      # one of SHAPE_KINDS (brackets come as a pair)
+    kind: str = 'rect'                                      # one of SHAPE_KINDS or BIO_KINDS (brackets come as a pair)
+    color: str = ''
+    fill: str = ''                                          # bio objects: main fill colour ('' = the kind's default)
+    params: dict = field(default_factory=dict)              # bio objects: plasmid {'bp', 'regions', 'markers'} ...
+
+
+@dataclass
+class Sequence:
+    """A peptide / DNA / RNA sequence drawn as a row of monomers (biopolymer.py has the chemistry)."""
+    x: float                                                # top-left corner
+    y: float
+    polymer: str = 'PEPTIDE'                                # 'PEPTIDE' | 'DNA' | 'RNA'
+    residues: list = field(default_factory=list)            # one-letter codes
+    per_line: int = 10                                      # residues per line (wraps onto the next)
+    three_letter: bool = False                              # peptides: Ala Gly ... instead of A G ...
+    show_ids: bool = False                                  # residue numbers above the monomers
+    cyclic: bool = False                                    # peptides: head-to-tail
+    bridges: list = field(default_factory=list)             # peptides: [[i, j]] 0-based (Cys-Cys, Lys-Asp / Glu)
+    n_term: str = 'H'                                       # peptides: 'H' | 'Ac'
+    c_term: str = 'OH'                                      # peptides: 'OH' | 'NH2'
+    p5: bool = False                                        # DNA / RNA: 5'-phosphate
+    p3: bool = False                                        # DNA / RNA: 3'-phosphate
     color: str = ''
 
 
@@ -168,9 +199,10 @@ class Fill:
     color: str = '#FFF59D'
 
 
-KINDS = {'atom': Atom, 'bond': Bond, 'arrow': Arrow, 'text': Text, 'shape': Shape, 'grid': Grid, 'fill': Fill}
+KINDS = {'atom': Atom, 'bond': Bond, 'arrow': Arrow, 'text': Text, 'shape': Shape, 'grid': Grid, 'fill': Fill,
+         'seq': Sequence}
 PLURAL = {'atom': 'atoms', 'bond': 'bonds', 'arrow': 'arrows', 'text': 'texts', 'shape': 'shapes', 'grid': 'grids',
-          'fill': 'fills'}
+          'fill': 'fills', 'seq': 'seqs'}
 
 
 def angle_of(dx, dy):
@@ -191,6 +223,7 @@ class Doc:
         self.shapes = {}
         self.grids = {}
         self.fills = {}
+        self.seqs = {}
         self.style = {}                                     # overrides of render.DEFAULT_STYLE
         self._next = 1
 
@@ -201,7 +234,7 @@ class Doc:
 
     def table(self, kind):
         return {'atom': self.atoms, 'bond': self.bonds, 'arrow': self.arrows, 'text': self.texts,
-                'shape': self.shapes, 'grid': self.grids, 'fill': self.fills}[kind]
+                'shape': self.shapes, 'grid': self.grids, 'fill': self.fills, 'seq': self.seqs}[kind]
 
     def add_atom(self, x, y, el='C', charge=0):
         i = self._id()
@@ -239,6 +272,11 @@ class Doc:
         self.shapes[i] = Shape(x1, y1, x2, y2, kind)
         return i
 
+    def add_sequence(self, x, y, polymer, residues, **props):
+        i = self._id()
+        self.seqs[i] = Sequence(x, y, polymer, list(residues), **props)
+        return i
+
     def bond_between(self, a, b):
         for i, bd in self.bonds.items():
             if (bd.a == a and bd.b == b) or (bd.a == b and bd.b == a):
@@ -270,6 +308,15 @@ class Doc:
         for i in [i for i, f in self.fills.items() if a in f.atoms]:   # a ring fill goes with its ring
             del self.fills[i]
 
+    def strip_atom(self, a):
+        """Deleting a labelled atom (N, Cl, OMe, a charged carbon ...) turns it back into a plain carbon, keeping its
+        bonds, as ChemDraw does. Returns False for an atom that already is a plain carbon (then it goes)."""
+        at = self.atoms[a]
+        if at.el == 'C' and not at.label and not at.charge:
+            return False
+        at.el, at.label, at.charge = 'C', '', 0
+        return True
+
     def remove_bond(self, i, prune=True):
         """Remove a bond; a carbon left without bonds goes with it (it would show up as a lone CH4)."""
         bd = self.bonds.pop(i, None)
@@ -293,7 +340,7 @@ class Doc:
         del self.atoms[src]
 
     def is_empty(self):
-        return not (self.atoms or self.arrows or self.texts or self.shapes or self.grids)
+        return not (self.atoms or self.arrows or self.texts or self.shapes or self.grids or self.seqs)
 
     # ------------------------------------------------------------------------------------------- hit testing
     def find_atom(self, x, y, r, exclude=()):
@@ -329,6 +376,11 @@ class Doc:
         best, bd = None, r
         for i, s in self.shapes.items():
             x1, x2 = sorted((s.x1, s.x2)); y1, y2 = sorted((s.y1, s.y2))
+            if s.kind in BIO_KINDS:                         # bio objects: the whole object counts, not its outline
+                import biodraw
+                if biodraw.contains(s, x, y, r):
+                    return i
+                continue
             if s.kind == 'line':
                 d = seg_dist(x, y, s.x1, s.y1, s.x2, s.y2)
             elif s.kind == 'oval':
@@ -353,9 +405,15 @@ class Doc:
         base = VALENCE.get(at.el)
         if base is None:
             return None
-        if at.charge and at.el in ACCEPTS_CHARGE_AS_BOND:
-            return tuple(v + at.charge for v in base if v + at.charge >= 0)
-        return tuple(v - abs(at.charge) for v in base if v - abs(at.charge) >= 0)
+        if not at.charge:
+            return base
+        if at.el == 'H':                                    # H+ and H- make no bond
+            return (0,)
+        e = VALENCE_ELECTRONS.get(at.el)
+        if e is None:
+            return tuple(v - abs(at.charge) for v in base if v - abs(at.charge) >= 0)
+        e -= at.charge
+        return (max(0, min(e, 8 - e)),)
 
     def implicit_h(self, a):
         """Hydrogens the atom carries without them being drawn (0 for elements without a usual valence and for
@@ -372,10 +430,22 @@ class Doc:
         return 0
 
     def valence_error(self, a):
-        if self.atoms[a].label:
-            return False
+        return bool(self.valence_problem(a))
+
+    def valence_problem(self, a):
+        """'' when the atom's bonds are fine, else what is wrong (for the red box, its tooltip and Check structure):
+        more bonds than the element (with its charge) takes, or a nickname bonded more than once."""
+        at = self.atoms[a]
+        bonds = self.bond_sum(a)
+        if at.label:
+            if bonds > 1 and at.label in NICKNAMES:
+                return f'{at.label} attaches by one bond, but has {bonds}.'
+            return ''
         vals = self._valences(a)
-        return bool(vals) and self.bond_sum(a) > max(vals)
+        if vals and bonds > max(vals):
+            charge = f' {"+" if at.charge > 0 else "−"}{abs(at.charge)}' if at.charge else ''
+            return (f'{at.el}{charge} takes at most {max(vals)} bond{"s" if max(vals) != 1 else ""}, but has {bonds}.')
+        return ''
 
     def fragments(self, atom_ids=None):
         """Connected structures, as sorted lists of atom ids (only atoms in atom_ids, when given)."""
@@ -665,6 +735,8 @@ class Doc:
                 pts.append((self.grids[i].x, self.grids[i].y))
             elif kind == 'text' and i in self.texts:
                 pts.append((self.texts[i].x, self.texts[i].y))
+            elif kind == 'seq' and i in self.seqs:
+                pts.append((self.seqs[i].x, self.seqs[i].y))
         return pts
 
     def transform(self, sel, fn):
@@ -682,11 +754,14 @@ class Doc:
                 g = self.grids[i]; g.x, g.y = fn(g.x, g.y)
             elif kind == 'text' and i in self.texts:
                 t = self.texts[i]; t.x, t.y = fn(t.x, t.y)
+            elif kind == 'seq' and i in self.seqs:
+                q = self.seqs[i]; q.x, q.y = fn(q.x, q.y)
 
     def all_items(self):
         return ([('atom', i) for i in self.atoms] + [('bond', i) for i in self.bonds] +
                 [('arrow', i) for i in self.arrows] + [('text', i) for i in self.texts] +
-                [('shape', i) for i in self.shapes] + [('grid', i) for i in self.grids])
+                [('shape', i) for i in self.shapes] + [('grid', i) for i in self.grids] +
+                [('seq', i) for i in self.seqs])
 
     # ------------------------------------------------------------------------------------------- files
     def to_dict(self, sel=None):

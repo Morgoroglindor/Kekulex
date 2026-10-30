@@ -279,6 +279,37 @@ def _templates(p):                                         # a stack of hexagons
     p.drawPolygon(QPolygonF(_poly(6, cx=15, cy=15, r=5.5)))
 
 
+def _bio(kind):
+    """A small copy of the bio object itself (in its own colours), fitted into the icon."""
+    def draw(p):
+        import biodraw
+        import model
+        import render
+        doc = model.Doc()
+        i = doc.add_shape(*biodraw.default_shape(kind, 0, 0), kind)
+        if kind == 'plasmid':
+            doc.shapes[i].params = {'bp': 100, 'regions': [{'start': 5, 'end': 40}, {'start': 55, 'end': 85}]}
+        if kind in model.BIO_LINEAR:                        # a short piece, so its subunits stay visible
+            sh = doc.shapes[i]
+            sh.x1, sh.x2 = -1.6, 1.6
+        r = render.Renderer(doc)
+        b = biodraw.outline(r, doc.shapes[i]).boundingRect()
+        k = 20 / max(b.width(), b.height(), 1e-6)
+        p.save()
+        p.translate(12, 12); p.scale(k, k); p.translate(-b.center().x(), -b.center().y())
+        biodraw.paint_bio(r, p, i)
+        p.restore()
+    return draw
+
+
+def _sequence(p):                                         # three monomers on a chain
+    p.drawLine(QPointF(3, 12), QPointF(21, 12))
+    p.save()
+    for x, c in ((6, '#E9B872'), (12, '#7FA7E0'), (18, '#8CCB9B')):
+        p.setBrush(QColor(c)); p.drawEllipse(QPointF(x, 12), 3.6, 3.6)
+    p.restore()
+
+
 DRAW = {'select': _select, 'bond1': _bond(1), 'bond2': _bond(2), 'bond3': _bond(3), 'wedge': _wedge, 'hash': _hash,
         'chain': _chain, 'ring3': _ring(3), 'ring4': _ring(4), 'ring5': _ring(5), 'ring6': _ring(6), 'ring7': _ring(7),
         'ring8': _ring(8), 'benzene': _benzene, 'erase': _erase, 'charge+': _charge(1), 'charge-': _charge(-1),
@@ -289,7 +320,10 @@ DRAW = {'select': _select, 'bond1': _bond(1), 'bond2': _bond(2), 'bond3': _bond(
         'curved_half': _curved(True), 'rect': _shape('rect'), 'roundrect': _shape('roundrect'), 'oval': _shape('oval'),
         'line': _shape('line'), 'brackets': _shape('brackets'), 'parens': _shape('parens'), 'braces': _shape('braces'),
         'align_left': _align('left'), 'align_center': _align('center'), 'align_right': _align('right'),
-        'templates': _templates, 'lasso': _lasso}
+        'templates': _templates, 'lasso': _lasso, 'sequence': _sequence}
+DRAW.update({k: _bio(k) for k in ('membrane', 'membrane_arc', 'micelle', 'dna', 'helix', 'receptor', 'channel', 'enzyme',
+                                  'gprotein', 'antibody', 'ribosome', 'trna', 'mrna', 'mito', 'nucleus', 'cell',
+                                  'bacterium', 'virus', 'cloud', 'plasmid')})
 
 
 def _pixmap(name, scale, color):

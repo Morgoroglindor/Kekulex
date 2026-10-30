@@ -1,0 +1,13 @@
+# NMR prediction (optional): CSP5 0.3.1 (MIT) with the CPU build of PyTorch. CSP5's authors do not build it for
+# Windows, so it is installed from its source with tools\patch_csp5.py applied (it skips the optional gcc-only
+# peak-matching helpers; prediction does not use them):
+#
+#   .venv\Scripts\python -m pip install --index-url https://download.pytorch.org/whl/cpu torch==2.15.0
+#   .venv\Scripts\python -m pip download --no-deps --no-binary :all: csp5==0.3.1 -d build\csp5
+#   tar -xzf build\csp5\csp5-0.3.1.tar.gz -C build\csp5
+#   .venv\Scripts\python tools\patch_csp5.py build\csp5\csp5-0.3.1
+#   .venv\Scripts\python -m pip install build\csp5\csp5-0.3.1
+#
+# Without it the editor runs normally; Structure > Predict NMR then says the module is missing.
+torch==2.15.0
+csp5==0.3.1

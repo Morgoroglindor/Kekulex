@@ -60,3 +60,54 @@ TEMPLATES = {
         ('Nitric acid', 'O=[N+]([O-])O'),
     ],
 }
+
+
+def _bio_templates():
+    """Amino acids (from biopolymer's table), sugars, nucleobases, nucleosides and nucleotides (RDKit builds the
+    nucleosides / nucleotides from one-letter sequences, so their sugars carry the right stereo). Sugar stereo checked
+    against the CIP labels of the D sugars (tests/test_bio.py)."""
+    from rdkit import Chem
+    import biopolymer
+    out = {'Amino acids': [(f'{v[1].capitalize()} ({v[0]}, {k})' if k in 'UO' else
+                            f'L-{v[1].capitalize()} ({v[0]}, {k})' if k != 'G' else 'Glycine (Gly, G)', v[2])
+                           for k, v in sorted(biopolymer.AMINO_ACIDS.items(), key=lambda kv: kv[1][0])]}
+    out['Sugars'] = [
+        ('α-D-Glucopyranose', 'OC[C@H]1O[C@H](O)[C@H](O)[C@@H](O)[C@@H]1O'),
+        ('β-D-Glucopyranose', 'OC[C@H]1O[C@@H](O)[C@H](O)[C@@H](O)[C@@H]1O'),
+        ('α-D-Galactopyranose', 'OC[C@H]1O[C@H](O)[C@H](O)[C@@H](O)[C@H]1O'),
+        ('β-D-Galactopyranose', 'OC[C@H]1O[C@@H](O)[C@H](O)[C@@H](O)[C@H]1O'),
+        ('α-D-Mannopyranose', 'OC[C@H]1O[C@H](O)[C@@H](O)[C@@H](O)[C@@H]1O'),
+        ('β-D-Mannopyranose', 'OC[C@H]1O[C@@H](O)[C@@H](O)[C@@H](O)[C@@H]1O'),
+        ('β-D-Fructofuranose', 'OC[C@H]1O[C@](O)(CO)[C@@H](O)[C@@H]1O'),
+        ('β-D-Ribofuranose', 'OC[C@H]1O[C@@H](O)[C@H](O)[C@@H]1O'),
+        ('2-Deoxy-β-D-ribofuranose', 'OC[C@H]1O[C@@H](O)C[C@@H]1O'),
+        ('D-Glucose (open chain)', 'O=C[C@H](O)[C@@H](O)[C@H](O)[C@H](O)CO'),
+        ('Sucrose', 'OC[C@H]1O[C@@](CO)(O[C@H]2O[C@H](CO)[C@@H](O)[C@H](O)[C@H]2O)[C@@H](O)[C@@H]1O'),
+    ]
+    out['Nucleobases and nucleotides'] = [
+        ('Adenine', 'Nc1ncnc2[nH]cnc12'), ('Guanine', 'Nc1nc2[nH]cnc2c(=O)[nH]1'), ('Cytosine', 'Nc1cc[nH]c(=O)n1'),
+        ('Thymine', 'Cc1c[nH]c(=O)[nH]c1=O'), ('Uracil', 'O=c1cc[nH]c(=O)[nH]1')]
+    names = {'A': 'Adenosine', 'G': 'Guanosine', 'C': 'Cytidine', 'U': 'Uridine', 'T': 'Thymidine'}
+    for flavor, prefix, letters in ((2, '', 'AGCU'), (6, '2′-Deoxy', 'AGCT'), (3, '', 'AGCU')):
+        for b in letters:
+            mol = Chem.MolFromSequence(b, flavor=flavor)
+            if mol is None:
+                continue
+            name = names[b] if b != 'T' else 'Thymidine'
+            if flavor == 6 and b != 'T':
+                name = prefix + name.lower()
+            if flavor == 3:
+                name = name + ' 5′-monophosphate (' + {'A': 'AMP', 'G': 'GMP', 'C': 'CMP', 'U': 'UMP'}[b] + ')'
+            out['Nucleobases and nucleotides'].append((name, Chem.MolToSmiles(mol)))
+    amp = Chem.MolToSmiles(Chem.MolFromSequence('A', flavor=3))
+    out['Nucleobases and nucleotides'] += [
+        ('ATP', amp.replace('COP(=O)(O)O', 'COP(=O)(O)OP(=O)(O)OP(=O)(O)O') if 'COP(=O)(O)O' in amp else amp),
+        ('NAD⁺', 'NC(=O)c1ccc[n+](c1)[C@@H]1O[C@H](COP(=O)([O-])OP(=O)(O)OC[C@H]2O[C@@H](n3cnc4c(N)ncnc43)[C@H](O)'
+                 '[C@@H]2O)[C@@H](O)[C@H]1O')]
+    return out
+
+
+try:
+    TEMPLATES.update(_bio_templates())
+except Exception:                                           # never keep the menu from being built
+    pass

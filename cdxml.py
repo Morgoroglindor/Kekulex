@@ -365,7 +365,7 @@ def write(doc, path, program='Structure editor'):
             body.append(f'<b {attrs}/>')
         out.append(f'<fragment id="{fid}">' + ''.join(body) + '</fragment>')
     for i, t in doc.texts.items():
-        size = t.size or s['font_size']
+        size = t.size or s['caption_size']
         face = (FACE_BOLD if t.bold else 0) | (FACE_ITALIC if t.italic else 0) | (FACE_FORMULA if t.formula else 0)
         just = {'left': 'Left', 'center': 'Center', 'right': 'Right'}[t.align]
         out.append(f'<t id="{next(ids)}" p="{f(t.x * BL)} {f(t.y * BL + ASCENT * size)}" Justification="{just}" '
@@ -399,6 +399,8 @@ def write(doc, path, program='Structure editor'):
                       f' MajorAxisEnd3D="{f(ctr[0] + R)} {f(ctr[1])} 0" MinorAxisEnd3D="{f(ctr[0])} {f(ctr[1] + R)} 0"')
         out.append(f'<arrow {attrs}{cattr(ar.color)}/>')
     for i, sh in doc.shapes.items():
+        if sh.kind in model.BIO_KINDS:                      # bio objects and sequences stay in .sed files only
+            continue
         bb = f'{f(sh.x1 * BL)} {f(sh.y1 * BL)} {f(sh.x2 * BL)} {f(sh.y2 * BL)}'
         if sh.kind == 'line':
             g = f'GraphicType="Line" ArrowType="NoHead"'
@@ -410,7 +412,7 @@ def write(doc, path, program='Structure editor'):
             g = f'GraphicType="Bracket" BracketType="{ {"brackets": "SquarePair", "parens": "RoundPair", "braces": "CurlyPair"}[sh.kind] }"'
         out.append(f'<graphic id="{next(ids)}" BoundingBox="{bb}" {g}{cattr(sh.color)}/>')
     b = r.bounds()
-    W, H = render.PAGES.get(s['page'], render.PAGES['A4'])
+    W, H = render.page_size(s)
     bbox = f'{f(b.left())} {f(b.top())} {f(b.right())} {f(b.bottom())}' if not b.isNull() else '0 0 0 0'
     table = '<color r="1" g="1" b="1"/><color r="0" g="0" b="0"/>' + ''.join(
         f'<color r="{int(c[1:3], 16) / 255:.3f}" g="{int(c[3:5], 16) / 255:.3f}" b="{int(c[5:7], 16) / 255:.3f}"/>'

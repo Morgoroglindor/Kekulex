@@ -29,7 +29,7 @@ BOND_TOOLS = {'bond1': (1, '', ''), 'bond2': (2, '', ''), 'bond3': (3, '', ''), 
               'hashed': (1, '', 'hashed')}
 ARROW_TOOLS = {'arrow': 'forward', 'equilibrium': 'equilibrium', 'retro': 'retro', 'resonance': 'resonance',
                'arrow_dashed': 'dashed', 'curved': 'curved', 'curved_half': 'curved_half'}
-SHAPE_TOOLS = {k: k for k in model.SHAPE_KINDS}
+SHAPE_TOOLS = {k: k for k in model.SHAPE_KINDS + model.BIO_KINDS}
 CURVE = 0.3                                                 # a new curved arrow's bend
 # Hotkeys laid out as in ChemDraw (case matters: Shift+key is the capital), so the same fingers work in both.
 # Over an atom - the atom becomes this element or nickname:
@@ -64,6 +64,8 @@ HINTS = {
     'erase': 'Click (or drag over) atoms, bonds, arrows, shapes and text to delete them.',
     'arrow': 'Drag to draw the arrow. Click a curved arrow with a curved-arrow tool to bend it the other way.',
     'shape': 'Drag to draw the shape (brackets come as a pair around what you frame).',
+    'sequence': 'Click where the sequence goes, then type or paste it (FASTA, H-Ala-Gly-OH or HELM); click a sequence to edit it.',
+    'bio': 'Click for the default size, or drag (membranes, DNA, helices and mRNA grow more subunits as they get longer).',
     'text': 'Click empty space to type a caption, click an atom to type its label (N, OH, OMe, Boc, CO2H ...).',
 }
 
@@ -121,6 +123,7 @@ class Canvas(QWidget):
     tool_key = pyqtSignal(str)                              # a tool hotkey was pressed (the window switches tools)
     message = pyqtSignal(str)                               # something to show in the status bar
     context_menu = pyqtSignal(object, object)               # right-click: (global QPoint, item under the mouse or None)
+    edit_object = pyqtSignal(str, int)                      # double-click on a sequence or a plasmid map: (kind, id)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -168,7 +171,7 @@ class Canvas(QWidget):
         return QRectF(self.origin.x() + r.left() * k, self.origin.y() + r.top() * k, r.width() * k, r.height() * k)
 
     def page_size(self):
-        return render.PAGES.get(render.style_of(self.doc)['page'], render.PAGES['A4'])
+        return render.page_size(render.style_of(self.doc))
 
     def renderer(self):
         if self._renderer is None:
@@ -235,7 +238,7 @@ class Canvas(QWidget):
     def hint(self):
         t = self.tool
         key = ('ring' if t in RING_TOOLS else 'bond' if t in BOND_TOOLS else 'arrow' if t in ARROW_TOOLS else
-               'shape' if t in SHAPE_TOOLS else t)
+               'bio' if t in model.BIO_KINDS else 'shape' if t in SHAPE_TOOLS else t)
         return HINTS.get(key, '')
 
     def selected_atoms(self):
@@ -294,6 +297,64 @@ class Canvas(QWidget):
             minx = min(p[0] for p in pts) if pts else 0
             self.doc.transform(items, lambda px, py, dx=x - minx: (px + dx, py + y))
             x = max(p[0] for p in self.doc.points_of(items)) + 2 if pts else x
+            new += items
+        self.sel = set(new)
+        self.edited()
+        self.ensure_visible()
+
+    # ------------------------------------------------------------------------------------------- biopolymers
+    def add_sequence(self, values, pos=None):
+        """A new sequence (model.Sequence fields in values) at pos (bond lengths), else right of what is drawn."""
+        self.snapshot()
+        if pos is None:
+            r = render.Renderer(self.doc).bounds()
+            BL = render.style_of(self.doc)['bond_length']
+            pos = ((r.right() / BL + 3) if not r.isNull() else 108 / BL, (r.top() / BL) if not r.isNull() else 144 / BL)
+        v = dict(values)
+        i = self.doc.add_sequence(pos[0], pos[1], v.pop('polymer'), v.pop('residues'), **v)
+        self.sel = {('seq', i)}
+        self.edited()
+        self.ensure_visible()
+        return i
+
+    def update_sequence(self, i, values):
+        self.snapshot()
+        for k, v in values.items():
+            setattr(self.doc.seqs[i], k, v)
+        self.edited()
+
+    def set_sequence_props(self, **props):
+        """Set fields on every selected sequence (one undo step), e.g. three_letter=True."""
+        seqs = self.selected('seq')
+        if not seqs:
+            return
+        self.snapshot()
+        for i in seqs:
+            for k, v in props.items():
+                setattr(self.doc.seqs[i], k, v)
+        self.edited()
+
+    def expand_sequences(self):
+        """Replace the selected sequences by their full structures (Structure > Expand label in ChemDraw)."""
+        import biopolymer
+        seqs = self.selected('seq')
+        if not seqs:
+            return
+        mols = []
+        for i in seqs:
+            mol, err = biopolymer.to_mol(self.doc.seqs[i])
+            if mol is None:
+                self.message.emit(err)
+                return
+            mols.append((i, mol))
+        self.snapshot()
+        new = []
+        for i, mol in mols:
+            q = self.doc.seqs.pop(i)
+            items = self.doc.insert_rdkit(mol, (0, 0))
+            pts = self.doc.points_of(items)
+            minx, miny = min(p[0] for p in pts), min(p[1] for p in pts)
+            self.doc.transform(items, lambda px, py, dx=q.x - minx, dy=q.y - miny: (px + dx, py + dy))
             new += items
         self.sel = set(new)
         self.edited()
@@ -556,19 +617,28 @@ class Canvas(QWidget):
         self.edited()
 
     def add_caption_below(self, atoms, text, formula=False):
-        """A centred caption under the structure(s) holding these atoms (the analysis window's Paste)."""
-        atoms = [a for a in atoms if a in self.doc.atoms]
-        if not atoms:
-            return
+        """A centred caption under the structure(s) holding these atoms, or under a sequence when atoms is
+        ('seq', id) (the analysis window's Paste)."""
+        if isinstance(atoms, tuple):
+            if atoms[1] not in self.doc.seqs:
+                return
+        else:
+            atoms = [a for a in atoms if a in self.doc.atoms]
+            if not atoms:
+                return
         self.snapshot()
         self._caption_under(atoms, text, formula)
         self.edited()
 
     def _caption_under(self, atoms, text, formula):
-        """Add text centred under atoms, below any caption or shape already under them."""
+        """Add text centred under atoms (or under the sequence ('seq', id)), below any caption or shape already
+        under them."""
         rend = self.renderer()
         BL = rend.BL
         rect = QRectF()
+        if isinstance(atoms, tuple):
+            rect = rend.item_rect(*atoms)
+            atoms = []
         for a in atoms:
             r = rend.item_rect('atom', a)
             rect = r if rect.isNull() else rect.united(r)
@@ -733,6 +803,9 @@ class Canvas(QWidget):
         for i in self.doc.grids:
             if rend.grid_rect(i).contains(pt):
                 return ('grid', i)
+        for i in self.doc.seqs:
+            if rend.item_rect('seq', i).adjusted(-2, -2, 2, 2).contains(pt):
+                return ('seq', i)
         return None
 
     # ------------------------------------------------------------------------------------------- painting
@@ -855,6 +928,10 @@ class Canvas(QWidget):
             p.drawRoundedRect(rend.text_rect(i).adjusted(-2, -1, 2, 1), 2, 2)
         elif kind == 'grid':
             p.drawRoundedRect(rend.grid_rect(i).adjusted(-2, -2, 2, 2), 3, 3)
+        elif kind == 'seq':                                 # a light tint and a frame, so the monomers stay readable
+            light = QColor(color); light.setAlpha(min(color.alpha(), 28))
+            p.setBrush(QBrush(light)); p.setPen(QPen(color, 1.2))
+            p.drawRoundedRect(rend.item_rect('seq', i).adjusted(-3, -3, 3, 3), 4, 4)
 
     def _paint_reaction(self, p, rend, BL):
         """View > Show reaction interpretation: reactants red, products magenta, above the arrow cyan, below blue
@@ -893,6 +970,12 @@ class Canvas(QWidget):
             tmp = Doc()
             tmp.style = self.doc.style
             tmp.add_shape(*pts[0], *pts[1], kind)
+            if kind in model.BIO_KINDS:                     # the object itself, half transparent, as it grows
+                import biodraw
+                p.save(); p.setOpacity(0.6)
+                biodraw.paint_bio(render.Renderer(tmp), p, next(iter(tmp.shapes)))
+                p.restore()
+                return
             p.drawPath(render.Renderer(tmp).shape_paths(next(iter(tmp.shapes))))
             return
         if kind in ('curved', 'curved_half'):
@@ -934,7 +1017,7 @@ class Canvas(QWidget):
         """Type a caption in place: a new one at (x, y), or caption i. Esc or a click elsewhere ends typing."""
         self.commit_editor()
         props = dict(self.text_props) if i is None else {k: getattr(self.doc.texts[i], k) for k in self.text_props}
-        size = props['size'] or render.style_of(self.doc)['font_size']
+        size = props['size'] or render.style_of(self.doc)['caption_size']
         w = _TextEdit(self)
         w.setFont(self._editor_font(size, props['bold'], props['italic']))
         if i is not None:
@@ -1005,6 +1088,11 @@ class Canvas(QWidget):
         item = self.item_at(pos)
         self.press = dict(pos=pos, item=item, moved=False, shift=bool(e.modifiers() & Qt.KeyboardModifier.ShiftModifier))
         if self.tool in ('select', 'lasso'):
+            grabbed = self._charge_at(pos)
+            if grabbed is not None:                         # the charge sign itself, not its atom
+                self.press['charge'] = grabbed
+                return
+        if self.tool in ('select', 'lasso'):
             if item and item in self.sel:
                 self.press['move'] = list(self.sel)
             elif item:
@@ -1028,8 +1116,54 @@ class Canvas(QWidget):
             self.press['erased'] = False
             self._erase(item)
 
+    def _charge_at(self, pos):
+        """The atom whose charge sign is under the mouse, or None."""
+        x, y = self.to_model(pos)
+        rend = self.renderer()
+        pt = QPointF(x * rend.BL, y * rend.BL)
+        for a, at in self.doc.atoms.items():
+            if at.charge:
+                r = rend.charge_rect(a)
+                if r is not None and r.adjusted(-1.2, -1.2, 1.2, 1.2).contains(pt):
+                    return a
+        return None
+
+    def _explain(self, item, e):
+        """Pointing at an atom with a bond-count problem says what is wrong (tooltip and status bar)."""
+        from PyQt6.QtWidgets import QToolTip
+        problem = self.doc.valence_problem(item[1]) if item and item[0] == 'atom' and self.show_warnings else ''
+        if item and item[0] == 'seq':                       # pointing at a residue: what it is and its number
+            import biodraw
+            import biopolymer
+            rend = self.renderer()
+            x, y = self.to_model(e.position())
+            k = biodraw.residue_at(rend, item[1], x * rend.BL, y * rend.BL)
+            if k is not None:
+                q = self.doc.seqs[item[1]]
+                problem = f'{k + 1}: {biopolymer.residue_name(q.polymer, q.residues[k])}'
+        elif item and item[0] == 'shape' and self.doc.shapes[item[1]].kind in model.BIO_KINDS:
+            import biodraw
+            problem = biodraw.NAMES.get(self.doc.shapes[item[1]].kind, '')
+        if problem:
+            QToolTip.showText(e.globalPosition().toPoint(), problem, self)
+            self.message.emit(problem)
+        else:
+            QToolTip.hideText()
+
+    def reset_charge_positions(self):
+        atoms = [a for a in self.selected_atoms() if self.doc.atoms[a].charge_pos]
+        if atoms:
+            self.snapshot()
+            for a in atoms:
+                self.doc.atoms[a].charge_pos = None
+            self.edited()
+
     def _erase(self, item):
         if item and item[1] in self.doc.table(item[0]):
+            if item[0] == 'atom' and self.doc.strip_atom(item[1]):  # N, OMe, C+ ... become a plain carbon first
+                self.press['erased'] = True
+                self.edited()
+                return
             self.doc.remove(*item)
             self.press['erased'] = True
             self.sel.discard(item)
@@ -1054,12 +1188,27 @@ class Canvas(QWidget):
             if item != self.hover:
                 self.hover = item
                 self.update()
+                self._explain(item, e)
+            elif item and item[0] == 'seq':                 # residue by residue along a sequence
+                self._explain(item, e)
+            if self.tool in ('select', 'lasso'):            # a charge sign can be dragged
+                self.setCursor(Qt.CursorShape.SizeAllCursor if self._charge_at(pos) is not None
+                               else Qt.CursorShape.ArrowCursor)
             return
         if not pr['moved'] and (pos - pr['pos']).manhattanLength() < DRAG_PX:
             return
         pr['moved'] = True
         x, y = self.to_model(pos)
         t = self.tool
+        if 'charge' in pr:                                  # dragging a charge sign: it stays with its atom
+            if not pr.get('snapped'):
+                pr['snapped'] = True
+                self.snapshot()
+            at = self.doc.atoms[pr['charge']]
+            at.charge_pos = [round(x - at.x, 3), round(y - at.y, 3)]
+            self._renderer = None
+            self.update()
+            return
         if t in ('select', 'lasso'):
             if 'move' in pr:
                 if not pr.get('snapped'):
@@ -1196,6 +1345,10 @@ class Canvas(QWidget):
         x, y = self.to_model(pos)
         t, item = self.tool, pr['item']
         preview, self.preview = self.preview, None
+        if 'charge' in pr:                                  # a charge sign was dragged (or just clicked)
+            if pr.get('snapped'):
+                self.edited()
+            return
         if t in ('select', 'lasso'):
             if pr.get('merge') and pr.get('snapped'):
                 a, tgt = pr['merge']
@@ -1255,6 +1408,24 @@ class Canvas(QWidget):
             self.snapshot()
             doc.add_arrow(x, y, x + 2.5, y, kind, CURVE if kind.startswith('curved') else 0.0)
             self.edited()
+            return
+        if t == 'sequence':                                 # the window asks for the sequence, then puts it here
+            if item and item[0] == 'seq':
+                self.edit_object.emit('seq', item[1])
+            else:
+                self.pending_pos = (x, y)
+                self.edit_object.emit('seq', -1)
+            return
+        if t in model.BIO_KINDS:                            # a click: the object at its default size
+            import biodraw
+            self.snapshot()
+            i = doc.add_shape(*biodraw.default_shape(t, x, y), t)
+            if t == 'plasmid':
+                doc.shapes[i].params = {'bp': 5000, 'name': '', 'regions': [], 'markers': []}
+            self.sel = {('shape', i)}
+            self.edited()
+            if t == 'plasmid':
+                self.edit_object.emit('shape', i)
             return
         if t in SHAPE_TOOLS:
             return
@@ -1346,6 +1517,10 @@ class Canvas(QWidget):
             self.edit_text(item[1])
         elif item and item[0] == 'grid':
             self.edit_grid(item[1])
+        elif item and item[0] == 'seq':
+            self.edit_object.emit('seq', item[1])
+        elif item and item[0] == 'shape' and self.doc.shapes[item[1]].kind == 'plasmid':
+            self.edit_object.emit('shape', item[1])
         elif item and item[0] == 'bond' and self.tool == 'select':
             self.select_fragment(self.doc.bonds[item[1]].a)
 
@@ -1376,7 +1551,11 @@ class Canvas(QWidget):
             return
         if key in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
             if h and h not in self.sel:
-                self.snapshot(); self.doc.remove(*h); self.hover = None; self.edited()
+                self.snapshot()
+                if not (h[0] == 'atom' and self.doc.strip_atom(h[1])):   # a label goes first, as in ChemDraw
+                    self.doc.remove(*h)
+                    self.hover = None
+                self.edited()
             else:
                 self.delete_selection()
             return

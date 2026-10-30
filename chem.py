@@ -116,9 +116,9 @@ def analyse(doc, atom_ids=None):
         return info
     info.fragments = len(doc.fragments(ids))
     for a in ids:
-        if doc.valence_error(a):
-            at = doc.atoms[a]
-            info.errors.append(f'{at.el} with {doc.bond_sum(a)} bonds{" and charge " + charge_text(at.charge) if at.charge else ""} is over its valence.')
+        problem = doc.valence_problem(a)
+        if problem:
+            info.errors.append(problem)
     full, grown = doc.expanded()
     ids = [a for a in full.atoms if a in expand_ids(grown, ids)]
     counts = {}
@@ -141,6 +141,52 @@ def analyse(doc, atom_ids=None):
         charge += at.charge
     if unknown:
         info.errors.append('Unknown element: ' + ', '.join(sorted(set(unknown))))
+    _masses(info, counts, charge, mono, avg)
+    mol, _order, err = to_mol(full, set(ids))
+    if mol is not None:
+        _identifiers(info, mol)
+    elif err and not info.errors:
+        info.errors.append(err)
+    return info
+
+
+def analyse_mol(mol):
+    """analyse() for an RDKit molecule built elsewhere (a biopolymer sequence): formula, masses, adducts, SMILES."""
+    info = Info()
+    counts, mono, avg, charge = {}, 0.0, 0.0, 0
+    for at in mol.GetAtoms():
+        el, hs = at.GetSymbol(), at.GetTotalNumHs()
+        if el == 'H':
+            hs, el = 1, None
+        if el:
+            counts[el] = counts.get(el, 0) + 1
+            mono += PT.GetMostCommonIsotopeMass(el)
+            avg += PT.GetAtomicWeight(el)
+            info.atoms += 1
+        if hs:
+            counts['H'] = counts.get('H', 0) + hs
+            mono += hs * H
+            avg += hs * PT.GetAtomicWeight('H')
+        charge += at.GetFormalCharge()
+    info.fragments = len(Chem.GetMolFrags(mol))
+    _masses(info, counts, charge, mono, avg)
+    _identifiers(info, mol)
+    return info
+
+
+def _identifiers(info, mol):
+    try:
+        info.smiles = Chem.MolToSmiles(Chem.RemoveHs(mol))
+    except Exception:
+        info.smiles = Chem.MolToSmiles(mol)
+    try:
+        info.inchikey = Chem.MolToInchiKey(mol) or ''
+    except Exception:
+        info.inchikey = ''
+
+
+def _masses(info, counts, charge, mono, avg):
+    """Formula, masses, elemental analysis and adduct ions of info from the element counts."""
     info.counts, info.charge, info.exact, info.average = counts, charge, mono, avg
     els = hill(counts)
     info.formula = formula_text(counts)
@@ -165,19 +211,6 @@ def analyse(doc, atom_ids=None):
         if any(c < 0 for c in ion.values()):
             continue
         info.ions.append(Ion(ion_label(label, z), z, (n * mono + _mono(gain) - _mono(loss) - z * ELECTRON) / abs(z), ion))
-    mol, _order, err = to_mol(full, set(ids))
-    if mol is not None:
-        try:
-            info.smiles = Chem.MolToSmiles(Chem.RemoveHs(mol))
-        except Exception:
-            info.smiles = Chem.MolToSmiles(mol)
-        try:
-            info.inchikey = Chem.MolToInchiKey(mol) or ''
-        except Exception:
-            info.inchikey = ''
-    elif err and not info.errors:
-        info.errors.append(err)
-    return info
 
 
 # ------------------------------------------------------------------------------------------------ isotope pattern

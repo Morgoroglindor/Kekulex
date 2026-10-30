@@ -20,10 +20,60 @@ from PyQt6.QtGui import QBrush, QColor, QFont, QFontMetricsF, QImage, QPainter, 
 import model
 
 DEFAULT_STYLE = dict(bond_length=14.4, line_width=0.6, bold_width=2.0, hash_spacing=2.5, bond_spacing=0.18, margin=1.6,
-                     font='Arial', font_size=10.0, color='#000000', color_atoms=False, page='A4',
-                     show_stereo=False, show_atom_numbers=False)
+                     font='Arial', font_size=10.0, label_bold=False, caption_font='Arial', caption_size=10.0,
+                     color='#000000', color_atoms=False, page='A4', orientation='portrait',
+                     show_stereo=False, show_atom_numbers=False, show_terminal_carbons=False)
 ACS_STYLE = dict(DEFAULT_STYLE)
-PAGES = {'A4': (595.28, 841.89), 'Letter': (612.0, 792.0)}  # pt
+# Drawing settings of the journal / document styles ChemDraw ships (numbers read from its style sheets): bond length,
+# line, bold and hash widths, margin (pt), double-bond spacing (fraction of the bond), label and caption fonts.
+STYLE_SHEETS = {
+    'ACS Document 1996': dict(bond_length=14.4, line_width=0.6, bold_width=2.0, hash_spacing=2.5, margin=1.6,
+                              bond_spacing=0.18, font='Arial', font_size=10, caption_font='Arial', caption_size=10),
+    'New Document': dict(bond_length=30.0, line_width=1.0, bold_width=4.0, hash_spacing=2.7, margin=2.0,
+                         bond_spacing=0.12, font='Arial', font_size=10, caption_font='Times New Roman', caption_size=12),
+    'New Slide': dict(bond_length=30.0, line_width=1.6, bold_width=4.0, hash_spacing=2.7, margin=2.0,
+                      bond_spacing=0.15, font='Arial', font_size=12, caption_font='Times New Roman', caption_size=16),
+    'RSC Document': dict(bond_length=12.2, line_width=0.45, bold_width=1.6, hash_spacing=1.75, margin=1.25,
+                         bond_spacing=0.20, font='Arial', font_size=7, caption_font='Arial', caption_size=7),
+    'Wiley Document': dict(bond_length=17.0, line_width=0.75, bold_width=2.6, hash_spacing=2.6, margin=2.0,
+                           bond_spacing=0.18, font='Arial', font_size=12, caption_font='Arial', caption_size=12),
+    'Nature Research Document': dict(bond_length=10.8, line_width=0.595, bold_width=1.56, hash_spacing=1.7,
+                                     margin=1.19, bond_spacing=0.18, font='Arial', font_size=6, caption_font='Arial',
+                                     caption_size=6),
+    'SYNTHESIS, SYNLETT Document': dict(bond_length=17.0, line_width=0.8, bold_width=2.0, hash_spacing=2.5, margin=1.3,
+                                        bond_spacing=0.18, font='Arial', font_size=10, caption_font='Arial',
+                                        caption_size=10),
+    'Science of Synthesis': dict(bond_length=17.0, line_width=0.8, bold_width=2.0, hash_spacing=2.5, margin=2.25,
+                                 bond_spacing=0.18, font='Arial', font_size=10, caption_font='Arial', caption_size=10),
+    'Adv. Synth. Catal. Document': dict(bond_length=17.0, line_width=1.0, bold_width=2.0, hash_spacing=2.5,
+                                        margin=1.6, bond_spacing=0.18, font='Arial', font_size=10,
+                                        caption_font='Times New Roman', caption_size=12),
+    'Helv. Chim. Acta Document': dict(bond_length=17.0, line_width=0.6, bold_width=2.0, hash_spacing=2.0, margin=2.0,
+                                      bond_spacing=0.15, font='Arial', font_size=10, caption_font='Arial',
+                                      caption_size=12),
+    'J. Chin. Chem. Soc. Document': dict(bond_length=18.0, line_width=1.0, bold_width=2.5, hash_spacing=2.5,
+                                         margin=2.0, bond_spacing=0.20, font='Arial', font_size=12,
+                                         caption_font='Arial', caption_size=12),
+    'J. Het. Chem.': dict(bond_length=10.8, line_width=0.605, bold_width=2.06, hash_spacing=1.3, margin=1.08,
+                          bond_spacing=0.16, font='Times New Roman', font_size=7, caption_font='Times New Roman',
+                          caption_size=7),
+    'J. Mol. Mod.': dict(bond_length=14.4, line_width=0.6, bold_width=2.0, hash_spacing=2.5, margin=1.6,
+                         bond_spacing=0.18, font='Times New Roman', font_size=10, caption_font='Times New Roman',
+                         caption_size=10),
+    'Phytomedicine Document': dict(bond_length=20.0, line_width=1.0, bold_width=1.33, hash_spacing=3.0, margin=1.25,
+                                   bond_spacing=0.08, font='Arial', font_size=12, label_bold=True,
+                                   caption_font='Arial', caption_size=12),
+}
+for _sheet in STYLE_SHEETS.values():                       # what a sheet does not set goes back to plain defaults
+    _sheet.setdefault('label_bold', False)
+PAGES = {'A4': (595.28, 841.89), 'A3': (841.89, 1190.55), 'A5': (419.53, 595.28), 'B5': (498.9, 708.66),
+         'Letter': (612.0, 792.0), 'Legal': (612.0, 1008.0), 'Tabloid': (792.0, 1224.0)}    # pt, portrait
+
+
+def page_size(style):
+    """(width, height) in pt of the page a style asks for, turned for landscape."""
+    w, h = PAGES.get(style.get('page', 'A4'), PAGES['A4'])
+    return (h, w) if style.get('orientation') == 'landscape' else (w, h)
 ELEMENT_COLORS = {'N': '#2846C8', 'O': '#E01E1E', 'S': '#B89400', 'P': '#E07000', 'F': '#2A9A2A', 'Cl': '#1C9A1C',
                   'Br': '#A0291A', 'I': '#7A1FA0', 'B': '#C07070', 'Si': '#B08000', 'Se': '#B07000'}
 OVERLAY = '#2D5FB8'                                         # stereo labels and atom numbers
@@ -58,8 +108,9 @@ def text_path(text, family, size, x, y, bold=False, italic=False):
 
 
 class Metrics:
-    def __init__(self, family):
+    def __init__(self, family, bold=False):
         self.family = family
+        self.bold = bold                                    # the default weight (bold atom labels in some styles)
         self.fms = {}
 
     def fm(self, bold=False, italic=False):
@@ -67,7 +118,8 @@ class Metrics:
             self.fms[(bold, italic)] = QFontMetricsF(_font(self.family, bold, italic))
         return self.fms[(bold, italic)]
 
-    def width(self, text, size, bold=False, italic=False):
+    def width(self, text, size, bold=None, italic=False):
+        bold = self.bold if bold is None else bold
         return self.fm(bold, italic).horizontalAdvance(text) * size / REF
 
     def cap(self, size):
@@ -134,7 +186,8 @@ class Renderer:
         self.doc = doc
         self.s = style_of(doc)
         self.BL = self.s['bond_length']
-        self.m = Metrics(self.s['font'])
+        self.m = Metrics(self.s['font'], bold=bool(self.s['label_bold']))     # atom labels
+        self.mc = Metrics(self.s['caption_font'])                          # captions
         self.labels = {a: self._label(a) for a in doc.atoms}
         self._cip = None
 
@@ -181,14 +234,8 @@ class Renderer:
                 pieces.append((self._charge_text(at.charge), x + 0.3, base - ch + 0.15 * fs, small))
             rect = QRectF(x0, base - ch, x - x0, ch + 0.2 * small)
             return dict(pieces=pieces, clip=(aw / 2 + s['margin'], ch / 2 + s['margin']), rect=rect)
-        if at.el == 'C' and nb:
-            if not at.charge:
-                return None
-            fx, fy = doc.free_direction(a)                  # a carbocation / carbanion: the charge beside the vertex
-            t = self._charge_text(at.charge)
-            w = m.width(t, small)
-            px, py = cx + fx * 0.32 * self.BL - w / 2, cy + fy * 0.32 * self.BL + m.cap(small) / 2
-            return dict(pieces=[(t, px, py, small)], clip=None, rect=QRectF(px, py - m.cap(small), w, m.cap(small)))
+        if at.el == 'C' and nb and not at.charge and not (s['show_terminal_carbons'] and len(nb) == 1):
+            return None                                     # a plain vertex (a charged carbon shows C, its H and charge)
         sym = at.el
         hs = doc.implicit_h(a)
         ws = m.width(sym, fs)
@@ -224,18 +271,79 @@ class Renderer:
                 pieces.append(('H', cx - wh / 2, hy, fs))
                 if hcount:
                     pieces.append((hcount, cx + wh / 2, hy + 0.28 * fs, small))
-        if at.charge:                                       # top right, or top left when the bonds come from the right
-            t = self._charge_text(at.charge)
-            left_end = min(x for _t, x, _y, _s in pieces)
-            if nb and doc.free_direction(a)[0] < -0.3 and not (hs and pieces[1][1] < x0):
-                pieces.append((t, left_end - m.width(t, small) - 0.3, base - ch + 0.15 * fs, small))
-            else:
-                pieces.append((t, right_end + 0.3, base - ch + 0.15 * fs, small))
+        charge_rect = None
+        if at.charge:
+            piece = self._place_charge(a, at.charge, pieces, x0, ws, base, ch, fs, small, right_end)
+            pieces.append(piece)
+            charge_rect = QRectF(piece[1], piece[2] - m.cap(small), m.width(piece[0], small), m.cap(small))
         rect = QRectF()
         for text, x, y, size in pieces:
             r = QRectF(x, y - m.cap(size), m.width(text, size), m.cap(size) + (0.2 * size if size == small else 0))
             rect = r if rect.isNull() else rect.united(r)
-        return dict(pieces=pieces, clip=(ws / 2 + s['margin'], ch / 2 + s['margin']), rect=rect)
+        return dict(pieces=pieces, clip=(ws / 2 + s['margin'], ch / 2 + s['margin']), rect=rect,
+                    charge_rect=charge_rect)
+
+    def charge_rect(self, a):
+        """QRectF (pt) of the atom's charge sign, or None (what the mouse grabs to move it)."""
+        lab = self.labels.get(a)
+        return lab.get('charge_rect') if lab else None
+
+    def _place_charge(self, a, z, pieces, x0, ws, base, ch, fs, small, right_end):
+        """The charge as a label piece, on the atom's own symbol: the first of top right, bottom right, top left,
+        bottom left, right, left (ChemDraw's order) that is clear of the bonds and of the atom's H."""
+        doc, m, BL = self.doc, self.m, self.BL
+        at = doc.atoms[a]
+        cx, cy = at.x * BL, at.y * BL
+        t = self._charge_text(z)
+        w, hgt = m.width(t, small), m.cap(small)
+        if at.charge_pos:                                   # dragged by hand: centred where it was dropped
+            dx, dy = at.charge_pos
+            return (t, cx + dx * BL - w / 2, cy + dy * BL + hgt / 2, small)
+        gap = 0.3
+        row_right = right_end if any(abs(p[2] - base) < 0.1 for p in pieces[1:]) else x0 + ws
+        top, bottom, mid = base - ch + 0.15 * fs, base + 0.35 * fs, base - ch / 2 + hgt / 2
+        left = min(p[1] for p in pieces if abs(p[2] - base) < 0.1 or p[2] > base) - w - gap
+        candidates = [(row_right + gap, top), (x0 + ws + gap, bottom), (left, top), (x0 - w - gap, bottom),
+                      (row_right + gap, mid), (left, mid)]
+        others = [QRectF(x, y - m.cap(size), m.width(txt, size), m.cap(size)) for txt, x, y, size in pieces]
+        hw, hh = ws / 2 + self.s['margin'], ch / 2 + self.s['margin']
+        segments = []                                       # the drawn lines of each bond, from the label's edge
+        sp = self.s['bond_spacing'] * BL
+        for n, b in doc.neighbors(a):
+            o = doc.atoms[n]
+            dx, dy = o.x * BL - cx, o.y * BL - cy
+            L = (dx * dx + dy * dy) ** 0.5 or 1.0
+            start = max(0.0, exit_t(0, 0, dx / L, dy / L, hw, hh) - 1.0)
+            order = doc.bonds[b].order
+            offsets = [0.0] if order == 1 else [-sp, 0.0, sp] if order == 3 else [-sp, -sp / 2, 0.0, sp / 2, sp]
+            nx, ny = -dy / L, dx / L
+            for off in offsets:                             # second and third lines too (either side, to be safe)
+                segments.append([(cx + nx * off + dx * (start + (L - start) * k / 40) / L,
+                                  cy + ny * off + dy * (start + (L - start) * k / 40) / L) for k in range(41)])
+
+        def clear(x, y):
+            r = QRectF(x, y - hgt, w, hgt)
+            if any(r.adjusted(0.1, 0.1, -0.1, -0.1).intersects(o) for o in others):   # not on the label's letters
+                return False
+            near = r.adjusted(-1.4, -1.4, 1.4, 1.4)                                 # a visible gap to any bond
+            return not any(near.contains(QPointF(px, py)) for seg in segments for px, py in seg)
+        for x, y in candidates:
+            if clear(x, y):
+                return (t, x, y, small)
+        # crowded (four bonds, a ring and an H ...): the middle of the widest gap between the bonds and the H
+        import math
+        angles = [math.atan2(doc.atoms[n].y - at.y, doc.atoms[n].x - at.x) for n, _b in doc.neighbors(a)]
+        for txt, px_, py_, _size in pieces[1:]:
+            if txt == 'H':
+                angles.append(math.atan2(py_ - ch / 2 - cy, px_ + m.width('H', fs) / 2 - cx))
+        angles.sort()
+        gaps = [((angles[(k + 1) % len(angles)] - angles[k]) % (2 * math.pi) or 2 * math.pi, angles[k])
+                for k in range(len(angles))]
+        size, start = max(gaps)
+        ang = start + size / 2
+        dist = max(hw, hh) + max(w, hgt) * 0.4
+        mx, my = cx + math.cos(ang) * dist, cy + math.sin(ang) * dist
+        return (t, mx - w / 2, my + hgt / 2, small)
 
     @staticmethod
     def _charge_text(z):
@@ -425,9 +533,9 @@ class Renderer:
     def text_layout(self, i):
         """[(text, x, baseline, size)] pieces of text item i (subscripts as their own pieces) and its QRectF."""
         t = self.doc.texts[i]
-        fs = t.size or self.s['font_size']
+        fs = t.size or self.s['caption_size']
         small = fs * SUB
-        m = self.m
+        m = self.mc
         lh = m.line(fs)
         pieces = []
         rect = QRectF()
@@ -453,6 +561,9 @@ class Renderer:
     def shape_paths(self, i):
         sh = self.doc.shapes[i]
         BL = self.BL
+        if sh.kind in model.BIO_KINDS:
+            import biodraw
+            return biodraw.outline(self, sh)
         x1, x2 = sorted((sh.x1 * BL, sh.x2 * BL))
         y1, y2 = sorted((sh.y1 * BL, sh.y2 * BL))
         p = QPainterPath()
@@ -609,8 +720,16 @@ class Renderer:
             return QPen(color, s['line_width'], Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
         self.paint_fills_and_highlights(p)
         for i, sh in doc.shapes.items():
+            if sh.kind in model.BIO_KINDS:
+                import biodraw
+                biodraw.paint_bio(self, p, i)
+                continue
             p.setPen(pen(self.color(sh))); p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawPath(self.shape_paths(i))
+        if doc.seqs:
+            import biodraw
+            for i in doc.seqs:
+                biodraw.paint_seq(self, p, i)
         for i, bd in doc.bonds.items():
             color = self.color(bd)
             stroke, fill = self.bond_paths(i)
@@ -624,7 +743,7 @@ class Renderer:
                 continue
             p.setPen(Qt.PenStyle.NoPen); p.setBrush(QBrush(self.color(doc.atoms[a], a)))
             for text, x, y, size in lab['pieces']:
-                p.drawPath(text_path(text, s['font'], size, x, y))
+                p.drawPath(text_path(text, s['font'], size, x, y, bold=bool(s['label_bold'])))
         for i, ar in doc.arrows.items():
             color = self.color(ar)
             stroke, fill = self.arrow_paths(i)
@@ -637,7 +756,7 @@ class Renderer:
             p.setBrush(QBrush(self.color(t)))
             for txt, x, y, size in self.text_layout(i)[0]:
                 if txt.strip():
-                    p.drawPath(text_path(txt, s['font'], size, x, y, t.bold, t.italic))
+                    p.drawPath(text_path(txt, s['caption_font'], size, x, y, t.bold, t.italic))
         if s['show_stereo'] or s['show_atom_numbers']:
             self.paint_overlays(p)
         if errors:
@@ -724,6 +843,8 @@ class Renderer:
             add(self.shape_paths(i).boundingRect().adjusted(-1, -1, 1, 1))
         for i in self.doc.grids:
             add(self.grid_rect(i).adjusted(-1, -1, 1, 1))
+        for i in self.doc.seqs:
+            add(self.item_rect('seq', i).adjusted(-1, -1, 1, 1))
         if not r.isNull() and (self.s['show_stereo'] or self.s['show_atom_numbers']):
             r = r.adjusted(-6, -6, 6, 6)
         return r
@@ -746,6 +867,9 @@ class Renderer:
             return self.text_rect(i)
         if kind == 'grid':
             return self.grid_rect(i)
+        if kind == 'seq':
+            import biodraw
+            return biodraw.seq_layout(self, i)['rect']
         return self.shape_paths(i).boundingRect()
 
 
