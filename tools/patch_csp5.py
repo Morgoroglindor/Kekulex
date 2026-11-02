@@ -12,7 +12,7 @@ setup = root / 'setup.py'
 s = setup.read_text()
 old = '''        if os.name == "nt":
             raise RuntimeError("Building CSP5 native matching backends on Windows is unsupported")'''
-new = '''        if os.name == "nt":                    # patched for Structure editor: prediction only, no peak matching
+new = '''        if os.name == "nt":                    # patched for Kekulex: prediction only, no peak matching
             self.announce("Skipping native matching backends on Windows", level=2)
             return'''
 assert old in s or new in s

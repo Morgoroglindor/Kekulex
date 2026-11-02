@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#14213d">
+<title>Kekulex</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header id="top">
+  <button id="menuBtn" class="icon" aria-label="Menu">☰</button>
+  <button id="formulaChip" aria-label="Formula and masses"><span id="formulaText">Kekulex</span></button>
+  <button id="undoBtn" class="icon" aria-label="Undo">↶</button>
+  <button id="redoBtn" class="icon" aria-label="Redo">↷</button>
+</header>
+<main id="stage">
+  <canvas id="canvas" aria-label="Drawing"></canvas>
+  <div id="selBar" hidden></div>
+  <div id="toast" role="status" hidden></div>
+</main>
+<nav id="tools">
+  <div id="options" class="row"></div>
+  <div id="toolRow" class="row"></div>
+</nav>
+<div id="scrim" hidden></div>
+<aside id="sheet" hidden></aside>
+<input id="fileInput" type="file" hidden>
+<script src="rdkit/RDKit_minimal.js"></script>
+<script type="module" src="app.js"></script>
+</body>
+</html>

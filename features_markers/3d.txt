@@ -1,0 +1,1 @@
+The 3D tab was chosen in the installer.

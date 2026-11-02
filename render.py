@@ -66,7 +66,8 @@ STYLE_SHEETS = {
 }
 for _sheet in STYLE_SHEETS.values():                       # what a sheet does not set goes back to plain defaults
     _sheet.setdefault('label_bold', False)
-PAGES = {'A4': (595.28, 841.89), 'A3': (841.89, 1190.55), 'A5': (419.53, 595.28), 'B5': (498.9, 708.66),
+PAGES = {'A0': (2383.94, 3370.39), 'A1': (1683.78, 2383.94), 'A2': (1190.55, 1683.78), 'A3': (841.89, 1190.55),
+         'A4': (595.28, 841.89), 'A5': (419.53, 595.28), 'B5': (498.9, 708.66),
          'Letter': (612.0, 792.0), 'Legal': (612.0, 1008.0), 'Tabloid': (792.0, 1224.0)}    # pt, portrait
 
 
@@ -564,6 +565,9 @@ class Renderer:
         if sh.kind in model.BIO_KINDS:
             import biodraw
             return biodraw.outline(self, sh)
+        if sh.kind in model.ELEMENT_KINDS or sh.style:
+            import elements
+            return elements.outline(self, sh)
         x1, x2 = sorted((sh.x1 * BL, sh.x2 * BL))
         y1, y2 = sorted((sh.y1 * BL, sh.y2 * BL))
         p = QPainterPath()
@@ -724,12 +728,20 @@ class Renderer:
                 import biodraw
                 biodraw.paint_bio(self, p, i)
                 continue
+            if sh.kind in model.ELEMENT_KINDS or sh.style:
+                import elements
+                elements.paint(self, p, i)
+                continue
             p.setPen(pen(self.color(sh))); p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawPath(self.shape_paths(i))
         if doc.seqs:
             import biodraw
             for i in doc.seqs:
                 biodraw.paint_seq(self, p, i)
+        if doc.tlcs:
+            import tlc
+            for i in doc.tlcs:
+                tlc.paint(self, p, i)
         for i, bd in doc.bonds.items():
             color = self.color(bd)
             stroke, fill = self.bond_paths(i)
@@ -845,6 +857,8 @@ class Renderer:
             add(self.grid_rect(i).adjusted(-1, -1, 1, 1))
         for i in self.doc.seqs:
             add(self.item_rect('seq', i).adjusted(-1, -1, 1, 1))
+        for i in self.doc.tlcs:
+            add(self.item_rect('tlc', i).adjusted(-1, -1, 1, 1))
         if not r.isNull() and (self.s['show_stereo'] or self.s['show_atom_numbers']):
             r = r.adjusted(-6, -6, 6, 6)
         return r
@@ -870,6 +884,9 @@ class Renderer:
         if kind == 'seq':
             import biodraw
             return biodraw.seq_layout(self, i)['rect']
+        if kind == 'tlc':
+            import tlc
+            return tlc.layout(self, i)['rect']
         return self.shape_paths(i).boundingRect()
 
 

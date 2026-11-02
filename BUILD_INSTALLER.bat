@@ -1,17 +1,17 @@
 @echo off
 rem ==========================================================================================
-rem  Builds StructureEditor_Setup.exe, a normal Windows installer for the Structure editor.
+rem  Builds Kekulex_Setup.exe, a normal Windows installer for Kekulex.
 rem  Double-click this file. It checks for Python and Inno Setup and installs them if missing.
 rem  Needs an internet connection the first time; takes about 10-20 minutes.
-rem  Result: installer_output\StructureEditor_Setup.exe  (the people who use the programs need neither
-rem  Python nor this folder: they just run StructureEditor_Setup.exe)
+rem  Result: installer_output\Kekulex_Setup.exe  (the people who use the programs need neither
+rem  Python nor this folder: they just run Kekulex_Setup.exe)
 rem ==========================================================================================
 setlocal EnableExtensions
-title Building the Structure editor installer
+title Building Kekulex installer
 cd /d "%~dp0"
 echo.
 echo  ============================================================
-echo   Structure editor : installer builder
+echo   Kekulex : installer builder
 echo  ============================================================
 echo.
 
@@ -37,31 +37,23 @@ if not exist ".venv\Scripts\python.exe" ( "%PYEXE%" -m venv .venv || goto :fail 
 call ".venv\Scripts\activate.bat"
 python -m pip install --upgrade pip >nul
 python -m pip install -r requirements-dev.txt || goto :fail
-python -c "import csp5, torch" >nul 2>&1
-if errorlevel 1 call :installnmr
-set "NMRFLAGS="
-python -c "import csp5, torch" >nul 2>&1
-if errorlevel 1 (
-    echo       NMR prediction ^(CSP5^) could not be installed: the program is built without it.
-) else (
-    echo       NMR prediction ^(CSP5^) included.
-    rem csp5's model code is collected as files, so PyInstaller does not see what it imports (scikit-learn ...)
-    set "NMRFLAGS=--collect-all csp5 --collect-all sklearn --hidden-import scipy --hidden-import pyarrow --hidden-import tqdm"
-)
+rem NMR prediction runs on numpy (nmr_engine.py, weights in nmr_models): PyTorch and CSP5 are not part of the program
 for /f "delims=" %%V in ('python -c "from version import __version__;print(__version__)"') do set "APPVER=%%V"
 if not defined APPVER goto :fail
 echo       version %APPVER%
 
 rem ---------------------------------------------------------------- 3. programs
 echo [3/5] Building the programs (this is the slow step) ...
-python -m PyInstaller --noconfirm --clean --windowed --onedir --name StructureEditor --icon structureeditor.ico --paths . ^
-  --add-data "structureeditor.ico;." --hidden-import theme --hidden-import icons --hidden-import stoich_dialog --hidden-import pubchem ^
-  --hidden-import nmr --hidden-import nmr_dialog --hidden-import plotcanvas --hidden-import biopolymer ^
-  --hidden-import biodraw --hidden-import bio_dialog --collect-all rdkit --collect-all openclatura %NMRFLAGS% ^
-  --exclude-module tkinter --exclude-module PyQt5 --exclude-module PySide2 --exclude-module PySide6 ^
+python -m PyInstaller --noconfirm --clean --windowed --onedir --name Kekulex --icon kekulex.ico --paths . ^
+  --add-data "kekulex.ico;." --add-data "nmr_models;nmr_models" --hidden-import theme --hidden-import icons --hidden-import stoich_dialog --hidden-import pubchem ^
+  --hidden-import nmr --hidden-import nmr_engine --hidden-import nmr_dialog --hidden-import plotcanvas --hidden-import biopolymer ^
+  --hidden-import biodraw --hidden-import bio_dialog --hidden-import elements --hidden-import fragment ^
+  --hidden-import tlc --hidden-import mol3d --hidden-import view3d --hidden-import layout2d --hidden-import md_export --hidden-import features --collect-all rdkit --collect-all openclatura ^
+  --exclude-module torch --exclude-module csp5 --exclude-module pandas --exclude-module pyarrow --exclude-module scipy ^
+  --exclude-module sklearn --exclude-module sympy --exclude-module networkx --exclude-module tkinter --exclude-module PyQt5 --exclude-module PySide2 --exclude-module PySide6 ^
   --exclude-module IPython --exclude-module ipywidgets --exclude-module notebook --exclude-module pytest ^
-  structure_editor.py || goto :fail
-if not exist "dist\StructureEditor\StructureEditor.exe" goto :fail
+  kekulex.py || goto :fail
+if not exist "dist\Kekulex\Kekulex.exe" goto :fail
 
 rem ---------------------------------------------------------------- 4. Inno Setup (makes the installer)
 call :findiscc
@@ -85,10 +77,10 @@ if errorlevel 1 (
     echo Retrying without the Portuguese language file ...
     "%ISCC%" /DAppVersion=%APPVER% /DNOPT installer.iss || goto :fail
 )
-if not exist "installer_output\StructureEditor_Setup.exe" goto :fail
+if not exist "installer_output\Kekulex_Setup.exe" goto :fail
 echo.
 echo  ============================================================
-echo   Done.  installer_output\StructureEditor_Setup.exe
+echo   Done.  installer_output\Kekulex_Setup.exe
 echo   Double-click it to install, or send it to colleagues.
 echo  ============================================================
 start "" explorer "%~dp0installer_output"
@@ -149,16 +141,4 @@ if not errorlevel 1 (
 echo winget is not available: downloading Inno Setup from jrsoftware.org ...
 powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest 'https://jrsoftware.org/download.php/is.exe' -OutFile '%TEMP%\innosetup.exe'"
 if exist "%TEMP%\innosetup.exe" "%TEMP%\innosetup.exe" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CURRENTUSER
-exit /b 0
-
-:installnmr
-rem NMR prediction: PyTorch (CPU build) and CSP5 0.3.1, whose authors do not build it for Windows: its source is
-rem downloaded and patched (tools\patch_csp5.py leaves out the optional peak-matching helpers) - see requirements-nmr.txt
-echo       Installing NMR prediction (PyTorch CPU + CSP5, about 250 MB the first time) ...
-python -m pip install --index-url https://download.pytorch.org/whl/cpu torch==2.15.0 || exit /b 0
-if not exist "build\csp5" mkdir "build\csp5"
-python -m pip download --no-deps --no-binary :all: csp5==0.3.1 -d build\csp5 || exit /b 0
-tar -xzf build\csp5\csp5-0.3.1.tar.gz -C build\csp5 || exit /b 0
-python tools\patch_csp5.py build\csp5\csp5-0.3.1 || exit /b 0
-python -m pip install build\csp5\csp5-0.3.1
 exit /b 0

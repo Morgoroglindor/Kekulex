@@ -1,0 +1,1 @@
+NMR prediction was chosen in the installer.

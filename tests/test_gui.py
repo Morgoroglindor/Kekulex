@@ -12,7 +12,7 @@ from model import Doc
 
 @pytest.fixture
 def win(qapp):
-    import structure_editor as se
+    import kekulex as se
     w = se.MainWindow()
     w.resize(1200, 800)
     w.show()

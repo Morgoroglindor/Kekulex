@@ -1,0 +1,6 @@
+{
+  "appId": "io.github.kekulex.app",
+  "appName": "Kekulex",
+  "webDir": "www",
+  "android": { "backgroundColor": "#ffffff" }
+}

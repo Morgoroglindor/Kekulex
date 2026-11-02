@@ -1,9 +1,9 @@
 """
-applog.py - log file and crash handler for the Structure editor.
+applog.py - log file and crash handler for Kekulex.
 
     applog.setup()          # once, at start-up
 
-Messages go to %APPDATA%\\StructureEditor\\structureeditor.log (rotated at 1 MB, 3 old files kept). An exception nobody caught is written
+Messages go to %APPDATA%\\Kekulex\\kekulex.log (rotated at 1 MB, 3 old files kept). An exception nobody caught is written
 there with its traceback and shown in a dialog, instead of vanishing (the installed .exe has no console).
 """
 import logging
@@ -15,9 +15,9 @@ import traceback
 
 from version import __version__
 
-LOG_DIR = os.path.join(os.environ.get('APPDATA') or os.path.expanduser('~/.config'), 'StructureEditor')
-LOG_FILE = os.path.join(LOG_DIR, 'structureeditor.log')
-log = logging.getLogger('structureeditor')
+LOG_DIR = os.path.join(os.environ.get('APPDATA') or os.path.expanduser('~/.config'), 'Kekulex')
+LOG_FILE = os.path.join(LOG_DIR, 'kekulex.log')
+log = logging.getLogger('kekulex')
 _showing = False
 
 
@@ -38,7 +38,7 @@ def setup(level=logging.INFO):
     log._lcv_setup = True
     sys.excepthook = _excepthook
     threading.excepthook = lambda a: _excepthook(a.exc_type, a.exc_value, a.exc_traceback)
-    log.info('Structure editor %s, Python %s', __version__, sys.version.split()[0])
+    log.info('Kekulex %s, Python %s', __version__, sys.version.split()[0])
 
 
 def _excepthook(etype, value, tb):
@@ -52,7 +52,7 @@ def _excepthook(etype, value, tb):
             return
         _showing = True                                     # one dialog at a time, even if the error repeats
         try:
-            box = QtWidgets.QMessageBox(QtWidgets.QMessageBox.Icon.Critical, 'Structure editor',
+            box = QtWidgets.QMessageBox(QtWidgets.QMessageBox.Icon.Critical, 'Kekulex',
                                         f'An unexpected error occurred:\n\n{etype.__name__}: {value}\n\n'
                                         f'The details are in\n{LOG_FILE}')
             box.setDetailedText(''.join(traceback.format_exception(etype, value, tb)))

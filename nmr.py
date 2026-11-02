@@ -6,18 +6,18 @@ aware, with an uncertainty for each shift).
         result = nmr.predict(doc, atom_ids, '1H', 'cdcl3')   # Result: signals (shift, +/-, atoms, H count, multiplicity)
         nmr.journal_text(result)                               # '1H NMR (CDCl3, predicted) δ 8.22 (d, 2H), ...'
 
-CSP5 is not built for Windows by its authors: the editor uses its source with the optional peak-matching helpers left
-out (tools/patch_csp5.py); prediction does not need them. The first prediction loads the model (several seconds).
+The models run on numpy (nmr_engine.py), with no PyTorch. The first prediction loads the model.
 Multiplicities are first-order, with expected coupling constants (see couplings()): vicinal sp3 7 Hz (Karplus on an
 RDKit 3D conformer for ring bonds: axial-axial ~10, axial-equatorial ~3), aromatic ortho 8 / meta 2 (5-ring 3.5, next
 to a ring N 5), alkene cis 10-11 / trans 16, sp2-sp2 single bond 11, aldehyde 2.5; OH / NH / SH as broad singlets.
 """
-import importlib.util
 from dataclasses import dataclass, field
 
 from rdkit import Chem
 
 import chem
+import features
+import nmr_engine
 
 SOLVENTS = (('CDCl₃', 'cdcl3'), ('DMSO-d₆', 'dmso-d6'), ('CD₃OD', 'cd3od'), ('D₂O', 'd2o'), ('Acetone-d₆', 'acetone-d6'),
             ('CD₂Cl₂', 'cd2cl2'), ('C₆D₆', 'c6d6'), ('CD₃CN', 'cd3cn'), ('THF-d₈', 'thf-d8'),
@@ -28,7 +28,7 @@ J_FREE = 7.0                                                # vicinal H-C-C-H ac
 
 
 def available():
-    return importlib.util.find_spec('csp5') is not None and importlib.util.find_spec('torch') is not None
+    return features.installed(features.NMR) and nmr_engine.available()
 
 
 @dataclass
@@ -72,24 +72,19 @@ def _mol_for(doc, atom_ids):
 
 def predict(doc, atom_ids, nucleus='1H', solvent='cdcl3'):
     """Predicted signals of the structure (atom_ids None: everything drawn)."""
-    import csp5
     mol, to_drawing = _mol_for(doc, atom_ids)
     if Chem.MolToSmiles(mol).count('.'):
         raise ValueError('Select one structure for NMR prediction (the drawing holds several).')
     smiles = Chem.MolToSmiles(mol)
-    model = 'CSP5q-13C' if nucleus == '13C' else 'CSP5q-1H'
-    r = csp5.predict_smiles([smiles], nucleus=nucleus, model_name=model, solvent=solvent, random_seed=1)
-    if r.failures or not r.molecule_records:
-        raise ValueError('CSP5 could not predict this structure.')
-    rec = r.molecule_records[0].mol
+    r = nmr_engine.predict(smiles, nucleus, solvent)
+    rec = r.mol
     match = rec.GetSubstructMatch(mol)                      # drawn atom k -> CSP5's atom match[k]
     if not match:
         raise ValueError('The prediction could not be matched to the drawing.')
     rec_to_drawing = {rec_idx: to_drawing[k] for k, rec_idx in enumerate(match)}
     ranks = list(Chem.CanonicalRankAtoms(rec, breakTies=False))
     groups = {}                                             # symmetry class -> [(shift, std, drawing atom, rec atom, H)]
-    for _i, row in r.predictions.iterrows():
-        idx = int(row['atom_index'])
+    for idx, row_shift, row_std in zip(r.atom_index, r.shift_ppm, r.shift_std_ppm):
         heavy = idx
         if nucleus == '1H':
             nbrs = rec.GetAtomWithIdx(idx).GetNeighbors()
@@ -98,10 +93,8 @@ def predict(doc, atom_ids, nucleus='1H', solvent='cdcl3'):
             heavy = nbrs[0].GetIdx()
         if heavy not in rec_to_drawing:
             continue
-        std = float(row.get('shift_std_ppm', 0.0) or 0.0)
-        std = 0.0 if std != std else std                    # NaN: no uncertainty given
-        groups.setdefault(ranks[idx], []).append((float(row['shift_ppm']), std, rec_to_drawing[heavy], heavy, idx))
-    result = Result(nucleus, solvent, warnings=list(r.warnings or []))
+        groups.setdefault(ranks[idx], []).append((row_shift, row_std, rec_to_drawing[heavy], heavy, idx))
+    result = Result(nucleus, solvent)
     if nucleus == '1H':                                     # couplings on the drawn molecule: it keeps the wedges
         hmol = Chem.AddHs(mol)
         hmatch = rec.GetSubstructMatch(hmol)

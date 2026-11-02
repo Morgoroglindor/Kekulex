@@ -17,5 +17,5 @@ def qapp():
 
 
 @pytest.fixture(autouse=True)
-def _settings_file(tmp_path, monkeypatch):
+def _settings_file(tmp_path, monkeypatch, qapp):
     monkeypatch.setenv('SED_SETTINGS_FILE', str(tmp_path / 'settings.ini'))

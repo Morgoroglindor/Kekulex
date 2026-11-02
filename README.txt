@@ -1,8 +1,8 @@
-Structure editor - draw chemical structures for figures and slides, and read off their formula, exact mass and the
+Kekulex (formerly Structure editor) - draw chemical structures for figures and slides, and read off their formula, exact mass and the
 m/z of the usual LC-MS adducts. A sibling of LC viewer and Spectra viewer.
 
-Run from source:   pip install -r requirements.txt  ;  python structure_editor.py [drawing.sed | file.mol | file.sdf | file.smi]
-Windows installer: double-click BUILD_INSTALLER.bat; it creates installer_output\StructureEditor_Setup.exe
+Run from source:   pip install -r requirements.txt  ;  python kekulex.py [drawing.sed | file.mol | file.sdf | file.smi]
+Windows installer: double-click BUILD_INSTALLER.bat; it creates installer_output\Kekulex_Setup.exe
 Tests:             pip install -r requirements-dev.txt  ;  python -m pytest
 
 Drawing (Help > How to draw in the program says the same)
@@ -22,7 +22,19 @@ Drawing (Help > How to draw in the program says the same)
                    Help > Keyboard shortcuts lists all of them.
   Select           click / Shift+click / drag a box; drag to move; drop one atom on another to merge; arrows nudge.
   SMILES box       paste a SMILES, Enter. Ctrl+V pastes SMILES or MOL text. File > Open reads .mol, .sdf, .smi.
-  Clean up         Ctrl+Shift+K lays the selected structures out again (RDKit), keeping stereo.
+  Clean up         Ctrl+Shift+K or Ctrl+Alt+K lays the selected structures out again (RDKit), keeping stereo.
+  Usual drawings   a structure from a name or SMILES, or cleaned up, follows the usual orientation of common skeletons
+                   (steroids, triterpenes, betalains, purines, indoles, quinolines, flavonoids, penicillins, sugars
+                   ...: layout2d.py). A betalain by name comes in its usual form (ring NH, iminium N+).
+  3D tab           select a molecule, Structure > Send to 3D (Ctrl+3, also in the right-click Molecule menu): an
+                   RDKit + MMFF94 model with its conformers. Left drag rotates, right drag pans, the wheel zooms;
+                   click 2 / 3 / 4 atoms for a distance / angle / dihedral. It is a copy made when sent: it does
+                   not follow later edits and is not saved in the file. Choose MMFF94, MMFF94s or UFF, search
+                   conformers again, minimize one or all. Export for MD programs: PDB, MOL2 (Gasteiger charges),
+                   GROMACS .gro, AMBER .inpcrd, LAMMPS data, SDF, XYZ. They hold coordinates and bonds; force-field
+                   parameters come from ACPYPE / antechamber, CGenFF or LigParGen, which read the MOL2.
+  Optional parts   the installer asks whether to include NMR prediction (about 70 MB) and the 3D
+                   tab; run it again to add or remove them. A part left out disappears from the menus.
 
 ChemDraw-like features (0.3.0)
   Page view            the drawing sits on an A4 / Letter page (File > Document settings); View > Whole page.
@@ -79,8 +91,7 @@ ChemDraw-like features (0.3.0)
                        multiplicity with expected J: vicinal 7 Hz, ring CH-CH by Karplus on an RDKit 3D conformer,
                        aromatic ortho 8 / meta 2, alkene cis 10-11 / trans 16 ...), spectrometer 300-800 MHz, the
                        experimental-section line with J to copy, Label atoms, Paste text. OH / NH shifts are flagged as
-                       unreliable, and left out in D2O / CD3OD. Optional: install as in requirements-nmr.txt (CSP5 is patched to install on
-                       Windows by tools\patch_csp5.py). The first prediction loads the model (a few seconds).
+                       unreliable, and left out in D2O / CD3OD. An optional part of the installer; the CSP5 models run on numpy (nmr_engine.py), without PyTorch.
   Charges              as in ChemDraw: + / - change the hydrogens by the octet (NH2 -> NH3+ -> NH2 2+, C+ = CH+ with
                        its C shown); the sign goes on the atom's symbol, at the first spot clear of bonds and H
                        (top right, bottom right, top left, bottom left, sides, else the widest gap). Drag the sign
@@ -97,6 +108,24 @@ ChemDraw-like features (0.3.0)
                        line widths, margins, label and caption fonts as ChemDraw's style sheets set them).
   Page and printing    File > Document settings: page A4, A3, A5, B5, Letter, Legal, Tabloid, portrait or landscape;
                        caption font and size, bold labels, terminal CH3 labels. File > Print (Ctrl+P), Print Preview.
+
+Drawing elements, orbitals, fragmentation, TLC (as in ChemDraw's manual; the palettes open as grids)
+  Drawing elements     circle (drag out from the centre), oval, rounded rectangle, rectangle - each plain, dashed,
+                       shaded, filled or with a shadow; lines plain, dashed, wavy, bold; arcs 270 / 180 / 120 / 90
+                       degrees, solid or dashed (drag left to right: convex, right to left: concave). Right-click >
+                       Style changes it later. Kept in .cdxml (RectangleType / OvalType / LineType words); arcs stay
+                       in .sed.
+  Orbitals (Shift+G)   s, σ, single lobe, p, hybrid sp3, dxy, dz2 - plain, shaded or filled (the + phase). Click an
+                       atom to put one on it, or drag from the atom to set size and direction.
+  Fragmentation        Mass fragmentation: drag across bonds - the formula and exact mass of each side appear under
+                       the structure, as homolytic cleavage (radicals; Alt keeps the cut line; a ring bond alone
+                       gives one formula). Retrosynthesis: the product, ⇒, then the pieces (filled up with H).
+                       Synthesis: the pieces, →, then the product. Not predictions: you choose the bonds.
+  TLC plate (g)        drag a plate (the width sets the lanes) or click. Drag a spot to set its Rf (shown while
+                       dragging), Shift+drag to resize it, Ctrl+drag to copy it to another lane; Eraser on a spot
+                       deletes it. Right-click: add / duplicate / delete lane, show origin, solvent front, border,
+                       side ticks, Rf of all or one spot, spot style (filled, shaded, hollow) and colour, Set Rf.
+                       Double-click: type the Rf values, one lane per line. Kept in .sed files.
 
 Biology (like ChemDraw's HELM / biopolymer tools and BioDraw; this program's own artwork and colours)
   Sequences            the sequence tool (three beads, under Text) or Biopolymer > Insert sequence (Ctrl+Shift+Q):
@@ -142,12 +171,14 @@ Masses (panel on the right)
   Atoms over their usual valence get a red box.
 
 Files
-  structure_editor.py   window + entry point: tools, menus, files, clipboard, export, style dialog
+  kekulex.py   window + entry point: tools, menus, files, clipboard, export, style dialog
   canvas.py        the drawing area: tools, mouse, keys, selection, undo / redo, clean up
   model.py         the drawing (atoms, bonds, arrows, text, shapes, nicknames) and its geometry; MOL; RDKit in
   cdxml.py         ChemDraw .cdxml reading and writing
   biopolymer.py    sequences: monomers, FASTA / three-letter / HELM reading and writing, the molecule, analysis
-  biodraw.py       drawing of sequences and BioDraw objects; bio_dialog.py the sequence and plasmid editors
+  biodraw.py       drawing of sequences and BioDraw objects; bio_dialog.py the sequence, plasmid and TLC editors
+  elements.py      drawing elements (styles, arcs) and orbitals; fragment.py mass fragmentation and (retro)synthesis
+  tlc.py           TLC plates: layout, drawing, spots and Rf
   templates.py     the Templates menu (SMILES)
   stoich.py        stoichiometry grid: reaction columns, unit parsing, calculations; stoich_dialog.py its editor
   pubchem.py       name <-> structure through PubChem (online, on request only)
@@ -157,8 +188,8 @@ Files
   theme.py, applog.py   look (light / dark) and log file + crash dialog - copied from Spectra viewer
   icons.py         tool icons drawn at start-up
   version.py       the version number (About box and installer)
-  tools\make_icon.py   draws structureeditor.ico
+  tools\make_icon.py   draws kekulex.ico
 
 The .sed file is JSON: atoms (x, y in bond lengths, y down; element; charge), bonds (atoms, order 1-3, stereo
 wedge / hash with the narrow end at atom a, double-bond side), arrows, texts and the drawing style.
-Log: %APPDATA%\StructureEditor\structureeditor.log
+Log: %APPDATA%\Kekulex\kekulex.log

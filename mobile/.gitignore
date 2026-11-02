@@ -1,0 +1,5 @@
+node_modules/
+.cache/
+dist/
+# made by tools/prepare_web.mjs
+www/rdkit/

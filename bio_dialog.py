@@ -217,3 +217,49 @@ class PlasmidDialog(QtWidgets.QDialog):
             return
         self.params = {'bp': bp, 'name': self.name.text().strip(), 'regions': regions, 'markers': markers}
         self.accept()
+
+
+class TLCDialog(QtWidgets.QDialog):
+    """The Rf values of a TLC plate, one line per lane (e.g. 0.25, 0.6); a blank line leaves an empty lane out."""
+
+    def __init__(self, plate, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('TLC plate')
+        theme.register_window(self)
+        self.plate = plate
+        lay = QtWidgets.QVBoxLayout(self)
+        lay.addWidget(QtWidgets.QLabel('Rf values of the spots, one lane per line (0 = origin, 1 = solvent front):'))
+        self.text = QtWidgets.QPlainTextEdit()
+        self.text.setPlainText('\n'.join(', '.join(f"{s['rf']:.2f}" for s in lane) for lane in plate.lanes))
+        lay.addWidget(self.text)
+        bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Ok |
+                                        QtWidgets.QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(self._accept); bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+        self.resize(380, 300)
+
+    def _accept(self):
+        import tlc
+        lanes = []
+        for n, line in enumerate(self.text.toPlainText().splitlines(), 1):
+            vals = [v for v in re.split(r'[,;\s]+', line.strip()) if v]
+            if not vals:
+                continue
+            old = self.plate.lanes[n - 1] if n - 1 < len(self.plate.lanes) else []
+            lane = []
+            for k, v in enumerate(vals):
+                try:
+                    rf = float(v.replace(',', '.'))
+                except ValueError:
+                    QtWidgets.QMessageBox.warning(self, 'TLC plate', f'Lane {n}: "{v}" is not a number.')
+                    return
+                if not 0 <= rf <= 1:
+                    QtWidgets.QMessageBox.warning(self, 'TLC plate', f'Lane {n}: Rf {v} is outside 0-1.')
+                    return
+                lane.append(dict(old[k], rf=round(rf, 3)) if k < len(old) else tlc.new_spot(rf))
+            lanes.append(lane)
+        if not lanes:
+            QtWidgets.QMessageBox.warning(self, 'TLC plate', 'A plate needs at least one lane with a spot.')
+            return
+        self.lanes = lanes
+        self.accept()

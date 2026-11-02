@@ -142,6 +142,11 @@ class Text:
 
 
 SHAPE_KINDS = ('rect', 'roundrect', 'oval', 'line', 'brackets', 'parens', 'braces')
+# ChemDraw's other drawing elements and the orbitals (elements.py draws them): a circle (centre x1,y1, edge x2,y2),
+# an arc (chord x1,y1 -> x2,y2, params['angle'] 90 / 120 / 180 / 270), an orbital (node x1,y1, tip x2,y2,
+# params['type'] s / sigma / lobe / p / hybrid / dxy / dz2)
+ELEMENT_KINDS = ('circle', 'arc', 'orbital')
+SHAPE_STYLES = ('', 'dashed', 'shaded', 'filled', 'shadow', 'bold', 'wavy')
 # BioDraw-like objects (drawn by render.bio_paint in their box; the "linear" ones along the line x1,y1 -> x2,y2)
 BIO_KINDS = ('membrane', 'membrane_arc', 'micelle', 'dna', 'helix', 'receptor', 'channel', 'enzyme', 'gprotein',
              'antibody', 'ribosome', 'trna', 'mrna', 'mito', 'nucleus', 'cell', 'bacterium', 'virus', 'cloud',
@@ -155,10 +160,30 @@ class Shape:
     y1: float
     x2: float
     y2: float
-    kind: str = 'rect'                                      # one of SHAPE_KINDS or BIO_KINDS (brackets come as a pair)
+    kind: str = 'rect'                                      # SHAPE_KINDS, ELEMENT_KINDS or BIO_KINDS (brackets in pairs)
     color: str = ''
     fill: str = ''                                          # bio objects: main fill colour ('' = the kind's default)
     params: dict = field(default_factory=dict)              # bio objects: plasmid {'bp', 'regions', 'markers'} ...
+    style: str = ''                                         # one of SHAPE_STYLES ('' plain; lines: dashed / bold /
+                                                            # wavy; orbitals: '' / shaded / filled phase)
+
+
+@dataclass
+class TLC:
+    """A thin-layer chromatography plate (tlc.py draws it): lanes of spots placed by Rf between the origin line and
+    the solvent front."""
+    x: float                                                # top-left corner, bond lengths
+    y: float
+    w: float = 3.0
+    h: float = 4.0
+    origin: float = 0.12                                    # origin line, fraction of the height from the bottom
+    front: float = 0.1                                      # solvent front, fraction of the height from the top
+    lanes: list = field(default_factory=list)               # [[{'rf', 'w', 'h', 'style', 'color', 'show_rf'}]]
+    show_origin: bool = True
+    show_front: bool = True
+    show_border: bool = True
+    show_ticks: bool = True
+    color: str = ''
 
 
 @dataclass
@@ -200,9 +225,9 @@ class Fill:
 
 
 KINDS = {'atom': Atom, 'bond': Bond, 'arrow': Arrow, 'text': Text, 'shape': Shape, 'grid': Grid, 'fill': Fill,
-         'seq': Sequence}
+         'seq': Sequence, 'tlc': TLC}
 PLURAL = {'atom': 'atoms', 'bond': 'bonds', 'arrow': 'arrows', 'text': 'texts', 'shape': 'shapes', 'grid': 'grids',
-          'fill': 'fills', 'seq': 'seqs'}
+          'fill': 'fills', 'seq': 'seqs', 'tlc': 'tlcs'}
 
 
 def angle_of(dx, dy):
@@ -224,6 +249,7 @@ class Doc:
         self.grids = {}
         self.fills = {}
         self.seqs = {}
+        self.tlcs = {}
         self.style = {}                                     # overrides of render.DEFAULT_STYLE
         self._next = 1
 
@@ -234,7 +260,8 @@ class Doc:
 
     def table(self, kind):
         return {'atom': self.atoms, 'bond': self.bonds, 'arrow': self.arrows, 'text': self.texts,
-                'shape': self.shapes, 'grid': self.grids, 'fill': self.fills, 'seq': self.seqs}[kind]
+                'shape': self.shapes, 'grid': self.grids, 'fill': self.fills, 'seq': self.seqs,
+                'tlc': self.tlcs}[kind]
 
     def add_atom(self, x, y, el='C', charge=0):
         i = self._id()
@@ -340,7 +367,7 @@ class Doc:
         del self.atoms[src]
 
     def is_empty(self):
-        return not (self.atoms or self.arrows or self.texts or self.shapes or self.grids or self.seqs)
+        return not (self.atoms or self.arrows or self.texts or self.shapes or self.grids or self.seqs or self.tlcs)
 
     # ------------------------------------------------------------------------------------------- hit testing
     def find_atom(self, x, y, r, exclude=()):
@@ -381,6 +408,13 @@ class Doc:
                 if biodraw.contains(s, x, y, r):
                     return i
                 continue
+            if s.kind in ELEMENT_KINDS or s.kind == 'line':
+                import elements
+                if elements.contains(s, x, y, r, BL=float(self.style.get('bond_length', 14.4))):
+                    return i
+                continue
+            if s.style in ('filled', 'shaded', 'shadow') and x1 - r <= x <= x2 + r and y1 - r <= y <= y2 + r:
+                return i
             if s.kind == 'line':
                 d = seg_dist(x, y, s.x1, s.y1, s.x2, s.y2)
             elif s.kind == 'oval':
@@ -737,6 +771,8 @@ class Doc:
                 pts.append((self.texts[i].x, self.texts[i].y))
             elif kind == 'seq' and i in self.seqs:
                 pts.append((self.seqs[i].x, self.seqs[i].y))
+            elif kind == 'tlc' and i in self.tlcs:
+                t = self.tlcs[i]; pts += [(t.x, t.y), (t.x + t.w, t.y + t.h)]
         return pts
 
     def transform(self, sel, fn):
@@ -756,12 +792,16 @@ class Doc:
                 t = self.texts[i]; t.x, t.y = fn(t.x, t.y)
             elif kind == 'seq' and i in self.seqs:
                 q = self.seqs[i]; q.x, q.y = fn(q.x, q.y)
+            elif kind == 'tlc' and i in self.tlcs:             # moved / scaled by its corners, kept upright
+                t = self.tlcs[i]
+                (ax, ay), (bx, by) = fn(t.x, t.y), fn(t.x + t.w, t.y + t.h)
+                t.x, t.y, t.w, t.h = min(ax, bx), min(ay, by), abs(bx - ax), abs(by - ay)
 
     def all_items(self):
         return ([('atom', i) for i in self.atoms] + [('bond', i) for i in self.bonds] +
                 [('arrow', i) for i in self.arrows] + [('text', i) for i in self.texts] +
                 [('shape', i) for i in self.shapes] + [('grid', i) for i in self.grids] +
-                [('seq', i) for i in self.seqs])
+                [('seq', i) for i in self.seqs] + [('tlc', i) for i in self.tlcs])
 
     # ------------------------------------------------------------------------------------------- files
     def to_dict(self, sel=None):
@@ -851,7 +891,7 @@ class Doc:
         order = [a for a in self.atoms if atom_ids is None or a in atom_ids]
         index = {a: k + 1 for k, a in enumerate(order)}
         bonds = [b for b in self.bonds.values() if b.a in index and b.b in index]
-        lines = [title, '  StructureEditor 2D', '',
+        lines = [title, '  Kekulex 2D', '',
                  f'{len(order):3d}{len(bonds):3d}  0  0  0  0  0  0  0  0999 V2000']
         for a in order:
             at = self.atoms[a]
@@ -869,11 +909,11 @@ class Doc:
     def insert_rdkit(self, mol, center=(0.0, 0.0)):
         """Add an RDKit molecule (laid out in 2D when it has no coordinates), centred on center; returns the new items."""
         from rdkit import Chem
-        from rdkit.Chem import rdDepictor
         mol = Chem.Mol(mol)
         if mol.GetNumConformers() == 0 or mol.GetConformer().Is3D():
-            rdDepictor.SetPreferCoordGen(True)
-            rdDepictor.Compute2DCoords(mol)
+            import layout2d
+            mol = layout2d.with_fusion_hydrogens(mol)
+            layout2d.compute(mol)
         try:
             Chem.ReapplyMolBlockWedging(mol)
         except (AttributeError, RuntimeError):

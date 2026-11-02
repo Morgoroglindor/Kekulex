@@ -403,8 +403,8 @@ def iupac_name(doc, atom_ids=None):
         name = openclatura.name_smiles(smiles)
     except Exception:
         import logging
-        logging.getLogger('structureeditor').warning('no name for %s', Chem.MolToSmiles(mol), exc_info=True)
+        logging.getLogger('kekulex').warning('no name for %s', Chem.MolToSmiles(mol), exc_info=True)
         return ''
     import logging
-    logging.getLogger('structureeditor').debug('named %s: %s', Chem.MolToSmiles(mol), name)
+    logging.getLogger('kekulex').debug('named %s: %s', Chem.MolToSmiles(mol), name)
     return nest_enclosures(name.strip()) if name else ''

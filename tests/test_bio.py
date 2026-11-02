@@ -17,7 +17,7 @@ from model import Doc, Sequence
 
 @pytest.fixture
 def win(qapp):
-    import structure_editor as se
+    import kekulex as se
     w = se.MainWindow()
     w.resize(1300, 850)
     w.show()

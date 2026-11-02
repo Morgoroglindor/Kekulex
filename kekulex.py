@@ -1,8 +1,8 @@
 """
-structure_editor.py - Structure editor: draw chemical structures for figures and slides and read off their formula,
+kekulex.py - Kekulex: draw chemical structures for figures and slides and read off their formula,
 exact mass and the m/z of the usual LC-MS adducts.
 
-    python structure_editor.py [drawing.sed | drawing.cdxml | file.cdx | file.mol | file.sdf | file.smi]
+    python kekulex.py [drawing.sed | drawing.cdxml | file.cdx | file.mol | file.sdf | file.smi]
 
 Left: the tool palette (drop-down groups for bonds, rings, arrows and shapes) and the elements. Top: the file / edit
 bar and the text style bar. Middle: the page. Right: formula, masses, elemental analysis, adduct m/z with isotope
@@ -18,10 +18,14 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 import applog
 import biodraw
 import biopolymer
+import canvas as canvas_mod
 import cdxml
 import chem
+import elements
+import features
 import icons
 import model
+import nmr
 import render
 import templates
 import theme
@@ -30,12 +34,29 @@ from info_panel import InfoPanel
 from model import Doc
 from version import __version__
 
-APP_NAME = 'Structure editor'
+APP_NAME = 'Kekulex'
 MIME = 'application/x-structure-editor'
 OPEN_FILTER = ('Structures and drawings (*.sed *.cdxml *.cdx *.mol *.sdf *.sd *.smi *.smiles);;'
-               'Structure editor drawings (*.sed);;ChemDraw files (*.cdxml *.cdx);;MOL / SDF files (*.mol *.sdf *.sd);;'
+               'Kekulex drawings (*.sed);;ChemDraw files (*.cdxml *.cdx);;MOL / SDF files (*.mol *.sdf *.sd);;'
                'SMILES files (*.smi *.smiles *.txt);;All files (*)')
-SAVE_FILTER = 'Structure editor drawing (*.sed);;ChemDraw XML (*.cdxml)'
+SAVE_FILTER = 'Kekulex drawing (*.sed);;ChemDraw XML (*.cdxml)'
+_STYLE_NAMES = {'': '', 'dashed': 'dashed', 'shaded': 'shaded', 'filled': 'filled', 'shadow': 'with shadow',
+                'wavy': 'wavy', 'bold': 'bold'}
+_KIND_NAMES = {'circle': 'Circle', 'oval': 'Oval', 'roundrect': 'Rounded rectangle', 'rect': 'Rectangle', 'line': 'Line',
+               'arc': 'Arc'}
+
+
+def _element_tip(name):
+    kind, style, params = canvas_mod.SHAPE_TOOLS[name]
+    if kind == 'arc':
+        return f"Arc {params['angle']}°" + (', dashed' if style else '') + ' (drag left to right: convex)'
+    return (_KIND_NAMES[kind] + (', ' + _STYLE_NAMES[style] if style else '')
+            + ('  (drag out from the centre)' if kind == 'circle' else ''))
+
+
+ELEMENT_TIPS = [(n, _element_tip(n)) for n in canvas_mod.ELEMENT_TOOLS]
+ORBITAL_TIPS = [(n, f"{elements.ORBITALS[n.split(':')[1]]}, {n.split(':')[2]}  (Shift+G)") for n in
+                canvas_mod.ORBITAL_TOOLS]
 # The palette: single tools, and drop-down groups (the button shows the last one used; click its arrow for the rest)
 TOOLS = (('lasso', 'Lasso: select free-hand'), ('select', 'Select / move  (Space)'),
          ('erase', 'Eraser  (Delete over an item)'), None,
@@ -55,9 +76,14 @@ TOOLS = (('lasso', 'Lasso: select free-hand'), ('select', 'Select / move  (Space
                               ('retro', 'Retrosynthetic arrow'), ('resonance', 'Resonance arrow'),
                               ('arrow_dashed', 'Dashed arrow'), ('curved', 'Curved arrow (electron pair)'),
                               ('curved_half', 'Fish-hook arrow (one electron)')]),
-         ('group', 'shapes', [('brackets', 'Brackets [ ]'), ('parens', 'Parentheses ( )'), ('braces', 'Braces { }'),
-                              ('rect', 'Rectangle'), ('roundrect', 'Rounded rectangle'), ('oval', 'Oval'),
-                              ('line', 'Line')]),
+         ('group', 'shapes', [('brackets', 'Brackets [ ]'), ('parens', 'Parentheses ( )'),
+                              ('braces', 'Braces { }')]),
+         ('group', 'elements', ELEMENT_TIPS, 8),
+         ('group', 'orbitals', ORBITAL_TIPS, 3),
+         ('group', 'fragmentation', [('massfrag', 'Mass fragmentation: drag across bonds'),
+                                     ('retrosyn', 'Retrosynthesis: drag across bonds of a product'),
+                                     ('synthesis', 'Synthesis: drag across bonds of a product')]),
+         ('tlc', 'TLC plate  (g)'),
          ('text', 'Text: captions, and atom labels typed in place  (t)'), None,
          ('sequence', 'Biopolymer sequence: click where it goes, then type or paste it (FASTA, H-Ala-Gly-OH, HELM)'),
          ('group', 'bio', list(biodraw.NAMES.items())))
@@ -158,11 +184,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self.dirty = False
         self.settings = theme.settings()
         self.canvas = Canvas(self)
-        self.setCentralWidget(self.canvas)
+        self.panel3d = None
+        self.tabs = QtWidgets.QTabWidget()
+        self.tabs.setDocumentMode(True)
+        self.tabs.addTab(self.canvas, 'Drawing')
+        if features.installed(features.VIEW_3D):            # chosen in the installer
+            from view3d import Panel3D
+            self.panel3d = Panel3D(self)
+            self.tabs.addTab(self.panel3d, '3D')
+        else:
+            self.tabs.tabBar().hide()
+        self.tabs.currentChanged.connect(self._tab_changed)
+        self.setCentralWidget(self.tabs)
         self.info = InfoPanel(self.canvas)
         dock = QtWidgets.QDockWidget('Formula and masses', self)
         dock.setObjectName('info')
         dock.setWidget(self.info)
+        self.info_dock = dock
         dock.setFeatures(QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetMovable |
                          QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetFloatable)
         self.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, dock)
@@ -179,6 +217,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.zoom_label = QtWidgets.QLabel('200 %')
         self.statusBar().addPermanentWidget(self.zoom_label)
         self.set_tool('bond1')
+        self._drawing_bars = []
         self.setAcceptDrops(True)
         theme.register_window(self)
         theme.listeners.append(self._retheme)
@@ -239,11 +278,25 @@ class MainWindow(QtWidgets.QMainWindow):
                 gap(); continue
             b = QtWidgets.QToolButton(); b.setIconSize(QtCore.QSize(24, 24)); b.setAutoRaise(True)
             if t[0] == 'group':                             # a drop-down: shows the last tool picked from it
-                _g, gname, members = t
+                _g, gname, members = t[:3]
+                cols = t[3] if len(t) > 3 else 0
                 menu = QtWidgets.QMenu(b)
-                for name, tip in members:
+                grid = None
+                if cols:                                    # a grid of buttons, like ChemDraw's palettes
+                    holder = QtWidgets.QWidget()
+                    grid = QtWidgets.QGridLayout(holder)
+                    grid.setContentsMargins(4, 4, 4, 4); grid.setSpacing(1)
+                    wa = QtWidgets.QWidgetAction(menu); wa.setDefaultWidget(holder)
+                    menu.addAction(wa)
+                for n, (name, tip) in enumerate(members):
                     a = tool_action(name, tip)
-                    menu.addAction(a)
+                    if grid is not None:
+                        tb_ = QtWidgets.QToolButton(); tb_.setDefaultAction(a); tb_.setAutoRaise(True)
+                        tb_.setIconSize(QtCore.QSize(24, 24)); tb_.setFixedSize(32, 30)
+                        grid.addWidget(tb_, n // cols, n % cols)
+                        a.triggered.connect(lambda _c=False, m=menu: m.hide())
+                    else:
+                        menu.addAction(a)
                     a.triggered.connect(lambda _c=False, a=a, b=b: b.setDefaultAction(a))
                 b.setMenu(menu)
                 b.setPopupMode(QtWidgets.QToolButton.ToolButtonPopupMode.MenuButtonPopup)
@@ -273,6 +326,7 @@ class MainWindow(QtWidgets.QMainWindow):
         tb.addWidget(palette)
 
         top = self.addToolBar('File')
+        self.file_bar = top
         top.setObjectName('file')
         top.setIconSize(QtCore.QSize(20, 20))
         top.setMovable(False)
@@ -285,9 +339,12 @@ class MainWindow(QtWidgets.QMainWindow):
                                     'Copy the selection (or everything) as a picture, for PowerPoint / Word')
         self.a_clean = self._act('C&lean up structure', self.canvas.clean_up, 'Ctrl+Shift+K', 'clean',
                                  'Lay out the selected structures (or all) again')
+        self.a_clean.setShortcuts([QtGui.QKeySequence('Ctrl+Shift+K'), QtGui.QKeySequence('Ctrl+Alt+K')])
         self.a_fit = self._act('&Fit to window', self.canvas.fit, 'Ctrl+0', 'fit', 'Show the whole drawing')
+        self.a_send3d = self._act('Send to &3D', self.send_to_3d, 'Ctrl+3', 'send3d',
+                                  'Show the selected molecule in the 3D tab')
         for a in (self.a_new, self.a_open, self.a_save, None, self.a_undo, self.a_redo, None, self.a_copy_img,
-                  self.a_clean, self.a_fit):
+                  self.a_clean, self.a_fit) + ((self.a_send3d,) if self.panel3d else ()):
             top.addSeparator() if a is None else top.addAction(a)
         top.addSeparator()
         top.addWidget(QtWidgets.QLabel(' SMILES: '))
@@ -450,7 +507,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self._bio_object_menu(m, bio_shapes)
         if 'seq' in sel_kinds:
             self._biopolymer_menu(m.addMenu('Bio&polymer'))
-        if len(bio_shapes) < len(c.selected('shape')):
+        styled = [i for i in c.selected('shape') if c.doc.shapes[i].kind in
+                  ('circle', 'oval', 'rect', 'roundrect', 'line', 'arc', 'orbital')]
+        if styled:
+            self._style_menu(m, styled)
+        if 'tlc' in sel_kinds:
+            self._tlc_menu(m, c.selected('tlc')[0], global_pos)
+        frames = [i for i in c.selected('shape') if c.doc.shapes[i].kind in ('brackets', 'parens', 'braces')]
+        if frames:
             km = m.addMenu('Brac&ket / shape')
             for text, kind in (('&Brackets', 'brackets'), ('&Parentheses', 'parens'), ('Bra&ces', 'braces'),
                                ('&Rectangle', 'rect'), ('R&ounded rectangle', 'roundrect'), ('O&val', 'oval')):
@@ -466,16 +530,93 @@ class MainWindow(QtWidgets.QMainWindow):
             mm.addAction(self.a_clean)
             mm.addAction('E&xpand labels', c.expand_labels)
             mm.addAction('&Check structure', self.check_structure)
+            if self.panel3d:
+                mm.addAction(self.a_send3d)
             self._swatch_menu(mm, '&Ring fill', RING_FILL_COLORS, c.set_ring_fill)
             an = m.addMenu('A&nalysis')
             an.addAction('Show &analysis', c.add_analysis)
             an.addAction('Analyze &stoichiometry', c.analyze_stoichiometry)
-            an.addAction('Predict ¹&H NMR…', lambda: self.open_nmr('1H'))
-            an.addAction('Predict ¹³&C NMR…', lambda: self.open_nmr('13C'))
+            if nmr.available():
+                an.addAction('Predict ¹&H NMR…', lambda: self.open_nmr('1H'))
+                an.addAction('Predict ¹³&C NMR…', lambda: self.open_nmr('13C'))
             an.addAction('Convert Structure to &Name', self.structure_to_iupac)
             an.addAction('Common na&me (PubChem, online)', self.structure_to_name)
             an.addAction(self.a_stereo)
         m.exec(global_pos)
+
+    # ------------------------------------------------------------------------------------------- styles, TLC
+    def _style_menu(self, m, shapes):
+        c = self.canvas
+        kinds = {c.doc.shapes[i].kind for i in shapes}
+        sm = m.addMenu('St&yle')
+        if kinds & {'orbital'}:
+            opts = (('&Plain', ''), ('&Shaded (phase)', 'shaded'), ('&Filled (phase)', 'filled'))
+        elif kinds <= {'line', 'arc'}:
+            opts = (('&Plain', ''), ('&Dashed', 'dashed'), ('&Bold', 'bold'), ('&Wavy (lines)', 'wavy'))
+        else:
+            opts = (('&Plain', ''), ('&Dashed', 'dashed'), ('&Shaded', 'shaded'), ('&Filled', 'filled'),
+                    ('S&hadow', 'shadow'))
+        for text, st in opts:
+            sm.addAction(text, lambda st=st: self._set_shape_style(shapes, st))
+
+    def _set_shape_style(self, shapes, style):
+        c = self.canvas
+        c.snapshot()
+        for i in shapes:
+            if i in c.doc.shapes:
+                c.doc.shapes[i].style = style
+        c.edited()
+
+    def _tlc_menu(self, m, i, global_pos):
+        """Right-click on a TLC plate: lanes, what the plate shows, the spots (ChemDraw's TLC menu)."""
+        import tlc
+        c = self.canvas
+        plate = c.doc.tlcs[i]
+        rend = c.renderer()
+        x, y = c.to_model(QtCore.QPointF(c.mapFromGlobal(global_pos)))
+        lane = tlc.lane_at(rend, i, x * rend.BL)
+        spot = tlc.spot_at(rend, i, x * rend.BL, y * rend.BL)
+        tm = m.addMenu('T&LC plate')
+
+        def change(fn):
+            c.snapshot(); fn(); c.edited()
+        tm.addAction('&Edit Rf values…', lambda: self.edit_object('tlc', i))
+        tm.addAction('&Add lane', lambda: change(lambda: plate.lanes.insert(lane + 1, [tlc.new_spot(0.5)])))
+        tm.addAction('&Duplicate lane', lambda: change(lambda: plate.lanes.insert(
+            lane + 1, [dict(s) for s in plate.lanes[lane]])))
+        a = tm.addAction('De&lete lane', lambda: change(lambda: plate.lanes.pop(lane)))
+        a.setEnabled(len(plate.lanes) > 1)
+        tm.addSeparator()
+        for text, attr in (('Show &origin', 'show_origin'), ('Show solvent &front', 'show_front'),
+                           ('Show &border', 'show_border'), ('Show side &ticks', 'show_ticks')):
+            a = tm.addAction(text, lambda at=attr: change(lambda: setattr(plate, at, not getattr(plate, at))))
+            a.setCheckable(True); a.setChecked(getattr(plate, attr))
+        sp = tm.addMenu('TLC &spots')
+        every = [s for ln in plate.lanes for s in ln]
+        a = sp.addAction('Show &Rf (all spots)', lambda v=not all(s['show_rf'] for s in every): change(
+            lambda: [s.__setitem__('show_rf', v) for s in every]))
+        a.setCheckable(True); a.setChecked(bool(every) and all(s['show_rf'] for s in every))
+        for text, st in tlc.SPOT_STYLES:
+            sp.addAction(f'All spots: {text}', lambda st=st: change(lambda: [s.__setitem__('style', st) for s in every]))
+        if spot is not None:
+            s = plate.lanes[spot[0]][spot[1]]
+            sm = tm.addMenu(f'This spot (Rf {s["rf"]:.2f})')
+            a = sm.addAction('Show &Rf', lambda: change(lambda: s.__setitem__('show_rf', not s['show_rf'])))
+            a.setCheckable(True); a.setChecked(s['show_rf'])
+            sm.addAction('&Set Rf…', lambda: self._set_spot_rf(s))
+            for text, st in tlc.SPOT_STYLES:
+                sm.addAction(text, lambda st=st: change(lambda: s.__setitem__('style', st)))
+            self._swatch_menu(sm, '&Colour', [col for _n, col in COLORS if col] + list(HIGHLIGHT_COLORS[:6]),
+                              lambda col: change(lambda: s.__setitem__('color', col)))
+            sm.addAction('&Delete spot', lambda: change(lambda: (plate.lanes[spot[0]].pop(spot[1]),
+                                                                 plate.lanes.pop(spot[0]) if not plate.lanes[spot[0]]
+                                                                 and len(plate.lanes) > 1 else None)))
+
+    def _set_spot_rf(self, spot):
+        v, ok = QtWidgets.QInputDialog.getDouble(self, 'Rf', 'Rf (0 at the origin, 1 at the solvent front):',
+                                                 spot['rf'], 0.0, 1.0, 2)
+        if ok:
+            self.canvas.snapshot(); spot['rf'] = round(v, 3); self.canvas.edited()
 
     # ------------------------------------------------------------------------------------------- biopolymers
     def _fill_bio_menu(self):
@@ -559,6 +700,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 c.add_sequence(d.values(), getattr(c, 'pending_pos', None))
             else:
                 c.update_sequence(i, d.values())
+        elif kind == 'tlc' and i in c.doc.tlcs:
+            from bio_dialog import TLCDialog
+            d = TLCDialog(c.doc.tlcs[i], self)
+            if d.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+                c.snapshot()
+                c.doc.tlcs[i].lanes = d.lanes
+                c.edited()
         elif kind == 'shape' and i in c.doc.shapes:
             sh = c.doc.shapes[i]
             d = PlasmidDialog(sh.params, self)
@@ -813,9 +961,12 @@ class MainWindow(QtWidgets.QMainWindow):
         m.addAction(self._act('Show &analysis (formula, mass, m/z …)', self.canvas.add_analysis, 'Ctrl+Shift+A'))
         m.addAction(self._act('Analyze &stoichiometry', self.canvas.analyze_stoichiometry))
         m.addAction(self._act('Check s&tructure', self.check_structure))
+        if self.panel3d:
+            m.addAction(self.a_send3d)
         m.addSeparator()
-        m.addAction(self._act('Predict ¹&H NMR…', lambda: self.open_nmr('1H')))
-        m.addAction(self._act('Predict ¹³&C NMR…', lambda: self.open_nmr('13C')))
+        if nmr.available():
+            m.addAction(self._act('Predict ¹&H NMR…', lambda: self.open_nmr('1H')))
+            m.addAction(self._act('Predict ¹³&C NMR…', lambda: self.open_nmr('13C')))
         m.addAction(self._act('Convert Structure to &Name', self.structure_to_iupac, 'Ctrl+Alt+N',
                               tip='Systematic IUPAC name, made offline (Openclatura), pasted under the structure'))
         m.addAction(self._act('&Name to structure (PubChem, online)…', self.name_to_structure, 'Ctrl+Shift+N'))
@@ -903,11 +1054,11 @@ class MainWindow(QtWidgets.QMainWindow):
         if not smiles:
             QtWidgets.QMessageBox.information(self, APP_NAME, f'PubChem has no compound called "{name}".')
             return
-        self.insert_text(smiles)
+        import layout2d
+        self.insert_text(layout2d.usual_form(smiles))
 
     def open_nmr(self, nucleus):
         """The NMR prediction window for the selected structure (or the one structure drawn)."""
-        import nmr
         if not nmr.available():
             QtWidgets.QMessageBox.information(self, APP_NAME, 'NMR prediction needs the CSP5 module, which is not '
                                               'installed with this copy of the program.')
@@ -924,6 +1075,61 @@ class MainWindow(QtWidgets.QMainWindow):
         d = NMRDialog(self.canvas, ids, nucleus, self)
         d.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)   # kept alive by its parent until closed
         d.show()
+
+    # ------------------------------------------------------------------------------------------- 3D tab
+    def _tab_changed(self, index):
+        """The 3D tab has no use for the drawing tools: the file bar stays, the rest comes back with the drawing."""
+        if index == 1:
+            self._drawing_bars = [w for w in self.findChildren(QtWidgets.QToolBar) + [self.info_dock]
+                                  if w.isVisible() and w is not self.file_bar]
+            for w in self._drawing_bars:
+                w.hide()
+            self.statusBar().showMessage('Left drag: rotate. Right drag: pan. Wheel: zoom. Click atoms to measure. '
+                                         'Double-click: starting view.')
+        else:
+            for w in self._drawing_bars:
+                w.show()
+            self._drawing_bars = []
+            self.statusBar().clearMessage()
+            self.canvas.setFocus()
+
+    def send_to_3d(self):
+        """Builds the selected molecule (the whole structure, when only part of it is selected) in the 3D tab."""
+        if not self.panel3d:
+            return
+        c = self.canvas
+        seqs = c.selected('seq')
+        atoms = c.selected_atoms()
+        if seqs and not atoms:
+            mol, error = biopolymer.to_mol(c.doc.seqs[seqs[0]])
+            name = 'Sequence'
+        else:
+            frags = c.doc.fragments()
+            chosen = [f for f in frags if atoms & set(f)] if atoms else frags
+            if not chosen:
+                only = list(c.doc.seqs)
+                if len(only) != 1:
+                    QtWidgets.QMessageBox.information(self, APP_NAME, 'Draw (or select) a molecule first.')
+                    return
+                mol, error = biopolymer.to_mol(c.doc.seqs[only[0]])
+                name = 'Sequence'
+            elif len(chosen) > 1:
+                QtWidgets.QMessageBox.information(self, APP_NAME, 'Select one molecule (click one of its atoms or bonds '
+                                                  'with the select tool, or drag around it) to send it to 3D.')
+                return
+            else:
+                doc, grown = c.doc.expanded()
+                mol, _order, error = chem.to_mol(doc, chem.expand_ids(grown, chosen[0]))
+                name = ''
+        if mol is None:
+            QtWidgets.QMessageBox.warning(self, APP_NAME, f'This structure has no 3D model: {error}')
+            return
+        from rdkit.Chem.rdMolDescriptors import CalcMolFormula
+        name = (name + ' ' if name else '') + CalcMolFormula(mol)
+        if not self.panel3d.send(mol, name):
+            self.statusBar().showMessage('Still building the last 3D model: try again in a moment.', 5000)
+            return
+        self.tabs.setCurrentIndex(1)
 
     def structure_to_iupac(self):
         """The systematic name of the selected structure (offline, Openclatura), pasted under it as a caption."""
@@ -983,6 +1189,8 @@ class MainWindow(QtWidgets.QMainWindow):
             name = getattr(a, 'icon_name', None)
             if name:
                 a.setIcon(icons.icon(name))
+        if self.panel3d:
+            self.panel3d.update()
 
     # ------------------------------------------------------------------------------------------- tools
     def set_tool(self, name, element=None):
@@ -1031,6 +1239,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._maybe_save():
             e.ignore(); return
         theme.save_geometry(self, 'main')
+        if self.panel3d:
+            self.panel3d.wait()
         e.accept()
 
     def _dir(self):
@@ -1323,7 +1533,9 @@ class MainWindow(QtWidgets.QMainWindow):
         printer = QPrinter(QPrinter.PrinterMode.HighResolution)
         printer.setFullPage(True)
         s = render.style_of(self.canvas.doc)
-        size = {'A4': QtGui.QPageSize.PageSizeId.A4, 'A3': QtGui.QPageSize.PageSizeId.A3,
+        size = {'A0': QtGui.QPageSize.PageSizeId.A0, 'A1': QtGui.QPageSize.PageSizeId.A1,
+                'A2': QtGui.QPageSize.PageSizeId.A2,
+                'A4': QtGui.QPageSize.PageSizeId.A4, 'A3': QtGui.QPageSize.PageSizeId.A3,
                 'A5': QtGui.QPageSize.PageSizeId.A5, 'B5': QtGui.QPageSize.PageSizeId.B5,
                 'Letter': QtGui.QPageSize.PageSizeId.Letter, 'Legal': QtGui.QPageSize.PageSizeId.Legal,
                 'Tabloid': QtGui.QPageSize.PageSizeId.Tabloid}.get(s['page'], QtGui.QPageSize.PageSizeId.A4)
@@ -1421,7 +1633,7 @@ class MainWindow(QtWidgets.QMainWindow):
                  ('w', 'wedge (again: reverse)'), ('h, Shift+W', 'hashed wedge'), ('b', 'bold'),
                  ('d', 'dashed (on a double bond: dashed second line)'), ('y', 'wavy'), ('Shift+H', 'hashed')] + fuse
         tools = [(k, v) for k, v in cv.TOOL_KEYS.items()]
-        menu = [('Ctrl+Shift+K', 'clean up structure'), ('Ctrl+Alt+C', 'copy as SMILES'),
+        menu = [('Ctrl+Shift+K or Ctrl+Alt+K', 'clean up structure'), *([('Ctrl+3', 'send the selected molecule to 3D')] if self.panel3d else []), ('Ctrl+Alt+C', 'copy as SMILES'),
                 ('Ctrl+Shift+C', 'copy as picture'),
                 ('Ctrl+Shift+H / V', 'rotate 180° horizontal / vertical (same molecule)'),
                 ('Ctrl+R', 'rotate…'), ('Ctrl+] / Ctrl+[', 'rotate 15°'), ('Ctrl+K', 'scale…'),

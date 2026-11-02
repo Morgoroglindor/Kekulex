@@ -1,3 +1,4 @@
+# Only for tools\export_nmr_models.py, when the CSP5 models change: the program runs them on numpy (nmr_engine.py).
 # NMR prediction (optional): CSP5 0.3.1 (MIT) with the CPU build of PyTorch. CSP5's authors do not build it for
 # Windows, so it is installed from its source with tools\patch_csp5.py applied (it skips the optional gcc-only
 # peak-matching helpers; prediction does not use them):

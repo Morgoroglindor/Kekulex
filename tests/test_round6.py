@@ -12,7 +12,7 @@ from model import Doc
 
 @pytest.fixture
 def win(qapp):
-    import structure_editor as se
+    import kekulex as se
     w = se.MainWindow()
     w.resize(1300, 850)
     w.show()
@@ -119,7 +119,7 @@ def test_page_size_and_orientation():
 
 
 def test_document_settings_keep_display_options(win, monkeypatch):
-    import structure_editor as se
+    import kekulex as se
     c = win.canvas
     c.doc.style['show_atom_numbers'] = True
     monkeypatch.setattr(se.StyleDialog, 'exec', lambda self: (self.orientation.setCurrentText('Landscape'),

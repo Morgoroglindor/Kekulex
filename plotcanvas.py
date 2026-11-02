@@ -20,6 +20,8 @@ DRAG_PX = 5                                                 # less movement than
 
 
 class PlotCanvas(FigureCanvasQTAgg):
+    x_only = False                                          # True: drag zoom and pan leave y alone (Ctrl+wheel still zooms it)
+
     def __init__(self, parent=None):
         self.fig = Figure(figsize=(7, 4), layout='constrained')
         super().__init__(self.fig)
@@ -180,13 +182,18 @@ class PlotCanvas(FigureCanvasQTAgg):
                 self._box = Rectangle((x0, y0), 0, 0, fill=True, alpha=0.12, lw=1, ls='--',
                                       ec=theme.T['fig_fg'], fc=theme.current_accent, zorder=10)
                 ax.add_patch(self._box)
-            self._box.set_bounds(min(x0, e.xdata), min(y0, e.ydata), abs(e.xdata - x0), abs(e.ydata - y0))
+            if self.x_only:
+                self._box.set_bounds(min(x0, e.xdata), min(yl), abs(e.xdata - x0), abs(yl[1] - yl[0]))
+            else:
+                self._box.set_bounds(min(x0, e.xdata), min(y0, e.ydata), abs(e.xdata - x0), abs(e.ydata - y0))
             self.draw_idle()
         elif btn == 3:                                      # pan: move the limits by the mouse travel (in data units)
             inv = ax.transData.inverted()
             (ax0, ay0), (ax1, ay1) = inv.transform((px, py)), inv.transform((e.x, e.y))
             dx, dy = ax1 - ax0, ay1 - ay0
-            ax.set_xlim(xl[0] - dx, xl[1] - dx); ax.set_ylim(yl[0] - dy, yl[1] - dy)
+            ax.set_xlim(xl[0] - dx, xl[1] - dx)
+            if not self.x_only:
+                ax.set_ylim(yl[0] - dy, yl[1] - dy)
             self._remember(pi)
             self.draw_idle()
 
@@ -201,7 +208,8 @@ class PlotCanvas(FigureCanvasQTAgg):
             if w > 0 and h > 0:
                 ax = self.panels[pi]
                 ax.set_xlim((x, x + w) if ax.get_xlim()[0] < ax.get_xlim()[1] else (x + w, x))
-                ax.set_ylim(y, y + h)
+                if not self.x_only:
+                    ax.set_ylim(y, y + h)
                 self._remember(pi)
             self.draw_idle()
         elif btn == 1 and abs(e.x - px) <= DRAG_PX and abs(e.y - py) <= DRAG_PX and x0 is not None:

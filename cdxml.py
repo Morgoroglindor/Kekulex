@@ -238,6 +238,11 @@ def read(path):
                 kind = 'parens' if 'Round' in bt else 'braces' if 'Curly' in bt else 'brackets'
             i = doc.add_shape(x1, y1, x2, y2, kind)
             doc.shapes[i].color = color(g)
+            words = (g.get('RectangleType') or g.get('OvalType') or '').split()   # Dashed / Shaded / Filled ...
+            for word, style in (('Dashed', 'dashed'), ('Shaded', 'shaded'), ('Filled', 'filled'),
+                                ('Shadow', 'shadow'), ('Shadowed', 'shadow')):
+                if word in words:
+                    doc.shapes[i].style = style
 
     walk(root)
     for g in grids:
@@ -289,7 +294,7 @@ def read_grid(g, doc, frag_atoms, BL):
 
 
 # ------------------------------------------------------------------------------------------------ write
-def write(doc, path, program='Structure editor'):
+def write(doc, path, program='Kekulex'):
     import render
     from rdkit import Chem
     s = render.style_of(doc)
@@ -399,15 +404,23 @@ def write(doc, path, program='Structure editor'):
                       f' MajorAxisEnd3D="{f(ctr[0] + R)} {f(ctr[1])} 0" MinorAxisEnd3D="{f(ctr[0])} {f(ctr[1] + R)} 0"')
         out.append(f'<arrow {attrs}{cattr(ar.color)}/>')
     for i, sh in doc.shapes.items():
-        if sh.kind in model.BIO_KINDS:                      # bio objects and sequences stay in .sed files only
+        if sh.kind in model.BIO_KINDS or sh.kind in ('arc', 'orbital'):   # these stay in .sed files only
             continue
         bb = f'{f(sh.x1 * BL)} {f(sh.y1 * BL)} {f(sh.x2 * BL)} {f(sh.y2 * BL)}'
+        look = {'dashed': 'Dashed', 'shaded': 'Shaded', 'filled': 'Filled', 'shadow': 'Shadow', 'bold': 'Bold'}.get(
+            sh.style, '')
+        if sh.kind == 'circle':                              # centre + edge -> its box
+            R = math.hypot(sh.x2 - sh.x1, sh.y2 - sh.y1)
+            bb = f'{f((sh.x1 - R) * BL)} {f((sh.y1 - R) * BL)} {f((sh.x1 + R) * BL)} {f((sh.y1 + R) * BL)}'
         if sh.kind == 'line':
-            g = f'GraphicType="Line" ArrowType="NoHead"'
+            g = 'GraphicType="Line" ArrowType="NoHead"' + (f' LineType="{look}"' if look in ('Dashed', 'Bold') else '')
         elif sh.kind in ('rect', 'roundrect'):
-            g = 'GraphicType="Rectangle"' + (' RectangleType="RoundEdge"' if sh.kind == 'roundrect' else '')
-        elif sh.kind == 'oval':
-            g = 'GraphicType="Oval" OvalType="Circle"' if abs(abs(sh.x2 - sh.x1) - abs(sh.y2 - sh.y1)) < 1e-6 else 'GraphicType="Oval"'
+            kinds = ' '.join(k for k in (('RoundEdge' if sh.kind == 'roundrect' else ''), look) if k)
+            g = 'GraphicType="Rectangle"' + (f' RectangleType="{kinds}"' if kinds else '')
+        elif sh.kind in ('oval', 'circle'):
+            circle = sh.kind == 'circle' or abs(abs(sh.x2 - sh.x1) - abs(sh.y2 - sh.y1)) < 1e-6
+            kinds = ' '.join(k for k in (('Circle' if circle else ''), 'Shadowed' if look == 'Shadow' else look) if k)
+            g = 'GraphicType="Oval"' + (f' OvalType="{kinds}"' if kinds else '')
         else:
             g = f'GraphicType="Bracket" BracketType="{ {"brackets": "SquarePair", "parens": "RoundPair", "braces": "CurlyPair"}[sh.kind] }"'
         out.append(f'<graphic id="{next(ids)}" BoundingBox="{bb}" {g}{cattr(sh.color)}/>')

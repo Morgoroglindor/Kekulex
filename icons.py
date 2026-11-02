@@ -302,6 +302,74 @@ def _bio(kind):
     return draw
 
 
+def _element(name):
+    """A drawing element or orbital tool: the shape itself, drawn by the renderer, fitted into the icon."""
+    def draw(p):
+        import canvas
+        import model
+        import render
+        kind, style, params = canvas.SHAPE_TOOLS[name]
+        doc = model.Doc()
+        doc.style = {'line_width': 1.0, 'bold_width': 3.0}
+        if kind == 'circle':
+            box = (0, 0, 0.62, 0)
+        elif kind == 'line':
+            box = (-0.7, 0.55, 0.7, -0.55)
+        elif kind == 'arc':
+            box = (-0.62, 0.25, 0.62, 0.25)
+        elif kind == 'orbital':
+            box = (0, 0, 0, -0.62) if params['type'] not in ('s', 'sigma') else (0, 0, 0.55, 0)
+        else:
+            box = (-0.68, -0.48, 0.68, 0.48)
+        i = doc.add_shape(*box, kind)
+        doc.shapes[i].style, doc.shapes[i].params = style, dict(params)
+        r = render.Renderer(doc)
+        b = r.shape_paths(i).boundingRect()
+        k = 19 / max(b.width(), b.height(), 1e-6)
+        p.save()
+        p.translate(12, 12); p.scale(k, k); p.translate(-b.center().x(), -b.center().y())
+        r.paint(p)
+        p.restore()
+        if kind == 'arc':
+            f = QFont(); f.setPixelSize(7); f.setBold(True); p.setFont(f)
+            p.drawText(QRectF(0, 15, 24, 9), Qt.AlignmentFlag.AlignCenter, str(params['angle']))
+    return draw
+
+
+def _massfrag(p):                                         # a bond cut by a dashed line
+    p.drawLine(QPointF(3, 15), QPointF(11, 10)); p.drawLine(QPointF(11, 10), QPointF(20, 15))
+    p.save(); pen = p.pen(); pen.setStyle(Qt.PenStyle.DashLine); pen.setWidthF(1.0); p.setPen(pen)
+    p.drawLine(QPointF(16, 4), QPointF(14, 21)); p.restore()
+
+
+def _retrosyn(p):                                         # the open (retrosynthetic) arrow
+    p.drawLine(QPointF(3, 9), QPointF(18, 9)); p.drawLine(QPointF(3, 15), QPointF(18, 15))
+    p.drawPolyline(QPolygonF([QPointF(15, 5), QPointF(21, 12), QPointF(15, 19)]))
+
+
+def _synthesis(p):
+    p.drawLine(QPointF(3, 12), QPointF(20, 12))
+    p.drawPolyline(QPolygonF([QPointF(15, 8), QPointF(20, 12), QPointF(15, 16)]))
+
+
+def _tlc(p):                                              # a plate with spots
+    p.drawRect(QRectF(5, 2, 14, 20))
+    p.save(); pen = p.pen(); pen.setWidthF(0.8); p.setPen(pen)
+    p.drawLine(QPointF(5, 18.5), QPointF(19, 18.5))
+    p.setBrush(p.pen().color())
+    for x, y in ((9, 7), (15, 11), (9, 13)):
+        p.drawEllipse(QPointF(x, y), 1.6, 1.2)
+    p.restore()
+
+
+def _send3d(p):                                           # a ball and stick model
+    p.drawLine(QPointF(7, 16), QPointF(12, 8)); p.drawLine(QPointF(12, 8), QPointF(18, 15))
+    p.save()
+    for x, y, r, c in ((7, 16, 3.4, '#7FA7E0'), (18, 15, 3.0, '#E08A8A'), (12, 8, 4.2, '#B8B8B8')):
+        p.setBrush(QColor(c)); p.drawEllipse(QPointF(x, y), r, r)
+    p.restore()
+
+
 def _sequence(p):                                         # three monomers on a chain
     p.drawLine(QPointF(3, 12), QPointF(21, 12))
     p.save()
@@ -320,7 +388,8 @@ DRAW = {'select': _select, 'bond1': _bond(1), 'bond2': _bond(2), 'bond3': _bond(
         'curved_half': _curved(True), 'rect': _shape('rect'), 'roundrect': _shape('roundrect'), 'oval': _shape('oval'),
         'line': _shape('line'), 'brackets': _shape('brackets'), 'parens': _shape('parens'), 'braces': _shape('braces'),
         'align_left': _align('left'), 'align_center': _align('center'), 'align_right': _align('right'),
-        'templates': _templates, 'lasso': _lasso, 'sequence': _sequence}
+        'templates': _templates, 'lasso': _lasso, 'sequence': _sequence, 'massfrag': _massfrag,
+        'retrosyn': _retrosyn, 'synthesis': _synthesis, 'tlc': _tlc, 'send3d': _send3d}
 DRAW.update({k: _bio(k) for k in ('membrane', 'membrane_arc', 'micelle', 'dna', 'helix', 'receptor', 'channel', 'enzyme',
                                   'gprotein', 'antibody', 'ribosome', 'trna', 'mrna', 'mito', 'nucleus', 'cell',
                                   'bacterium', 'virus', 'cloud', 'plasmid')})
@@ -334,7 +403,7 @@ def _pixmap(name, scale, color):
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
     p.setPen(QPen(color, 1.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
     p.setBrush(Qt.BrushStyle.NoBrush)
-    DRAW[name](p)
+    (DRAW.get(name) or _element(name))(p)                 # drawing elements / orbitals: drawn by the renderer
     p.end()
     return pm
 

@@ -27,14 +27,16 @@ class _Worker(QtCore.QThread):
             self.done.emit(nmr.predict(*self.args), '')
         except Exception as e:                              # shown in the window, also logged
             import logging
-            logging.getLogger('structureeditor').warning('NMR prediction failed', exc_info=True)
+            logging.getLogger('kekulex').warning('NMR prediction failed', exc_info=True)
             self.done.emit(None, str(e))
 
 
 class SpectrumView(PlotCanvas):
     """The simulated spectrum, ppm decreasing to the right as on a spectrometer; the selected signal in the accent.
-    The mouse as in Spectra viewer (plotcanvas.py): drag a box to zoom, wheel zooms ppm, Ctrl+wheel the height, right
-    drag pans, double-click or F shows the whole spectrum; a click picks the nearest signal."""
+    The mouse as in Spectra viewer (plotcanvas.py), but drag and right drag act on ppm only: drag a range to zoom, wheel
+    zooms ppm, Ctrl+wheel the height, right drag pans, double-click or F shows the whole spectrum; a click picks the
+    nearest signal."""
+    x_only = True
 
     def __init__(self, parent=None):
         super().__init__(parent)

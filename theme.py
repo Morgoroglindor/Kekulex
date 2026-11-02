@@ -1,5 +1,5 @@
 """
-theme.py - light / dark look of the Structure editor (copied from the Spectra viewer's theme.py).
+theme.py - light / dark look of Kekulex (copied from the Spectra viewer's theme.py).
 
     theme.T            current colours (a dict that is updated in place when the theme changes)
     theme.set('dark')  switch; theme.listeners are called by theme.apply() afterwards
@@ -75,7 +75,7 @@ def settings():
     SED_SETTINGS_FILE=path.ini keeps them in that file instead (the tests use it to stay off the real settings)."""
     from PyQt6.QtCore import QSettings
     ini = os.environ.get('SED_SETTINGS_FILE')
-    return QSettings(ini, QSettings.Format.IniFormat) if ini else QSettings('StructureEditor', 'StructureEditor')
+    return QSettings(ini, QSettings.Format.IniFormat) if ini else QSettings('StructureEditor', 'StructureEditor')   # the program's earlier name: settings carry over
 
 
 def load_pref():
@@ -137,7 +137,7 @@ def _assets(accent):
     theme into a cache folder at 1x and 2x (Qt picks name@2x.png on high-DPI screens). Returns {name: path}."""
     from PyQt6.QtCore import QPointF, Qt
     from PyQt6.QtGui import QColor, QImage, QPainter, QPainterPath, QPen
-    folder = os.path.join(tempfile.gettempdir(), 'structureeditor_style', f"{T['name']}_{accent.lstrip('#')}")
+    folder = os.path.join(tempfile.gettempdir(), 'kekulex_style', f"{T['name']}_{accent.lstrip('#')}")
     os.makedirs(folder, exist_ok=True)
 
     def chevron(p, s, up):                                 # a 10 x 10 chevron, pointing down (or up)
@@ -426,7 +426,7 @@ def make_app(argv, name, accent=None):
                 0, lambda: current_pref == 'system' and apply(app, 'system')))
     except AttributeError:                                 # Qt before 6.5: no system scheme to follow
         pass
-    ico = resource('structureeditor.ico')
+    ico = resource('kekulex.ico')
     if ico:
         app.setWindowIcon(QtGui.QIcon(ico))
     return app

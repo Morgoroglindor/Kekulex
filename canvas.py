@@ -29,7 +29,28 @@ BOND_TOOLS = {'bond1': (1, '', ''), 'bond2': (2, '', ''), 'bond3': (3, '', ''), 
               'hashed': (1, '', 'hashed')}
 ARROW_TOOLS = {'arrow': 'forward', 'equilibrium': 'equilibrium', 'retro': 'retro', 'resonance': 'resonance',
                'arrow_dashed': 'dashed', 'curved': 'curved', 'curved_half': 'curved_half'}
-SHAPE_TOOLS = {k: k for k in model.SHAPE_KINDS + model.BIO_KINDS}
+# shape-like tools: name -> (Shape kind, style, params). Drawing elements are 'kind:style' (circle:shaded,
+# line:wavy, arc:120:dashed), orbitals 'orb:type:look' (orb:p:shaded)
+SHAPE_TOOLS = {k: (k, '', {}) for k in model.SHAPE_KINDS + model.BIO_KINDS}
+ELEMENT_TOOLS = []                                          # in the palette's order: 8 columns, as ChemDraw's
+for _row, (_kind, _line, _ang) in enumerate((('circle', 'line', 270), ('oval', 'line:dashed', 180),
+                                             ('roundrect', 'line:wavy', 120), ('rect', 'line:bold', 90))):
+    for _st in ('', 'dashed', 'shaded', 'filled', 'shadow'):
+        _name = f'{_kind}:{_st}' if _st else _kind
+        SHAPE_TOOLS[_name] = (_kind, _st, {})
+        ELEMENT_TOOLS.append(_name)
+    SHAPE_TOOLS[_line] = ('line', _line.partition(':')[2], {})
+    ELEMENT_TOOLS.append(_line)
+    for _st in ('', 'dashed'):
+        _name = f'arc:{_ang}' + (':dashed' if _st else '')
+        SHAPE_TOOLS[_name] = ('arc', _st, {'angle': _ang})
+        ELEMENT_TOOLS.append(_name)
+ORBITAL_TOOLS = []                                          # 3 columns: plain, shaded, filled
+for _typ in ('s', 'sigma', 'lobe', 'p', 'hybrid', 'dxy', 'dz2'):
+    for _look in ('plain', 'shaded', 'filled'):
+        SHAPE_TOOLS[f'orb:{_typ}:{_look}'] = ('orbital', '' if _look == 'plain' else _look, {'type': _typ})
+        ORBITAL_TOOLS.append(f'orb:{_typ}:{_look}')
+CUT_TOOLS = ('massfrag', 'retrosyn', 'synthesis')           # drag a line across bonds
 CURVE = 0.3                                                 # a new curved arrow's bend
 # Hotkeys laid out as in ChemDraw (case matters: Shift+key is the capital), so the same fingers work in both.
 # Over an atom - the atom becomes this element or nickname:
@@ -47,7 +68,7 @@ FUSE_KEYS = {'v': (3, False), '4': (4, False), '5': (5, False), '6': (6, False),
              'a': (6, True), 'z': (5, True)}
 BOND_STYLE_KEYS = {'b': 'bold', 'B': 'bold', 'd': 'dashed', 'D': 'dashed', 'y': 'wavy', 'H': 'hashed'}
 # Anywhere else - a tool
-TOOL_KEYS = {'j': 'benzene', 'J': 'cyclopentadiene', 'x': 'bond1', 'X': 'chain', 'e': 'arrow', 't': 'text',
+TOOL_KEYS = {'g': 'tlc', 'G': 'orb:p:shaded', 'j': 'benzene', 'J': 'cyclopentadiene', 'x': 'bond1', 'X': 'chain', 'e': 'arrow', 't': 'text',
              ' ': 'select'}
 DRAG_PX = 4                                                 # the mouse must move this far for a press to be a drag
 PAGE_BG, PAGE_SHADOW = QColor('#C8CCD1'), QColor(0, 0, 0, 40)
@@ -65,6 +86,13 @@ HINTS = {
     'arrow': 'Drag to draw the arrow. Click a curved arrow with a curved-arrow tool to bend it the other way.',
     'shape': 'Drag to draw the shape (brackets come as a pair around what you frame).',
     'sequence': 'Click where the sequence goes, then type or paste it (FASTA, H-Ala-Gly-OH or HELM); click a sequence to edit it.',
+    'orbital': 'Click an atom to put the orbital on it, or drag from the atom to set its size and direction.',
+    'arc': 'Drag from end to end: left to right bulges up, right to left down.',
+    'massfrag': 'Drag a line across bonds: the formula and exact mass of the fragments appear (Alt keeps the line).',
+    'retrosyn': 'Drag a line across bonds of a product: its retrosynthesis (product, ⇒, the pieces) is drawn.',
+    'synthesis': 'Drag a line across bonds of a product: the pieces, an arrow and the product are drawn.',
+    'tlc': 'Drag a TLC plate (its width sets the lanes) or click; drag a spot to change its Rf (Shift: resize, '
+           'Ctrl: copy to another lane); right-click for lanes and spots, double-click to type the Rf values.',
     'bio': 'Click for the default size, or drag (membranes, DNA, helices and mRNA grow more subunits as they get longer).',
     'text': 'Click empty space to type a caption, click an atom to type its label (N, OH, OMe, Boc, CO2H ...).',
 }
@@ -114,6 +142,9 @@ class _TextEdit(QPlainTextEdit):
     def focusOutEvent(self, e):
         super().focusOutEvent(e)
         self.canvas.commit_editor()
+
+
+MIN_ZOOM = 0.1                                              # low enough to see a whole A0 page
 
 
 class Canvas(QWidget):
@@ -238,7 +269,8 @@ class Canvas(QWidget):
     def hint(self):
         t = self.tool
         key = ('ring' if t in RING_TOOLS else 'bond' if t in BOND_TOOLS else 'arrow' if t in ARROW_TOOLS else
-               'bio' if t in model.BIO_KINDS else 'shape' if t in SHAPE_TOOLS else t)
+               'bio' if t in model.BIO_KINDS else 'orbital' if t.startswith('orb:') else
+               'arc' if t.startswith('arc') else 'shape' if t in SHAPE_TOOLS else t)
         return HINTS.get(key, '')
 
     def selected_atoms(self):
@@ -693,8 +725,8 @@ class Canvas(QWidget):
     def clean_up(self):
         """Lay out the selected structures (all, when nothing is selected) again with RDKit, keeping their place."""
         import chem
+        import layout2d
         from rdkit import Chem
-        from rdkit.Chem import rdDepictor
         atoms = self.selected_atoms() or set(self.doc.atoms)
         frags = [set(c) for c in self.doc.fragments() if atoms & set(c)]   # whole structures, even if half selected
         if not frags:
@@ -706,8 +738,7 @@ class Canvas(QWidget):
                 continue
             ox = sum(self.doc.atoms[a].x for a in order) / len(order)
             oy = sum(self.doc.atoms[a].y for a in order) / len(order)
-            rdDepictor.SetPreferCoordGen(True)
-            rdDepictor.Compute2DCoords(mol)
+            layout2d.compute(mol)
             Chem.WedgeMolBonds(mol, mol.GetConformer())
             conf = mol.GetConformer()
             pos = [conf.GetAtomPosition(k) for k in range(mol.GetNumAtoms())]
@@ -732,7 +763,7 @@ class Canvas(QWidget):
 
     # ------------------------------------------------------------------------------------------- view
     def set_zoom(self, z, anchor=None):
-        z = min(max(z, 0.25), 12.0)
+        z = min(max(z, MIN_ZOOM), 12.0)
         anchor = anchor if anchor is not None else QPointF(self.width() / 2, self.height() / 2)
         mx, my = self.to_model(anchor)
         self.zoom = z
@@ -752,7 +783,7 @@ class Canvas(QWidget):
         else:
             k = self.logicalDpiX() / 72.0
             z = min((self.width() - 60) / max(b.width() * k, 1), (self.height() - 60) / max(b.height() * k, 1), 3.0)
-            self.zoom = max(z, 0.25)
+            self.zoom = max(z, MIN_ZOOM)
             c = b.center()
             self.origin = QPointF(self.width() / 2 - c.x() * self.px_per_pt(), self.height() / 2 - c.y() * self.px_per_pt())
         self.update()
@@ -762,7 +793,7 @@ class Canvas(QWidget):
         """The whole page in the window."""
         W, H = self.page_size()
         k = self.logicalDpiX() / 72.0
-        self.zoom = max(0.25, min((self.width() - 40) / (W * k), (self.height() - 40) / (H * k)))
+        self.zoom = max(MIN_ZOOM, min((self.width() - 40) / (W * k), (self.height() - 40) / (H * k)))
         kk = self.px_per_pt()
         self.origin = QPointF((self.width() - W * kk) / 2, (self.height() - H * kk) / 2)
         self.update()
@@ -806,6 +837,9 @@ class Canvas(QWidget):
         for i in self.doc.seqs:
             if rend.item_rect('seq', i).adjusted(-2, -2, 2, 2).contains(pt):
                 return ('seq', i)
+        for i in self.doc.tlcs:
+            if rend.item_rect('tlc', i).adjusted(-3, -3, 3, 3).contains(pt):
+                return ('tlc', i)
         return None
 
     # ------------------------------------------------------------------------------------------- painting
@@ -833,14 +867,10 @@ class Canvas(QWidget):
             self._paint_reaction(p, rend, BL)
         rend.paint(p, errors=self.show_warnings)
         if self.sel:                                        # the selection's frame, as a dashed box
-            r = QRectF()
-            for it in self.sel:
-                if it[1] in self.doc.table(it[0]):
-                    ir = rend.item_rect(*it)
-                    r = ir if r.isNull() else r.united(ir)
+            r = self._sel_box(rend)
             if not r.isNull():
                 p.setPen(QPen(accent, 0.6 / max(self.zoom, 0.3), Qt.PenStyle.DashLine)); p.setBrush(Qt.BrushStyle.NoBrush)
-                p.drawRect(r.adjusted(-3, -3, 3, 3))
+                p.drawRect(r)
         if self.preview:
             self._paint_preview(p, BL, accent)
         if self.press and self.press.get('lasso'):
@@ -928,10 +958,10 @@ class Canvas(QWidget):
             p.drawRoundedRect(rend.text_rect(i).adjusted(-2, -1, 2, 1), 2, 2)
         elif kind == 'grid':
             p.drawRoundedRect(rend.grid_rect(i).adjusted(-2, -2, 2, 2), 3, 3)
-        elif kind == 'seq':                                 # a light tint and a frame, so the monomers stay readable
+        elif kind in ('seq', 'tlc'):                        # a light tint and a frame, so the content stays readable
             light = QColor(color); light.setAlpha(min(color.alpha(), 28))
             p.setBrush(QBrush(light)); p.setPen(QPen(color, 1.2))
-            p.drawRoundedRect(rend.item_rect('seq', i).adjusted(-3, -3, 3, 3), 4, 4)
+            p.drawRoundedRect(rend.item_rect(kind, i).adjusted(-3, -3, 3, 3), 4, 4)
 
     def _paint_reaction(self, p, rend, BL):
         """View > Show reaction interpretation: reactants red, products magenta, above the arrow cyan, below blue
@@ -967,16 +997,24 @@ class Canvas(QWidget):
         p.setPen(pen); p.setBrush(Qt.BrushStyle.NoBrush)
         path = QPainterPath()
         if kind in SHAPE_TOOLS:
+            sk, st, params = SHAPE_TOOLS[kind]
             tmp = Doc()
             tmp.style = self.doc.style
-            tmp.add_shape(*pts[0], *pts[1], kind)
-            if kind in model.BIO_KINDS:                     # the object itself, half transparent, as it grows
-                import biodraw
+            j = tmp.add_shape(*pts[0], *pts[1], sk)
+            tmp.shapes[j].style, tmp.shapes[j].params = st, dict(params)
+            if sk in model.BIO_KINDS or sk in model.ELEMENT_KINDS or st:   # the object itself, half transparent
                 p.save(); p.setOpacity(0.6)
-                biodraw.paint_bio(render.Renderer(tmp), p, next(iter(tmp.shapes)))
+                render.Renderer(tmp).paint(p)
                 p.restore()
                 return
-            p.drawPath(render.Renderer(tmp).shape_paths(next(iter(tmp.shapes))))
+            p.drawPath(render.Renderer(tmp).shape_paths(j))
+            return
+        if kind in CUT_TOOLS:                               # the cut line
+            pen.setStyle(Qt.PenStyle.DashLine); p.setPen(pen)
+            p.drawLine(QPointF(pts[0][0] * BL, pts[0][1] * BL), QPointF(pts[1][0] * BL, pts[1][1] * BL))
+            return
+        if kind == 'tlc':
+            p.drawRect(QRectF(QPointF(pts[0][0] * BL, pts[0][1] * BL), QPointF(pts[1][0] * BL, pts[1][1] * BL)))
             return
         if kind in ('curved', 'curved_half'):
             ar = model.Arrow(*pts[0], *pts[1], kind, CURVE)
@@ -1092,9 +1130,24 @@ class Canvas(QWidget):
             if grabbed is not None:                         # the charge sign itself, not its atom
                 self.press['charge'] = grabbed
                 return
+            if item and item[0] == 'tlc':                   # a spot on a plate: drag it (Rf), resize, copy
+                import tlc
+                rend = self.renderer()
+                x, y = self.to_model(pos)
+                hit = tlc.spot_at(rend, item[1], x * rend.BL, y * rend.BL)
+                if hit is not None:
+                    k, j = hit
+                    s = self.doc.tlcs[item[1]].lanes[k][j]
+                    self.press['spot'] = (item[1], k, j, dict(s))
+                    self.press['ctrl'] = bool(e.modifiers() & Qt.KeyboardModifier.ControlModifier)
+                    self.sel = {item}
+                    self.selection_changed.emit()
+                    return
         if self.tool in ('select', 'lasso'):
             if item and item in self.sel:
                 self.press['move'] = list(self.sel)
+            elif not item and not self.press['shift'] and self._in_sel_box(pos):
+                self.press['move'] = list(self.sel)         # anywhere inside the dashed box moves the selection
             elif item:
                 if not self.press['shift']:
                     self.sel = set()
@@ -1115,6 +1168,20 @@ class Canvas(QWidget):
             self.snapshot()
             self.press['erased'] = False
             self._erase(item)
+
+    def _sel_box(self, rend):
+        """The dashed frame around the selection, in pt (null when nothing is selected)."""
+        r = QRectF()
+        for it in self.sel:
+            if it[1] in self.doc.table(it[0]):
+                ir = rend.item_rect(*it)
+                r = ir if r.isNull() else r.united(ir)
+        return r if r.isNull() else r.adjusted(-3, -3, 3, 3)
+
+    def _in_sel_box(self, pos):
+        rend = self.renderer()
+        x, y = self.to_model(pos)
+        return self._sel_box(rend).contains(QPointF(x * rend.BL, y * rend.BL))
 
     def _charge_at(self, pos):
         """The atom whose charge sign is under the mouse, or None."""
@@ -1159,6 +1226,21 @@ class Canvas(QWidget):
             self.edited()
 
     def _erase(self, item):
+        if item and item[0] == 'tlc' and item[1] in self.doc.tlcs:   # a spot (its lane goes with its last spot)
+            import tlc
+            rend = self.renderer()
+            x, y = self.to_model(self.press['pos'])
+            hit = tlc.spot_at(rend, item[1], x * rend.BL, y * rend.BL)
+            if hit is not None:
+                plate = self.doc.tlcs[item[1]]
+                del plate.lanes[hit[0]][hit[1]]
+                if not plate.lanes[hit[0]]:
+                    del plate.lanes[hit[0]]
+                if not plate.lanes:
+                    self.doc.tlcs.pop(item[1])
+                self.press['erased'] = True
+                self.edited()
+                return
         if item and item[1] in self.doc.table(item[0]):
             if item[0] == 'atom' and self.doc.strip_atom(item[1]):  # N, OMe, C+ ... become a plain carbon first
                 self.press['erased'] = True
@@ -1200,6 +1282,28 @@ class Canvas(QWidget):
         pr['moved'] = True
         x, y = self.to_model(pos)
         t = self.tool
+        if 'spot' in pr:                                    # a TLC spot: Rf, size (Shift) or a copy (Ctrl)
+            import tlc
+            i, k, j, orig = pr['spot']
+            if not pr.get('snapped'):
+                pr['snapped'] = True
+                self.snapshot()
+            rend = self.renderer()
+            spot = self.doc.tlcs[i].lanes[k][j]
+            sx, sy = self.to_model(pr['pos'])
+            if pr['shift']:
+                spot['w'] = round(max(0.3, orig.get('w', 1.0) + (x - sx) * 3), 2)
+                spot['h'] = round(max(0.3, orig.get('h', 1.0) + (y - sy) * 3), 2)
+                self.message.emit(f"Spot size {spot['w']:.2f} × {spot['h']:.2f}")
+            elif pr.get('ctrl'):
+                self.message.emit(f'Copy to lane {tlc.lane_at(rend, i, x * rend.BL) + 1}, '
+                                  f'Rf {tlc.rf_at(rend, i, y * rend.BL):.2f}')
+            else:
+                spot['rf'] = round(tlc.rf_at(rend, i, y * rend.BL), 3)
+                self.message.emit(f"Rf {spot['rf']:.2f}")
+            self._renderer = None
+            self.update()
+            return
         if 'charge' in pr:                                  # dragging a charge sign: it stays with its atom
             if not pr.get('snapped'):
                 pr['snapped'] = True
@@ -1256,8 +1360,38 @@ class Canvas(QWidget):
             self.preview = (ARROW_TOOLS[t], [(sx, sy), end])
             self.update()
         elif t in SHAPE_TOOLS:
+            start = self.to_model(pr['pos'])
+            if t.startswith('orb:') and pr['item'] and pr['item'][0] == 'atom':   # orbitals start on their atom
+                at = self.doc.atoms[pr['item'][1]]
+                start = (at.x, at.y)
+            self.preview = (t, [start, (x, y)])
+            self.update()
+        elif t in CUT_TOOLS or t == 'tlc':
             self.preview = (t, [self.to_model(pr['pos']), (x, y)])
             self.update()
+
+    def _cut(self, tool, pts, keep_line=False):
+        """Mass fragmentation / retrosynthesis / synthesis along the dragged line; False when it crosses no bond."""
+        import fragment
+        (x1, y1), (x2, y2) = pts
+        line = (x1, y1, x2, y2)
+        if tool == 'massfrag':
+            frags = fragment.mass_fragments(self.doc, line)
+            if not frags:
+                self.message.emit('The line crosses no bond.')
+                return False
+            for formula, mass, (tx, ty) in frags:
+                self.doc.add_text(tx, ty, f'{formula}\n{mass:.4f}', formula=True, align='center')
+            if keep_line:
+                j = self.doc.add_shape(x1, y1, x2, y2, 'line')
+                self.doc.shapes[j].style = 'dashed'
+            return True
+        new = fragment.disconnect(self.doc, line, retro=(tool == 'retrosyn'))
+        if not new:
+            self.message.emit('The line crosses no bond.')
+            return False
+        self.sel = set(new)
+        return True
 
     def _start_point(self, item):
         if item and item[0] == 'atom':
@@ -1349,6 +1483,16 @@ class Canvas(QWidget):
             if pr.get('snapped'):
                 self.edited()
             return
+        if 'spot' in pr:
+            if pr.get('snapped'):
+                if pr.get('ctrl'):                          # Ctrl+drag: a copy in the lane under the mouse
+                    import tlc
+                    i, k, j, orig = pr['spot']
+                    rend = self.renderer()
+                    lane = tlc.lane_at(rend, i, x * rend.BL)
+                    self.doc.tlcs[i].lanes[lane].append(dict(orig, rf=round(tlc.rf_at(rend, i, y * rend.BL), 3)))
+                self.edited()
+            return
         if t in ('select', 'lasso'):
             if pr.get('merge') and pr.get('snapped'):
                 a, tgt = pr['merge']
@@ -1391,7 +1535,18 @@ class Canvas(QWidget):
             elif kind in SHAPE_TOOLS:
                 (x1, y1), (x2, y2) = pts
                 if math.hypot(x2 - x1, y2 - y1) > 0.2:
-                    self.doc.add_shape(x1, y1, x2, y2, kind)
+                    sk, st, params = SHAPE_TOOLS[kind]
+                    j = self.doc.add_shape(x1, y1, x2, y2, sk)
+                    self.doc.shapes[j].style, self.doc.shapes[j].params = st, dict(params)
+            elif kind in CUT_TOOLS:
+                if not self._cut(kind, pts, bool(e.modifiers() & Qt.KeyboardModifier.AltModifier)):
+                    self.undo_stack.pop()
+                    return
+            elif kind == 'tlc':
+                import tlc
+                (x1, y1), (x2, y2) = pts
+                i = tlc.new_plate(self.doc, x1, y1, x2 - x1, y2 - y1)
+                self.sel = {('tlc', i)}
             self.edited()
             return
         if not pr['moved']:
@@ -1427,7 +1582,23 @@ class Canvas(QWidget):
             if t == 'plasmid':
                 self.edit_object.emit('shape', i)
             return
-        if t in SHAPE_TOOLS:
+        if t.startswith('orb:'):                            # an orbital on the atom clicked (or where clicked)
+            sk, st, params = SHAPE_TOOLS[t]
+            cx, cy = (doc.atoms[item[1]].x, doc.atoms[item[1]].y) if item and item[0] == 'atom' else (x, y)
+            size = 0.5 if params['type'] in ('s', 'sigma') else 0.85
+            self.snapshot()
+            j = doc.add_shape(cx, cy, cx, cy - size, 'orbital')
+            doc.shapes[j].style, doc.shapes[j].params = st, dict(params)
+            self.edited()
+            return
+        if t == 'tlc':
+            import tlc
+            self.snapshot()
+            i = tlc.new_plate(doc, x - 1.5, y - 2.0, 3.0, 4.0)
+            self.sel = {('tlc', i)}
+            self.edited()
+            return
+        if t in SHAPE_TOOLS or t in CUT_TOOLS:
             return
         if t == 'text':
             if item and item[0] == 'atom':
@@ -1519,6 +1690,8 @@ class Canvas(QWidget):
             self.edit_grid(item[1])
         elif item and item[0] == 'seq':
             self.edit_object.emit('seq', item[1])
+        elif item and item[0] == 'tlc':
+            self.edit_object.emit('tlc', item[1])
         elif item and item[0] == 'shape' and self.doc.shapes[item[1]].kind == 'plasmid':
             self.edit_object.emit('shape', item[1])
         elif item and item[0] == 'bond' and self.tool == 'select':

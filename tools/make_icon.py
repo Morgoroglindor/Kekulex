@@ -1,8 +1,8 @@
-"""Draws structureeditor.ico (the program / installer icon). Several designs are kept so they can be compared; the
+"""Draws kekulex.ico (the program / installer icon). Several designs are kept so they can be compared; the
 one in use is CHOSEN. LC viewer is white peaks on magenta and Spectra viewer a coloured band on near-black, so these
 avoid both.
 
-    python tools\\make_icon.py                 (writes structureeditor.ico next to the sources)
+    python tools\\make_icon.py                 (writes kekulex.ico next to the sources)
     python tools\\make_icon.py --sheet out.png (all designs side by side at 256 / 48 / 32 / 16 px)
 """
 import math
@@ -159,7 +159,7 @@ def main():
         return
     img = draw()
     sizes = [(s, s) for s in (16, 20, 24, 32, 40, 48, 64, 128, 256)]
-    img.resize((256, 256), Image.LANCZOS).save(os.path.join(HERE, 'structureeditor.ico'), sizes=sizes)
+    img.resize((256, 256), Image.LANCZOS).save(os.path.join(HERE, 'kekulex.ico'), sizes=sizes)
 
 
 if __name__ == '__main__':
