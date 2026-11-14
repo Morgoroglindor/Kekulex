@@ -74,7 +74,11 @@ TOOLS = (('lasso', 'Lasso: select free-hand'), ('select', 'Select / move  (Space
          ('group', 'rings', [('ring6', 'Cyclohexane'), ('ring5', 'Cyclopentane'), ('ring3', 'Cyclopropane'),
                              ('ring4', 'Cyclobutane'), ('ring7', 'Cycloheptane'), ('ring8', 'Cyclooctane'),
                              ('cyclopentadiene', 'Cyclopentadiene  (Shift+J)')]), None,
-         ('charge+', 'Positive charge  (+ over an atom)'), ('charge-', 'Negative charge  (- over an atom)'), None,
+         ('group', 'charges', [('charge+', 'Positive charge  (+ over an atom)'),
+                               ('charge-', 'Negative charge  (- over an atom)'),
+                               ('radical', 'Radical •  (. over an atom)'),
+                               ('diradical', 'Diradical / carbene ••  (. twice over an atom)'),
+                               ('radical+', 'Radical cation •+'), ('radical-', 'Radical anion •−')], 2), None,
          ('group', 'arrows', [('arrow', 'Reaction arrow  (e)'), ('equilibrium', 'Equilibrium arrow'),
                               ('retro', 'Retrosynthetic arrow'), ('resonance', 'Resonance arrow'),
                               ('arrow_dashed', 'Dashed arrow'), ('curved', 'Curved arrow (electron pair)'),
@@ -90,6 +94,24 @@ TOOLS = (('lasso', 'Lasso: select free-hand'), ('select', 'Select / move  (Space
          ('text', 'Text: captions, and atom labels typed in place  (t)'), None,
          ('sequence', 'Biopolymer sequence: click where it goes, then type or paste it (FASTA, H-Ala-Gly-OH, HELM)'),
          ('group', 'bio', list(biodraw.NAMES.items())))
+RADIOLABELS = {'H': (3,), 'C': (11, 14), 'N': (13,), 'O': (15,), 'F': (18,), 'P': (32, 33), 'S': (35,),
+               'I': (123, 124, 125, 131), 'Cl': (36,), 'Br': (76, 82)}
+chem_sup = str.maketrans('0123456789', '⁰¹²³⁴⁵⁶⁷⁸⁹')
+
+
+def isotope_choices(el):
+    """Mass numbers to offer for an element: its stable isotopes other than the usual one, then the usual
+    radiolabels (14C, 3H, 18F, 125I ...)."""
+    import chem as _chem
+    try:
+        usual = round(_chem.PT.GetMostCommonIsotopeMass(el))
+        stable = [round(m) for m, _ab in _chem.isotopes(el)]
+    except RuntimeError:
+        return []
+    out = [n for n in stable if n != usual] + [n for n in RADIOLABELS.get(el, ()) if n not in stable]
+    return [n for n in out if model.isotope_mass(el, n)]
+
+
 COLORS = (('Black', ''), ('Red', '#E01E1E'), ('Blue', '#1E4FE0'), ('Green', '#1E8C3A'), ('Orange', '#E07B00'),
           ('Magenta', '#C0189A'), ('Cyan', '#0096B4'), ('Grey', '#808080'))
 HIGHLIGHT_COLORS = ('#2EE62E', '#2EE6F0', '#FFEA2E', '#F2994A', '#FF5252', '#B5E62E', '#8AD8FF', '#E8D44D',
@@ -502,7 +524,7 @@ class MainWindow(QtWidgets.QMainWindow):
             am = m.addMenu('A&tom')
             el = am.addMenu('&Element')
             for e in ELEMENTS:
-                el.addAction(e, lambda e=e: c.edit_selected('atom', el=e, label=''))
+                el.addAction(e, lambda e=e: c.edit_selected('atom', el=e, label='', iso=0))
             ch = am.addMenu('&Charge')
             for text, z in (('+1', 1), ('0', 0), ('−1', -1), ('+2', 2), ('−2', -2)):
                 ch.addAction(text, lambda z=z: c.edit_selected('atom', charge=z))
@@ -519,6 +541,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 a_ = hm.addAction(text, lambda h=h: c.edit_selected('atom', hcount=h))
                 a_.setCheckable(True)
                 a_.setChecked(all(c.doc.atoms[a].hcount == h for a in atoms))
+            els = {c.doc.atoms[a].el for a in atoms if not c.doc.atoms[a].label}
+            if len(els) == 1:                               # 13C, 15N, D ...: the isotopes of that element
+                el = els.pop()
+                im = am.addMenu('&Isotope')
+                for text, n in [('&Natural', 0)] + [(model.isotope_symbol(el, n) if el == 'H' else
+                                                     str(n).translate(chem_sup) + el, n) for n in isotope_choices(el)]:
+                    a_ = im.addAction(text, lambda n=n: c.edit_selected('atom', iso=n))
+                    a_.setCheckable(True)
+                    a_.setChecked(all(c.doc.atoms[a].iso == n for a in atoms))
             lm = am.addMenu('Lone &pairs')
             for text, n in (('&None', 0), ('&All it has', -1), ('&1', 1), ('&2', 2), ('&3', 3)):
                 a_ = lm.addAction(text, lambda n=n: c.edit_selected('atom', lone_pairs=n))
@@ -581,6 +612,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 km.addAction(text, lambda k=kind: self._set_shape_kind(k))
             km.addSeparator()
             km.addAction('Polymer &repeat count (n)…', lambda f=frames: self.set_repeat(f))
+        if any(c.doc.arrows[i].kind.startswith('curved') for i in c.selected('arrow')):
+            m.addAction('&Run the curved arrows (next step)', self.run_arrows)
         straight = [i for i in c.selected('arrow') if not c.doc.arrows[i].kind.startswith('curved')]
         if len(straight) == 1:
             m.addAction('Reaction &conditions (above / below the arrow)…',
@@ -596,6 +629,7 @@ class MainWindow(QtWidgets.QMainWindow):
             mm.addAction(self.a_clean)
             mm.addAction('E&xpand labels', c.expand_labels)
             mm.addAction('&Check structure', self.check_structure)
+            mm.addAction('Add &missing charges', c.fix_charges)
             if self.panel3d:
                 mm.addAction(self.a_send3d)
             self._swatch_menu(mm, '&Ring fill', RING_FILL_COLORS, c.set_ring_fill)
@@ -1033,6 +1067,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.a_reaction.setToolTip('Reactants red, products magenta, above the arrow cyan, below blue')
         self.a_reaction.toggled.connect(lambda v: (setattr(self.canvas, 'show_reaction', v), self.canvas.update()))
         m.addAction(self.a_reaction)
+        self.a_partial = QtGui.QAction('Show &partial charges', self, checkable=True)
+        self.a_partial.setToolTip('Gasteiger partial charges as discs behind the atoms: red negative (electron rich), '
+                                  'blue positive (electron poor); point at an atom for its value')
+        self.a_partial.toggled.connect(self._show_partial)
+        m.addAction(self.a_partial)
         m.addAction(self.highlight_bar.toggleViewAction())
         m.addAction(self.fill_bar.toggleViewAction())
         a = QtGui.QAction('Display &warnings (atoms over their valence)', self, checkable=True)
@@ -1073,6 +1112,9 @@ class MainWindow(QtWidgets.QMainWindow):
         m.addAction(self._act('Show &analysis (formula, mass, m/z …)', self.canvas.add_analysis, 'Ctrl+Shift+A'))
         m.addAction(self._act('Analyze &stoichiometry', self.canvas.analyze_stoichiometry))
         m.addAction(self._act('Check s&tructure', self.check_structure))
+        m.addAction(self._act('Add &missing charges', self.canvas.fix_charges,
+                              tip='The formal charges the bonds call for: N with four bonds is N+, O with one bond '
+                                  'and no H is O−'))
         fm = m.addMenu('&Forms')
         fm.addAction(self._act('&Tautomers', lambda: self.canvas.add_forms('tautomers'),
                                tip='The other tautomers of the selected structure, to its right'))
@@ -1083,8 +1125,14 @@ class MainWindow(QtWidgets.QMainWindow):
                                tip='Number matching atoms in reactants and products (:1, :2 ...)'))
         rm.addAction(self._act('&Clear atom map', self.canvas.clear_map))
         rm.addAction(self._act('Check &balance', self.check_balance))
+        rm.addAction(self._act('&Run the curved arrows (next step)', self.run_arrows, 'Ctrl+Shift+R',
+                               tip='Draws the structure the electron-pushing arrows make, to the right; or says what '
+                                   'is wrong with the arrows'))
         m.addAction(self._act('Match m/&z…', self.match_mz, 'Ctrl+M',
                               tip='A measured m/z against the structures drawn and elemental compositions'))
+        m.addAction(self._act('Annotate mass s&pectrum…', self.annotate_spectrum,
+                              tip='Open a measured spectrum (CSV, JCAMP-DX, MSP, MGF, mzML) and label its peaks '
+                                  'with the ions of the structures drawn'))
         if self.panel3d:
             m.addAction(self.a_send3d)
         m.addSeparator()
@@ -1188,6 +1236,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self._match.show(); self._match.raise_(); self._match.activateWindow()
         self._match.mz.setFocus()
 
+    def annotate_spectrum(self, path=None):
+        from spectrum_dialog import SpectrumDialog
+        if getattr(self, '_spectrum', None) is None:
+            self._spectrum = SpectrumDialog(self)
+        self._spectrum.show(); self._spectrum.raise_(); self._spectrum.activateWindow()
+        if path:
+            self._spectrum.load_path(path)
+        elif self._spectrum.spectra:
+            self._spectrum.update_view()                    # the drawing may have changed since
+        return self._spectrum
+
     def find_dialog(self):
         text, ok = QtWidgets.QInputDialog.getText(
             self, 'Find', 'Text in a caption, an atom label or element (OMe, Br),\n'
@@ -1195,6 +1254,19 @@ class MainWindow(QtWidgets.QMainWindow):
         if ok and text.strip():
             self._last_find = text.strip()
             self.canvas.find(text.strip())
+
+    def run_arrows(self):
+        _items, problems = self.canvas.run_arrows()
+        if problems:
+            QtWidgets.QMessageBox.warning(self, 'Curved arrows', 'These arrows cannot be run:\n\n• ' +
+                                          '\n• '.join(problems))
+
+    def _show_partial(self, on):
+        self.canvas.show_partial = on
+        self.canvas.update()
+        if on:
+            self.statusBar().showMessage('Partial charges (Gasteiger): red δ−, blue δ+. Point at an atom for its '
+                                         'value.', 8000)
 
     def check_structure(self):
         problems = self.canvas.check_structure()
@@ -1915,6 +1987,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 ('t', 'type the label of the atom under the mouse (CH2, CH3•, O•+ ...)'),
                 ('Enter', 'type the label of the atom under the mouse'),
                 ('Ctrl+Shift+E', 'expand label'), ('Ctrl+Shift+A', 'show analysis'),
+                ('Ctrl+Shift+R', 'run the curved arrows (next mechanism step)'),
                 ('Ctrl+Alt+L / H / R', 'align left / centres / right'), ('Ctrl+Alt+T / V / B', 'align top / middles / bottom'),
                 ('Delete', 'delete the item under the mouse or the selection'), ('Esc', 'clear the selection')]
         html = ('<p>Point at an atom or bond with the mouse and press the key (with any tool). Capital = Shift.</p>'

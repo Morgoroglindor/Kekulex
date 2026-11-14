@@ -209,3 +209,15 @@ test('groups are kept and pick up their whole group; captions follow their struc
   assert.equal(back.texts.get(t).text, 'Chemical Formula: C2H7N');
   assert.equal(liveCaption(RD, back, new Set(ids), ['name']), null);   // names stay as they were
 });
+
+test('tapping an element again cycles its hydrogens, as ChemDraw does', () => {
+  const d = new Doc();
+  const a = d.addAtom(0, 0, 'N'), b = d.addAtom(1, 0, 'C');
+  d.addBond(a, b);
+  const seen = [];
+  for (let k = 0; k < 4; k++) { d.cycleHydrogens(a); seen.push([d.implicitH(a), Boolean(d.valenceProblem(a))]); }
+  assert.deepEqual(seen, [[1, true], [0, true], [2, false], [1, true]]);
+  const c = [];
+  for (let k = 0; k < 5; k++) { d.cycleHydrogens(b); c.push(d.implicitH(b)); }
+  assert.deepEqual(c, [3, 2, 1, 0, 3]);
+});

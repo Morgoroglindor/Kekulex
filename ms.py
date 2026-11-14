@@ -210,3 +210,73 @@ def rdbe_of(counts):
     v = {'C': 4, 'Si': 4, 'N': 3, 'P': 3, 'B': 3, 'O': 2, 'S': 2}
     return 1 + sum(n * (v.get(e, 1) - 2) for e, n in counts.items()) / 2
 
+
+
+# ------------------------------------------------------------------------------------------- annotating a spectrum
+def candidate_ions(doc, units, positive=True, cleave=True):
+    """[(where, ion label, formula, calculated m/z, atom ids)] the drawn structures could give: their own ions and
+    adducts (a drawn fragment ion as itself), and, with cleave, each piece of breaking one bond outside a ring, as
+    the piece capped with H (PH) protonated [PH+H]+, as a radical cation [PH]•+ and as the even-electron cation
+    [PH−H]+ (P+); in negative mode [PH−H]−."""
+    out, seen = [], set()
+
+    def add(where, label, counts, mz, ids):
+        key = (label, round(mz, 4))
+        if key not in seen:
+            seen.add(key)
+            out.append((where, label, chem.formula_text(counts), mz, ids))
+    for name, ids in units:
+        info = chem.analyse(doc, ids)
+        if not info.atoms:
+            continue
+        for ion in info.ions:
+            if (ion.z > 0) == positive:
+                add(name, ion.label, ion.counts, ion.mz, ids)
+        if positive and not info.charge and not info.radicals:  # EI: the molecular ion M•+
+            add(name, '[M]•+', info.counts, info.exact - chem.ELECTRON, ids)
+        if not cleave or info.charge:
+            continue
+        for b, bd in doc.bonds.items():
+            if bd.a not in ids or doc.atoms[bd.a].label or doc.atoms[bd.b].label:
+                continue
+            parts = sides(doc, b)
+            if parts is None:
+                continue
+            for d, cut in pieces(doc, b, ('•', '•', [])):
+                p = chem.analyse(d)
+                if not p.atoms or not p.counts.get('C'):
+                    continue
+                ph = dict(p.counts)
+                ph['H'] = ph.get('H', 0) + 1
+                m_ph = p.exact + chem.H
+                piece = set(d.atoms)
+                f = chem.formula_text(ph)
+                if positive:
+                    plus = dict(ph, H=ph['H'] + 1)
+                    add(f'{name}, piece', f'[{f}+H]+', plus, m_ph + chem.H - chem.ELECTRON, piece)
+                    add(f'{name}, piece', f'[{f}]•+', ph, m_ph - chem.ELECTRON, piece)
+                    if ph['H'] >= 1:
+                        minus = dict(ph, H=ph['H'] - 1)
+                        add(f'{name}, piece', chem.formula_text(minus) + '+', minus, m_ph - chem.H - chem.ELECTRON,
+                            piece)
+                elif ph['H'] >= 1:
+                    minus = dict(ph, H=ph['H'] - 1)
+                    add(f'{name}, piece', f'[{f}−H]−', minus, m_ph - chem.H + chem.ELECTRON, piece)
+    return out
+
+
+def annotate(peaks, candidates, tol, unit='ppm'):
+    """For each peak (m/z, intensity): the best candidate within tol (ppm or Da) or None:
+    [(m/z, intensity, (where, label, formula, m/z calc., ids) or None, error)]. A drawn structure's own ion wins over
+    a cleavage piece at the same error."""
+    out = []
+    for mz, y in peaks:
+        best, err = None, None
+        for c in candidates:
+            e = ppm(mz, c[3]) if unit == 'ppm' else mz - c[3]
+            if abs(e) <= tol:
+                score = (abs(e), ', piece' in c[0])
+                if best is None or score < (abs(err), ', piece' in best[0]):
+                    best, err = c, e
+        out.append((mz, y, best, err))
+    return out

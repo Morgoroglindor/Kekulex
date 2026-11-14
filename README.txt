@@ -63,12 +63,24 @@ ChemDraw-like features (0.3.0)
   Bond styles          wedge, hashed wedge, bold, hashed, dashed (dashed second line on a double bond), wavy.
   Arrows               reaction, equilibrium, retrosynthetic, resonance, dashed, curved, fish-hook (click a curved
                        arrow again with its tool to bend it the other way).
-  Radicals and ions     point at an atom and press . for a radical (•), again for a carbene / diradical (••), again
-                       for none; or right-click > Atom > Radical, Charge > Radical cation •+ / anion •−, Hydrogens
-                       (0-3 or automatic). Typed labels say it too: CH2• , CH3+, O•+, C••, and CH2 on a carbon keeps
+  Radicals and ions     the charge palette (the ⊕ button's arrow) has +, −, radical •, diradical ••, radical cation
+                       •+ and radical anion •−: click an atom (again: taken away). Or point at an atom and press . for
+                       a radical (•), again for a carbene / diradical (••), again for none; or right-click > Atom >
+                       Radical, Charge > Radical cation •+ / anion •−, Hydrogens (0-3 or automatic). Typed labels say it too: CH2• , CH3+, O•+, C••, and CH2 on a carbon keeps
                        exactly two H. Each unpaired electron takes one H away; carbocations (CH3+), acylium ions and
                        carbenes are allowed, so MS fragments and reactive intermediates can be drawn. Formula, masses
                        and SMILES follow; odd-electron ions are listed as [M]•+. Kept in .sed, MOL (RAD) and .cdxml.
+  Isotopes             type 13C, 13CH3, 15NH2, [18O], ¹³C or D / T on an atom (or right-click > Atom > Isotope: the
+                       element's stable isotopes and the usual radiolabels 14C, 3H, 18F, 125I ...). The mass number is
+                       drawn up before the symbol (H3¹³C), D and T as letters. Formula (C¹³CH6O, CH3D), exact mass,
+                       isotope pattern, SMILES ([13CH3]) and InChIKey follow; kept in .sed, MOL (ISO) and .cdxml.
+  Missing charges      Structure > Add missing charges (also right-click > Molecule): the formal charge the bonds call
+                       for - N or P with four bonds +, O or S with three +, B with four −, O typed with no H on one bond
+                       −, NH3 typed on one bond +. Carbon is left alone (a cation or an anion is your call); Check
+                       structure names the atoms that need one.
+  Partial charges      View > Show partial charges: Gasteiger charges (with the atom's H) as discs behind the atoms,
+                       red for δ− (electron rich, nucleophilic), blue for δ+ (electrophilic), deeper for stronger;
+                       point at an atom for the value. On screen only (not printed or exported).
   MS fragments         right-click a bond > Bond > Cleave (MS fragments): each way of breaking it, named by its two
                        pieces and their m/z - a radical cation (M•+) gives A+ + B• or A• + B+ (alpha cleavage:
                        acetone M•+ -> CH3C≡O+ m/z 43.0178 + CH3•), an even-electron ion ([M+H]+) the inductive
@@ -80,9 +92,25 @@ ChemDraw-like features (0.3.0)
                        elemental compositions of the ion (elements C H N O S by default, any of P F Cl Br I Si B Na K
                        and caps such as N4 can be added), with ppm, RDBE and even / odd electron; the usual ratio rules
                        (H/C, N/C, O/C ...) leave out impossible formulas.
+  Annotate spectrum    Structure > Annotate mass spectrum: open a measured spectrum (two-column CSV / TXT, JCAMP-DX,
+                       NIST MSP, MGF, mzML - its scan with the most ions first, any scan from the list) or paste one;
+                       profile data is reduced to its peak tops. Each peak gets the best of the drawn structures' ions
+                       within the tolerance (ppm, or Da for unit-mass EI spectra): adducts, M•+, a drawn fragment ion
+                       as itself and, with Bond cleavages, each piece of breaking one bond ([PH+H]+, [PH]•+, P+;
+                       negative [PH−H]−). Stick plot with the matched peaks labelled (C2H3O+), table to copy
+                       (double-click selects the structure or piece), Insert into drawing puts the annotated spectrum
+                       on the page as a picture. msfile.py, spectrum_dialog.py.
   Mechanisms           curved and fish-hook arrows drawn from an atom or bond to an atom or bond stay on them when the
                        structure moves (drag the arrow alone to move its ends). Right-click > Atom > Lone pairs: none,
                        all it has (counted from its electrons) or 1-3, drawn as dot pairs in the free directions.
+                       Structure > Reaction > Run the curved arrows (Ctrl+Shift+R, or right-click a curved arrow):
+                       the structure the arrows make is drawn to the right of the step with a reaction arrow - a full
+                       arrow moves a pair, a fish-hook one electron, from a lone pair or a bond to an atom (a lone pair
+                       there, or a new bond) or to a bond (one order more); charges, radicals and bond orders follow
+                       by counting electrons and every atom keeps its H. The selected curved arrows run, else those on
+                       the selected structure, else the rightmost step's. Wrong arrows are named instead (from an atom
+                       with no lone pair, a fish-hook with no partner, carbon with five bonds after the step: one more
+                       arrow should take a pair away), and Check structure lists them too.
   Find                 Edit > Find (Ctrl+F): selects captions holding the text, atoms with that label or element, or a
                        substructure written as SMILES / SMARTS (C(=O)O, c1ccccc1, [OX2H]), nicknames included.
   Reactions            Structure > Reaction > Map atoms: atoms of the reactants and products get matching numbers (:1,

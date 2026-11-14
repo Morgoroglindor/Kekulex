@@ -47,7 +47,14 @@ const ICONS = {
   text: svg('<path d="M7 8h18M16 8v17M12 25h8"/>'),
   plus: svg('<path d="M16 7v18M7 16h18"/>'),
   minus: svg('<path d="M7 16h18"/>'),
+  rad: svg('<circle class="solid" cx="16" cy="16" r="3.2"/>'),
+  dirad: svg('<circle class="solid" cx="11" cy="16" r="3.2"/><circle class="solid" cx="21" cy="16" r="3.2"/>'),
+  'rad+': svg('<circle class="solid" cx="8" cy="16" r="3.2"/><path d="M20 9v14M13 16h14"/>'),
+  'rad-': svg('<circle class="solid" cx="8" cy="16" r="3.2"/><path d="M13 16h14"/>'),
 };
+// The charge tool's choices: [key, name, unpaired electrons, charge] (null: the charge is only added to)
+const CHARGES = [['1', 'Plus', null, 1], ['-1', 'Minus', null, -1], ['rad', 'Radical', 1, null], ['dirad', 'Diradical', 2, null],
+  ['rad+', 'Radical cation', 1, 1], ['rad-', 'Radical anion', 1, -1]];
 
 const TOOLS = [['select', 'Select and move'], ['bond', 'Bonds'], ['ring', 'Rings'], ['atom', 'Atoms'], ['chain', 'Chain'], ['charge', 'Charge'], ['erase', 'Eraser'], ['arrow', 'Arrow'], ['text', 'Text']];
 const BONDS = ['single', 'double', 'triple', 'wedge', 'hash', 'wavy', 'bold', 'dashed'];
@@ -61,6 +68,15 @@ function toast(text, ms = 3200) {
   toastTimer = setTimeout(() => { t.hidden = true; }, ms);
 }
 
+/** The charge tool on an atom: + / − add to its charge; a radical choice gives its dots (and charge), or, tapped
+ * again on an atom that already has them, takes them away (as the desktop's radical tools do). */
+function applyCharge(at, k) {
+  const [, , dots, z] = CHARGES.find(c => c[0] === k) || CHARGES[0];
+  if (dots === null) { at.charge += z; return; }
+  if (at.radical === dots && (z === null || at.charge === z)) { at.radical = 0; if (z !== null) at.charge = 0; }
+  else { at.radical = dots; if (z !== null) at.charge = z; }
+}
+
 // ---------------------------------------------------------------------------------------------- the tool bars
 function renderTools() {
   $('toolRow').innerHTML = TOOLS.map(([k, label]) => `<button class="tool ${state.tool === k ? 'on' : ''}" data-tool="${k}" aria-label="${label}" title="${label}">${k === 'atom' ? (state.el.length > 3 ? 'Atom' : state.el) : k === 'bond' ? ICONS[state.bond] : k === 'ring' ? ICONS[state.ring] : ICONS[k]}</button>`).join('');
@@ -68,7 +84,7 @@ function renderTools() {
   if (state.tool === 'bond') o.innerHTML = BONDS.map(b => `<button class="tool ${state.bond === b ? 'on' : ''}" data-bond="${b}" aria-label="${b} bond">${ICONS[b]}</button>`).join('');
   else if (state.tool === 'ring') o.innerHTML = RINGS.map(r => `<button class="tool ${state.ring === r ? 'on' : ''}" data-ring="${r}" aria-label="${r === 'benzene' ? 'Benzene' : `${r[1]}-membered ring`}">${ICONS[r]}</button>`).join('');
   else if (state.tool === 'atom') o.innerHTML = COMMON.map(e => `<button class="tool ${state.el === e ? 'on' : ''}" data-el="${e}">${e}</button>`).join('') + '<button class="tool" data-el-more="1">More…</button>';
-  else if (state.tool === 'charge') o.innerHTML = `<button class="tool ${state.sign !== -1 ? 'on' : ''}" data-sign="1" aria-label="Plus">${ICONS.plus}</button><button class="tool ${state.sign === -1 ? 'on' : ''}" data-sign="-1" aria-label="Minus">${ICONS.minus}</button>`;
+  else if (state.tool === 'charge') o.innerHTML = CHARGES.map(([k, name]) => `<button class="tool ${(state.sign || '1') === k ? 'on' : ''}" data-sign="${k}" aria-label="${name}" title="${name}">${ICONS[k === '1' ? 'plus' : k === '-1' ? 'minus' : k]}</button>`).join('');
   else if (state.tool === 'arrow') o.innerHTML = ARROWS.map(([k, g]) => `<button class="tool ${(state.arrow || 'forward') === k ? 'on' : ''}" data-arrow="${k}" aria-label="${k} arrow" style="font-size:22px">${g}</button>`).join('');
   else o.innerHTML = '';
   requestAnimationFrame(resize);
@@ -434,7 +450,11 @@ function tap(pr) {
     }
     case 'atom':
       snapshot();
-      if (it && it[0] === 'atom') setElement(it[1], state.el);
+      if (it && it[0] === 'atom') {
+        const at = doc.atoms.get(it[1]);
+        if (at.el === state.el && !at.label) doc.cycleHydrogens(it[1]);   // tapped again: NH2 -> NH -> N -> NH2
+        else setElement(it[1], state.el);
+      }
       else if (!it) setElement(doc.addAtom(pr.mx, pr.my), state.el);
       edited();
       break;
@@ -447,7 +467,7 @@ function tap(pr) {
       } else toast('Drag to draw a chain');
       break;
     case 'charge':
-      if (it && it[0] === 'atom') { snapshot(); doc.atoms.get(it[1]).charge += state.sign === -1 ? -1 : 1; edited(); }
+      if (it && it[0] === 'atom') { snapshot(); applyCharge(doc.atoms.get(it[1]), state.sign || '1'); edited(); }
       break;
     case 'erase':
       if (it) { snapshot(); eraseItem(it, false); edited(); }
@@ -854,7 +874,7 @@ function wire() {
     else if (d.ring) state.ring = d.ring;
     else if (d.el) state.el = d.el;
     else if (d.elMore) { elementDialog(); return; }
-    else if (d.sign) state.sign = Number(d.sign);
+    else if (d.sign) state.sign = d.sign;
     else if (d.arrow) state.arrow = d.arrow;
     renderTools();
   });

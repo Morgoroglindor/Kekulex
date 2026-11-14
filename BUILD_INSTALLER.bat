@@ -48,7 +48,7 @@ python -m PyInstaller --noconfirm --clean --windowed --onedir --name Kekulex --i
   --add-data "kekulex.ico;." --add-data "nmr_models;nmr_models" --hidden-import theme --hidden-import icons --hidden-import stoich_dialog --hidden-import pubchem ^
   --hidden-import nmr --hidden-import nmr_engine --hidden-import nmr_dialog --hidden-import plotcanvas --hidden-import biopolymer ^
   --hidden-import biodraw --hidden-import bio_dialog --hidden-import elements --hidden-import fragment ^
-  --hidden-import tlc --hidden-import mol3d --hidden-import view3d --hidden-import layout2d --hidden-import md_export --hidden-import features --hidden-import autosave --hidden-import winkeys --hidden-import condensed --hidden-import ms --hidden-import ms_dialog --hidden-import reactions --hidden-import batch --hidden-import batch_dialog --hidden-import pictures --collect-all rdkit --collect-all openclatura ^
+  --hidden-import tlc --hidden-import mol3d --hidden-import view3d --hidden-import layout2d --hidden-import md_export --hidden-import features --hidden-import autosave --hidden-import winkeys --hidden-import condensed --hidden-import ms --hidden-import ms_dialog --hidden-import reactions --hidden-import batch --hidden-import batch_dialog --hidden-import pictures --hidden-import msfile --hidden-import spectrum_dialog --collect-all rdkit --collect-all openclatura ^
   --exclude-module torch --exclude-module csp5 --exclude-module pandas --exclude-module pyarrow --exclude-module scipy ^
   --exclude-module sklearn --exclude-module sympy --exclude-module networkx --exclude-module tkinter --exclude-module PyQt5 --exclude-module PySide2 --exclude-module PySide6 ^
   --exclude-module IPython --exclude-module ipywidgets --exclude-module notebook --exclude-module pytest ^

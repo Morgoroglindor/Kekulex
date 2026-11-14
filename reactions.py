@@ -384,3 +384,192 @@ def stereo_problems(doc, atom_ids):
             out.append(f'{names[idx[a]]} has {len(kinds)} wedged / hashed bonds the same way: its configuration is '
                        'ambiguous.')
     return out
+
+
+# ------------------------------------------------------------------------------------------- electron-pushing arrows
+CURVED = ('curved', 'curved_half')
+
+
+def _symbol(doc, a):
+    at = doc.atoms[a]
+    return at.label or model.isotope_symbol(at.el, at.iso)
+
+
+def arrow_ends(doc, ar):
+    """(tail, head) of a curved arrow as ('atom', id) / ('bond', id) / None: the atom or bond it is tied to, else
+    what its end is drawn on (a lone-pair tail starts a little off its atom; a head may point between two atoms)."""
+    out = []
+    for end, (x, y) in (('tail', (ar.x1, ar.y1)), ('head', (ar.x2, ar.y2))):
+        on = getattr(ar, end + '_on')
+        if on and doc.anchor(on[0], on[1]) is not None:
+            out.append((on[0], on[1]))
+            continue
+        a = doc.find_atom(x, y, 0.35)
+        if a is not None:
+            out.append(('atom', a))
+            continue
+        b = doc.find_bond(x, y, 0.25)
+        if b is not None:
+            out.append(('bond', b))
+            continue
+        skip = {out[0][1]} if out and out[0] and out[0][0] == 'atom' else set()
+        a = doc.find_atom(x, y, 0.75 if end == 'tail' else 0.95, exclude=skip)
+        out.append(('atom', a) if a is not None else None)
+    return tuple(out)
+
+
+def run_arrows(doc, arrow_ids):
+    """What the electron-pushing arrows do: (new doc, {changed atom ids}, [problems]). A full arrow moves an electron
+    pair, a fish-hook one electron: from a lone pair (its atom) or a bond, to an atom (a lone pair there, or a new bond
+    to it) or a bond (one order more). Formal charges, radicals and bond orders follow by counting electrons; the H on
+    each atom stay. Problems: an end on nothing, a lone pair that is not there, a fish-hook without its partner, a bond
+    order past 3, an atom over its valence."""
+    from collections import defaultdict
+    d_lone, d_odd, d_bond = defaultdict(int), defaultdict(int), defaultdict(int)
+    problems = []
+
+    def key(a, b):
+        return (a, b) if a < b else (b, a)
+
+    for i in arrow_ids:
+        ar = doc.arrows.get(i)
+        if ar is None or ar.kind not in CURVED:
+            continue
+        n = 1 if ar.kind == 'curved_half' else 2
+        name = 'A fish-hook arrow' if n == 1 else 'A curved arrow'
+        tail, head = arrow_ends(doc, ar)
+        if tail is None:
+            problems.append(f'{name} does not start on an atom (its lone pair) or on a bond.')
+            continue
+        if head is None:
+            problems.append(f'{name} does not end on an atom or on a bond.')
+            continue
+        if tail[0] == 'atom':
+            a = tail[1]
+            s = _symbol(doc, a)
+            if doc.atoms[a].label:
+                problems.append(f'{name} starts on the label {s}: expand it first (Structure > Expand label).')
+                continue
+            have = doc.lone_pair_count(a) * 2 + (doc.atoms[a].radical if n == 1 else 0) + d_lone[a]
+            if have < n:
+                problems.append(f'{name} starts on {s}, which has no ' +
+                                ('lone pair to give.' if n == 2 else 'lone pair or unpaired electron.'))
+                continue
+            if head[0] == 'atom':
+                c = head[1]
+                if c == a:
+                    problems.append(f'{name} starts and ends on the same {s}.')
+                    continue
+                d_bond[key(a, c)] += n
+            else:
+                bd = doc.bonds[head[1]]
+                if a not in (bd.a, bd.b):
+                    problems.append(f'{name} goes from a lone pair of {s} to a bond {s} is not part of '
+                                    '(end it on the atom the new bond goes to).')
+                    continue
+                d_bond[key(bd.a, bd.b)] += n
+            d_lone[a] -= n
+            if n == 1:
+                d_odd[a] -= 1
+        else:
+            src = doc.bonds[tail[1]]
+            a, b = src.a, src.b
+            if head[0] == 'atom':
+                c = head[1]
+                if c in (a, b):                             # the bond breaks toward c (one electron each: homolysis)
+                    d_lone[c] += n
+                    if n == 1:
+                        d_odd[c] += 1
+                else:                                       # the pair swings over: a new bond from the nearer end to c
+                    pc = doc.atoms[c]
+                    near = min((a, b), key=lambda e: (doc.atoms[e].x - pc.x) ** 2 + (doc.atoms[e].y - pc.y) ** 2)
+                    d_bond[key(near, c)] += n
+            else:
+                dst = doc.bonds[head[1]]
+                if head[1] == tail[1]:
+                    problems.append(f'{name} starts and ends on the same bond.')
+                    continue
+                if not {a, b} & {dst.a, dst.b}:
+                    problems.append(f'{name} goes from the {_symbol(doc, a)}–{_symbol(doc, b)} bond to a bond that '
+                                    'does not share an atom with it.')
+                    continue
+                d_bond[key(dst.a, dst.b)] += n
+            d_bond[key(a, b)] -= n
+    new = doc.copy()
+    hs = {a: doc.implicit_h(a) for a in doc.atoms}
+    changed = set()
+    for (a, b), e in d_bond.items():
+        if not e:
+            continue
+        changed |= {a, b}
+        if e % 2:
+            problems.append(f'A fish-hook arrow at the {_symbol(doc, a)}–{_symbol(doc, b)} bond has no partner '
+                            '(a bond takes or gives its electrons two at a time: one fish-hook from each atom).')
+            continue
+        bi = new.bond_between(a, b)
+        old = new.bonds[bi].order if bi is not None else 0
+        order = old + e // 2
+        if order < 0:
+            problems.append(f'More electrons leave the {_symbol(doc, a)}–{_symbol(doc, b)} bond than it has.')
+        elif order > 3:
+            problems.append(f'The {_symbol(doc, a)}–{_symbol(doc, b)} bond would be of order {order}.')
+        elif order == 0:
+            new.remove_bond(bi, prune=False)
+        elif bi is None:
+            new.add_bond(a, b, order)
+        else:
+            new.bonds[bi].order = order
+            if order > 1:
+                new.bonds[bi].stereo, new.bonds[bi].style = '', ''
+    for a in set(d_lone) | {x for k in d_bond for x in k}:
+        shared = sum(e for k, e in d_bond.items() if a in k)    # electrons into (out of) its bonds: half are its own
+        if not d_lone[a] and not shared:
+            continue
+        at = new.atoms[a]
+        changed.add(a)
+        at.charge -= d_lone[a] + shared // 2            # formal charge: lone electrons and half the bonding ones
+        r = at.radical + d_odd[a]
+        at.radical = min(2, (-r) % 2 if r < 0 else r)
+        at.charge_pos = None
+    for a in changed:                                       # the H stay where they were
+        at = new.atoms[a]
+        if at.label:
+            continue
+        at.hcount = None
+        if new.implicit_h(a) != hs[a]:
+            at.hcount = hs[a]
+    for a in sorted(changed):
+        if new.valence_problem(a) and not doc.valence_problem(a):
+            problems.append(f'After the arrows: {new.valence_problem(a)} (should another arrow take a pair away '
+                            'from it?)')
+    return new, changed, problems
+
+
+def arrow_groups(doc, arrow_ids=None):
+    """The curved arrows (all, or arrow_ids) in sets that work on the same structures: [(arrow ids, atom ids)]."""
+    ids = [i for i, ar in doc.arrows.items() if ar.kind in CURVED and (arrow_ids is None or i in arrow_ids)]
+    frags = [set(f) for f in doc.fragments()]
+    groups = []
+    for i in ids:
+        atoms = set()
+        for end in arrow_ends(doc, doc.arrows[i]):
+            if end is None:
+                continue
+            atoms |= {end[1]} if end[0] == 'atom' else {doc.bonds[end[1]].a, doc.bonds[end[1]].b}
+        touched = set().union(*[f for f in frags if f & atoms]) if atoms else set()
+        merged = [g for g in groups if g[1] & touched]
+        arrows, ats = {i}, set(touched)
+        for g in merged:
+            arrows |= g[0]
+            ats |= g[1]
+            groups.remove(g)
+        groups.append((arrows, ats))
+    return groups
+
+
+def arrow_problems(doc):
+    """What is wrong with the curved arrows drawn (for Check structure)."""
+    out = []
+    for arrows, _atoms in arrow_groups(doc):
+        out += run_arrows(doc, arrows)[2]
+    return out

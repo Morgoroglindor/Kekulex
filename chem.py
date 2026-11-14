@@ -23,7 +23,43 @@ H = PT.GetMostCommonIsotopeMass('H')
 
 def _mono(formula):
     """Monoisotopic mass of a small neutral formula given as {element: count}."""
-    return sum(PT.GetMostCommonIsotopeMass(el) * n for el, n in formula.items())
+    return sum(key_mass(el) * n for el, n in formula.items())
+
+
+# Formula keys: an element ('C'), or a labelled isotope: '13C', '15N', and 'D' / 'T' for hydrogen's
+def iso_key(el, iso):
+    if not iso:
+        return el
+    return {2: 'D', 3: 'T'}.get(iso, f'{iso}{el}') if el == 'H' else f'{iso}{el}'
+
+
+def split_key(key):
+    """(element, mass number or 0) of a formula key: 'C' -> ('C', 0), '13C' -> ('C', 13), 'D' -> ('H', 2)."""
+    if key in ('D', 'T'):
+        return 'H', 2 if key == 'D' else 3
+    k = 0
+    while k < len(key) and key[k].isdigit():
+        k += 1
+    return (key[k:], int(key[:k])) if k else (key, 0)
+
+
+def key_mass(key, average=False):
+    """Monoisotopic (or average) mass of one atom of a formula key; a labelled isotope has its own exact mass."""
+    el, iso = split_key(key)
+    if iso:
+        return PT.GetMassForIsotope(el, iso)
+    return PT.GetAtomicWeight(el) if average else PT.GetMostCommonIsotopeMass(el)
+
+
+_SUP = str.maketrans('0123456789', '⁰¹²³⁴⁵⁶⁷⁸⁹')
+
+
+def key_text(key, html=False):
+    """A formula key as written: C, D, ¹³C (or <sup>13</sup>C)."""
+    el, iso = split_key(key)
+    if not iso or key in ('D', 'T'):
+        return key
+    return f'<sup>{iso}</sup>{el}' if html else str(iso).translate(_SUP) + el
 
 
 # (label, molecules, atoms gained, atoms lost, charge gained). The label's 'M' takes the count.
@@ -74,15 +110,25 @@ def ion_label(base, z, radical=False):
 
 
 def hill(counts):
-    """Hill order: C, H, then alphabetical (alphabetical throughout when there is no carbon)."""
-    els = sorted(counts)
-    if 'C' in counts:
-        els = ['C'] + (['H'] if 'H' in counts else []) + [e for e in els if e not in ('C', 'H')]
+    """Hill order: C, H, then alphabetical (alphabetical throughout when there is no carbon). A labelled isotope
+    follows its element (C, ¹³C, H, D)."""
+    def order(key):
+        el, iso = split_key(key)
+        return el, iso
+    els = sorted(counts, key=order)
+    if any(split_key(e)[0] == 'C' for e in counts):
+        first = [e for e in els if split_key(e)[0] == 'C'] + [e for e in els if split_key(e)[0] == 'H']
+        els = first + [e for e in els if e not in first]
     return els
 
 
 def formula_text(counts):
-    return ''.join(e + (str(counts[e]) if counts[e] > 1 else '') for e in hill(counts) if counts[e] > 0)
+    return ''.join(key_text(e) + (str(counts[e]) if counts[e] > 1 else '') for e in hill(counts) if counts[e] > 0)
+
+
+def formula_html(counts):
+    return ''.join(key_text(e, True) + (f'<sub>{counts[e]}</sub>' if counts[e] > 1 else '') for e in hill(counts)
+                   if counts[e] > 0)
 
 
 def to_mol(doc, atom_ids=None):
@@ -101,6 +147,8 @@ def to_mol(doc, atom_ids=None):
             atom.SetNoImplicit(True)
             atom.SetNumExplicitHs(doc.implicit_h(a))
             atom.SetNumRadicalElectrons(at.radical)
+        if not at.label and at.iso:                             # 13C, D: [13CH3], [2H] in the SMILES
+            mol.GetAtomWithIdx(k).SetIsotope(at.iso)
     try:
         Chem.SanitizeMol(mol)
         Chem.AssignChiralTypesFromBondDirs(mol)
@@ -155,9 +203,8 @@ def analyse(doc, atom_ids=None):
                 ends[e] = ends.get(e, 0) - c
         ends = {e: c for e, c in ends.items() if c > 0}
         units = ''.join(f'({formula_text(uc)}){rep}' for rep, uc in symbolic)
-        units_html = ''.join('(' + ''.join(e + (f'<sub>{uc[e]}</sub>' if uc[e] > 1 else '') for e in hill(uc)) +
-                             f')<sub><i>{rep}</i></sub>' for rep, uc in symbolic)
-        ends_html = ''.join(e + (f'<sub>{ends[e]}</sub>' if ends[e] > 1 else '') for e in hill(ends))
+        units_html = ''.join('(' + formula_html(uc) + f')<sub><i>{rep}</i></sub>' for rep, uc in symbolic)
+        ends_html = formula_html(ends)
         info.formula = (formula_text(ends) if ends else '') + units
         info.formula_html = ends_html + units_html + (f'<sup>{charge_text(charge)}</sup>' if charge else '')
         info.repeat = ', '.join(rep for rep, _uc in symbolic)
@@ -169,6 +216,35 @@ def analyse(doc, atom_ids=None):
     return info
 
 
+def partial_charges(doc):
+    """{atom id: Gasteiger partial charge, its H included} of every atom drawn (a nickname: its group's sum). Atoms
+    whose structure RDKit cannot read are left out."""
+    from rdkit.Chem import AllChem
+    full, grown = doc.expanded()
+    owner = {a: a for a in doc.atoms}
+    for a, more in grown.items():
+        for g in more:
+            owner[g] = a
+    out = {}
+    for frag in full.fragments():
+        mol, order, _err = to_mol(full, set(frag))
+        if mol is None:
+            continue
+        try:
+            AllChem.ComputeGasteigerCharges(mol)
+        except Exception:
+            continue
+        for k, a in enumerate(order):
+            atom = mol.GetAtomWithIdx(k)
+            q = atom.GetDoubleProp('_GasteigerCharge')
+            if atom.HasProp('_GasteigerHCharge'):
+                q += atom.GetDoubleProp('_GasteigerHCharge')    # all its implicit H together
+            if q != q or a not in owner:                    # NaN: an element Gasteiger has no parameters for
+                continue
+            out[owner[a]] = out.get(owner[a], 0.0) + q
+    return out
+
+
 def _tally(full, ids):
     """(element counts, monoisotopic mass, average mass, charge, unknown elements) of these atoms of the expanded
     drawing full, with their implicit hydrogens."""
@@ -178,13 +254,16 @@ def _tally(full, ids):
     unknown = []
     for a in ids:
         at = full.atoms[a]
+        key = iso_key(at.el, at.iso) if at.iso and not at.label else at.el
         try:
-            m = PT.GetMostCommonIsotopeMass(at.el)
-            w = PT.GetAtomicWeight(at.el)
+            m = key_mass(key)
+            w = key_mass(key, average=True)
         except RuntimeError:
             unknown.append(at.el); continue
+        if not m:                                           # an isotope the element does not have: the usual one
+            key, m, w = at.el, key_mass(at.el), key_mass(at.el, True)
         hs = full.implicit_h(a)
-        counts[at.el] = counts.get(at.el, 0) + 1
+        counts[key] = counts.get(key, 0) + 1
         if hs:
             counts['H'] = counts.get('H', 0) + hs
         mono += m + hs * H
@@ -233,11 +312,15 @@ def _masses(info, counts, charge, mono, avg):
     info.counts, info.charge, info.exact, info.average = counts, charge, mono, avg
     els = hill(counts)
     info.formula = formula_text(counts)
-    info.formula_html = ''.join(e + (f'<sub>{counts[e]}</sub>' if counts[e] > 1 else '') for e in els)
+    info.formula_html = formula_html(counts)
     if charge or info.radicals:
         info.formula_html += f'<sup>{"•" * info.radicals}{charge_text(charge)}</sup>'
     if avg:
-        info.analysis = '; '.join(f'{e}, {100 * PT.GetAtomicWeight(e) * counts[e] / avg:.2f}' for e in els)
+        by_el = {}                                          # by element (a labelled isotope counts with it)
+        for e in els:
+            el = split_key(e)[0]
+            by_el[el] = by_el.get(el, 0.0) + key_mass(e, True) * counts[e]
+        info.analysis = '; '.join(f'{e}, {100 * w / avg:.2f}' for e, w in by_el.items())
     if charge:                                              # a charged structure is an ion already
         info.ions.append(Ion(ion_label('M', charge, info.radicals % 2), charge, (mono - charge * ELECTRON) / abs(charge),
                              dict(counts)))
@@ -262,7 +345,10 @@ _isotopes = {}
 
 
 def isotopes(el):
-    """[(mass, abundance 0-1)] of the stable isotopes of an element."""
+    """[(mass, abundance 0-1)] of the stable isotopes of an element (a labelled isotope key such as 13C or D: that one
+    alone)."""
+    if split_key(el)[1]:
+        return [(key_mass(el), 1.0)]
     if el not in _isotopes:
         z = PT.GetAtomicNumber(el)
         base = PT.GetMostCommonIsotope(z)

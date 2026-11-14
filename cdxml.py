@@ -138,6 +138,8 @@ def read(path):
                     el = 'C'
                 a = doc.add_atom(x, y, el, int(n.get('Charge', 0)))
                 doc.atoms[a].radical = {'Doublet': 1, 'Triplet': 2, 'Singlet': 2}.get(n.get('Radical', ''), 0)
+                if n.get('Isotope', '').isdigit() and model.isotope_mass(el, int(n.get('Isotope'))):
+                    doc.atoms[a].iso = int(n.get('Isotope'))
                 if n.get('NumHydrogens') is not None and doc.atoms[a].radical:
                     hcount[a] = int(n.get('NumHydrogens'))
             doc.atoms[a].color = color(n)
@@ -374,7 +376,8 @@ def write(doc, path, program='Kekulex'):
             lab = r.labels.get(a)
             label_xml = ''
             if lab and lab['clip']:                          # a label: ChemDraw shows the text it is given
-                text = ''.join(p[0] for p in lab['pieces']).replace('−', '-')
+                pcs = sorted(lab['pieces'], key=lambda p: p[1]) if at.iso else lab['pieces']   # 13CH3: in reading order
+                text = ''.join(p[0] for p in pcs).replace('−', '-')
                 x0, base = lab['pieces'][0][1], lab['pieces'][0][2]
                 just = 'Right' if (text and not text.startswith(at.label[:1] if at.label else at.el)) else 'Left'
                 label_xml = (f'<t p="{f(x0)} {f(base)}" LabelJustification="{just}"><s font="3" size="{f(s["font_size"])}" '
@@ -389,6 +392,8 @@ def write(doc, path, program='Kekulex'):
                 attrs += f' Charge="{at.charge}"'
             if at.radical:
                 attrs += f' Radical="{"Doublet" if at.radical == 1 else "Triplet"}"'
+            if at.iso:
+                attrs += f' Isotope="{at.iso}"'
             if label_xml or at.el != 'C':
                 attrs += f' NumHydrogens="{doc.implicit_h(a)}" NeedsClean="yes"'
             attrs += cattr(at.color)

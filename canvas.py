@@ -5,7 +5,7 @@ selection, arranging (align, distribute, rotate, scale, flip, colour), undo / re
     c = Canvas(); c.set_tool('bond1'); c.doc (the Doc being edited); c.changed (signal after every edit)
 
 Tools: select, bond tools (BOND_TOOLS), chain, ring3 ... ring8 / benzene / cyclopentadiene, atom (with c.element),
-charge+ / charge-, erase, arrow tools (ARROW_TOOLS), shape tools (SHAPE_TOOLS), text.
+charge+ / charge-, radical tools (RADICAL_TOOLS), erase, arrow tools (ARROW_TOOLS), shape tools (SHAPE_TOOLS), text.
 Mouse: click or drag with a bond tool (from an atom, a bond or empty space); ring tools fuse onto a bond or an atom;
 right / middle drag pans, Ctrl + wheel zooms, the wheel scrolls. Double-click: an atom's label or a caption is typed in
 place; a bond selects its whole structure.
@@ -68,6 +68,7 @@ FUSE_KEYS = {'v': (3, False), '4': (4, False), '5': (5, False), '6': (6, False),
              'a': (6, True), 'z': (5, True)}
 BOND_STYLE_KEYS = {'b': 'bold', 'B': 'bold', 'd': 'dashed', 'D': 'dashed', 'y': 'wavy', 'H': 'hashed'}
 # Anywhere else - a tool
+RADICAL_TOOLS = {'radical': (1, None), 'diradical': (2, None), 'radical+': (1, 1), 'radical-': (1, -1)}  # dots, charge
 TOOL_KEYS = {'g': 'tlc', 'G': 'orb:p:shaded', 'j': 'benzene', 'J': 'cyclopentadiene', 'x': 'bond1', 'X': 'chain', 'e': 'arrow', 't': 'text',
              ' ': 'select'}
 DRAG_PX = 4                                                 # the mouse must move this far for a press to be a drag
@@ -83,6 +84,10 @@ HINTS = {
     'atom': 'Click an atom to change its element, or empty space to place one. ChemDraw hotkeys (Ctrl+/) work with any tool.',
     'charge+': 'Click an atom to add a positive charge (+ key with any tool).',
     'charge-': 'Click an atom to add a negative charge (- key with any tool).',
+    'radical': 'Click an atom to give it an unpaired electron •; click again to take it away (. key with any tool).',
+    'diradical': 'Click an atom to give it two unpaired electrons •• (a carbene / diradical); click again to take them away.',
+    'radical+': 'Click an atom to make it a radical cation •+ (an M•+ ion in MS); click again to make it neutral.',
+    'radical-': 'Click an atom to make it a radical anion •−; click again to make it neutral.',
     'erase': 'Click (or drag over) atoms, bonds, arrows, shapes and text to delete them.',
     'arrow': 'Drag to draw the arrow. Click a curved arrow with a curved-arrow tool to bend it the other way.',
     'shape': 'Drag to draw the shape (brackets come as a pair around what you frame).',
@@ -174,6 +179,8 @@ class Canvas(QWidget):
         self.editor = None                                  # (widget, 'label' | 'text', id, x, y) while typing
         self.text_props = dict(align='left', size=0.0, bold=False, italic=False, formula=False, color='')
         self.show_reaction = False                          # View > Show reaction interpretation
+        self.show_partial = False                           # View > Show partial charges
+        self._partial = (None, {})                          # (structure it was computed for, {atom: charge})
         self.show_rulers = False
         self.show_warnings = True                           # red boxes on atoms over their valence
         self._renderer = None
@@ -954,7 +961,72 @@ class Canvas(QWidget):
         for comp in self.doc.fragments(atoms):
             formula = chem.analyse(self.doc, comp).formula or '?'
             problems += [f'{formula}: {p}' for p in reactions.stereo_problems(self.doc, set(comp))]
+        for arrows, ats in reactions.arrow_groups(self.doc):
+            if ats & atoms or not ats:
+                problems += ['Curved arrows: ' + p for p in reactions.run_arrows(self.doc, arrows)[2]]
+        problems += [f'{self.doc.atoms[a].el} looks like it needs a charge ({render.Renderer._charge_text(z)}): '
+                     'Structure > Add missing charges.' for a in sorted(atoms)
+                     if (z := self.doc.needed_charge(a)) is not None]
         return problems
+
+    def fix_charges(self):
+        """Structure > Add missing charges: the formal charges the bonds call for (N with four bonds: N+, O typed
+        with no H on one bond: O-), on the selected structures (all, when nothing is selected)."""
+        atoms = self.selected_atoms() or set(self.doc.atoms)
+        if not any(self.doc.needed_charge(a) is not None for a in atoms):
+            left = [a for a in atoms if self.doc.valence_problem(a)]
+            self.message.emit('No missing charges found.' + (' The red boxes left are on carbon or need more than a '
+                                                            'charge: a cation or anion there is your call.' if left else ''))
+            return {}
+        self.snapshot()
+        done = self.doc.fix_charges(atoms)
+        self.edited()
+        signs = ', '.join(sorted(f'{self.doc.atoms[a].el}{render.Renderer._charge_text(z)}' for a, z in done.items()))
+        self.message.emit(f'{len(done)} charge{"s" if len(done) > 1 else ""} added: {signs}.')
+        return done
+
+    def run_arrows(self):
+        """Reaction > Run the curved arrows: the structure the electron-pushing arrows make, drawn to the right of
+        the step (with a reaction arrow), or what is wrong with the arrows. The selected curved arrows, else those on
+        the selected structure, else the rightmost step's."""
+        import reactions
+        chosen = {i for k, i in self.sel if k == 'arrow' and self.doc.arrows[i].kind in reactions.CURVED}
+        groups = reactions.arrow_groups(self.doc, chosen or None)
+        if not chosen and self.selected_atoms():
+            groups = [g for g in groups if g[1] & self.selected_atoms()] or groups
+        if not groups:
+            self.message.emit('Draw the curved (electron-pushing) arrows first: from a lone pair or a bond, to an '
+                              'atom or a bond.')
+            return [], []
+        rend = self.renderer()
+
+        def right_of(g):
+            return max(rend.item_rect('atom', a).right() for a in g[1]) if g[1] else 0
+        arrows, atoms = max(groups, key=right_of)
+        new, _changed, problems = reactions.run_arrows(self.doc, arrows)
+        if problems:
+            self.message.emit('The arrows do not work: ' + ' '.join(problems))
+            return [], problems
+        BL = rend.BL
+        box = QRectF()
+        for it in [('atom', a) for a in atoms] + [('arrow', i) for i in arrows]:
+            r = rend.item_rect(*it)
+            if r is not None and not r.isNull():
+                box = r if box.isNull() else box.united(r)
+        x, cy = box.right() / BL, box.center().y() / BL
+        self.snapshot()
+        out = [('arrow', self.doc.add_arrow(x + 0.5, cy, x + 2.3, cy, 'forward'))]
+        data = new.to_dict({('atom', a) for a in atoms if a in new.atoms})
+        left = min(new.atoms[a].x for a in atoms if a in new.atoms)
+        items = self.doc.insert_dict(data, dx=x + 3.0 - left)
+        self._renderer = None
+        r2 = self.renderer()
+        lb = min(r2.item_rect(*it).left() for it in items if it[0] == 'atom') / BL
+        self.doc.transform(items, lambda px, py, d=x + 2.8 - lb: (px + d, py))   # its letters start after the arrow
+        self.sel = set(items) | set(out)
+        self.edited()
+        self.message.emit('The next step is drawn: the arrows moved their electrons.')
+        return items + out, []
 
     # ------------------------------------------------------------------------------------------- forms, maps, find
     def add_forms(self, which):
@@ -1322,6 +1394,8 @@ class Canvas(QWidget):
             self._mark(p, rend, *self.hover, soft, BL)
         if self.show_reaction:
             self._paint_reaction(p, rend, BL)
+        if self.show_partial:
+            self._paint_partial(p, BL)
         rend.paint(p, errors=self.show_warnings)
         if self.sel:                                        # the selection's frame, as a dashed box
             r = self._sel_box(rend)
@@ -1452,6 +1526,33 @@ class Canvas(QWidget):
                     at = self.doc.atoms[a]
                     p.drawPoint(QPointF(at.x * BL, at.y * BL))
 
+    def partial_charges(self):
+        """{atom: Gasteiger charge} of the drawing, computed again only when its structures changed."""
+        import chem
+        sig = self.doc.to_molblock()[0] + repr([(a, t.label) for a, t in self.doc.atoms.items() if t.label])
+        if self._partial[0] != sig:
+            self._partial = (sig, chem.partial_charges(self.doc))
+        return self._partial[1]
+
+    def _paint_partial(self, p, BL):
+        """View > Show partial charges: a disc behind each atom, red for a negative partial charge (electron rich,
+        nucleophilic), blue for a positive one (electrophilic); the stronger the charge, the deeper the colour."""
+        from PyQt6.QtGui import QRadialGradient
+        p.setPen(Qt.PenStyle.NoPen)
+        for a, q in self.partial_charges().items():
+            at = self.doc.atoms.get(a)
+            if at is None or abs(q) < 0.02:
+                continue
+            col = QColor('#E53935' if q < 0 else '#1E63E9')
+            strength = min(1.0, abs(q) / 0.4)
+            r = (0.28 + 0.22 * strength) * BL
+            g = QRadialGradient(QPointF(at.x * BL, at.y * BL), r)
+            inner = QColor(col); inner.setAlpha(round(40 + 150 * strength))
+            outer = QColor(col); outer.setAlpha(0)
+            g.setColorAt(0.0, inner); g.setColorAt(1.0, outer)
+            p.setBrush(QBrush(g))
+            p.drawEllipse(QPointF(at.x * BL, at.y * BL), r, r)
+
     def _paint_preview(self, p, BL, accent):
         kind, pts = self.preview
         pen = QPen(accent, 1.2, cap=Qt.PenCapStyle.RoundCap, join=Qt.PenJoinStyle.RoundJoin)
@@ -1507,7 +1608,8 @@ class Canvas(QWidget):
         w.setFont(self._editor_font(render.style_of(self.doc)['font_size']))
         if start is None:
             hs = '' if at.hcount is None else 'H' + (str(at.hcount) if at.hcount != 1 else '')   # H0: none
-            w.setText(at.label or (at.el + hs + '•' * at.radical +
+            sym = model.isotope_symbol(at.el, at.iso) if at.iso else at.el
+            w.setText(at.label or (sym + hs + '•' * at.radical +
                                    (render.Renderer._charge_text(at.charge).replace('−', '-') if at.charge else '')))
             w.selectAll()
         else:
@@ -1551,7 +1653,10 @@ class Canvas(QWidget):
         if kind == 'label':
             if i not in self.doc.atoms or not text.strip():
                 return
+            iso, text = model.label_isotope(text)           # 13C, 15NH2, D: the mass number, then the label
             what = model.parse_label(text)
+            if iso and (what is None or what[0] != 'element' or not model.isotope_mass(what[1], iso)):
+                what = None
             if what is None:
                 self.message.emit(f'"{text}" is not an element, a nickname (OMe, Boc, Ph ...) or a condensed formula '
                                   '(SO3K, CH2CH3, N(CH3)2, COCH3 ...): check the capital letters.')
@@ -1560,9 +1665,9 @@ class Canvas(QWidget):
             at = self.doc.atoms[i]
             if what[0] == 'nickname':
                 self.doc.set_nickname(i, what[1])
-                at.radical, at.hcount = 0, None
+                at.radical, at.hcount, at.iso = 0, None, 0
             else:
-                at.label, at.el, at.charge = '', what[1], what[2]
+                at.label, at.el, at.charge, at.iso = '', what[1], what[2], iso
                 hs, at.radical = model.label_extras(text)   # CH2, CH3•, O•+: typed H and unpaired electrons
                 at.hcount = None
                 if hs is not None and hs != self.doc.implicit_h(i):
@@ -1822,6 +1927,9 @@ class Canvas(QWidget):
         elif item and item[0] == 'shape' and self.doc.shapes[item[1]].kind in model.BIO_KINDS:
             import biodraw
             problem = biodraw.NAMES.get(self.doc.shapes[item[1]].kind, '')
+        if self.show_partial and item and item[0] == 'atom' and item[1] in self.partial_charges():
+            q = self.partial_charges()[item[1]]
+            problem = (problem + '\n' if problem else '') + f'Partial charge {q:+.3f} (Gasteiger, with its H)'
         if problem:
             QToolTip.showText(e.globalPosition().toPoint(), problem, self)
             self.message.emit(problem)
@@ -2321,13 +2429,26 @@ class Canvas(QWidget):
                 doc.add_atom(x, y, self.element)
             elif item[0] == 'atom':
                 at = doc.atoms[item[1]]
-                at.el, at.label = self.element, ''
+                at.el, at.label, at.iso = self.element, '', 0
             else:
                 self.undo_stack.pop(); return
             self.edited()
         elif t in ('charge+', 'charge-') and item and item[0] == 'atom':
             self.snapshot()
             doc.atoms[item[1]].charge += 1 if t == 'charge+' else -1
+            self.edited()
+        elif t in RADICAL_TOOLS and item and item[0] == 'atom':
+            self.snapshot()
+            at = doc.atoms[item[1]]
+            dots, z = RADICAL_TOOLS[t]
+            if at.radical == dots and (z is None or at.charge == z):   # clicked again: taken away
+                at.radical = 0
+                if z is not None:
+                    at.charge = 0
+            else:
+                at.radical = dots
+                if z is not None:
+                    at.charge = z
             self.edited()
 
     def mouseDoubleClickEvent(self, e):
@@ -2429,7 +2550,7 @@ class Canvas(QWidget):
                 elif at.el == name and not at.label:
                     doc.cycle_hydrogens(a)                  # the same key again: one H fewer (NH2, NH, N, NH2 ...)
                 else:
-                    at.el, at.label, at.hcount = name, '', None   # another element: with all its H
+                    at.el, at.label, at.hcount, at.iso = name, '', None, 0   # another element: all its H
                 self.edited()
                 return True
             if ch in SPROUT_KEYS:

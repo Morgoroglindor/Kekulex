@@ -94,6 +94,22 @@ def _charge(sign):
     return draw
 
 
+def _radical(dots, sign=0):
+    """Unpaired electrons, with a charge for a radical ion: a dot (or two) and a small sign beside it."""
+    def draw(p):
+        p.save(); p.setBrush(p.pen().color())
+        xs = (12,) if dots == 1 and not sign else (9.5, 14.5) if dots == 2 else (8,)
+        for x in xs:
+            p.drawEllipse(QPointF(x, 12), 2.6, 2.6)
+        p.restore()
+        if sign:
+            p.drawEllipse(QPointF(15.5, 12), 5.5, 5.5)
+            p.drawLine(QPointF(12.8, 12), QPointF(18.2, 12))
+            if sign > 0:
+                p.drawLine(QPointF(15.5, 9.3), QPointF(15.5, 14.7))
+    return draw
+
+
 def _arrow(p):
     p.drawLine(QPointF(3, 12), QPointF(18, 12))
     p.setBrush(p.pen().color())
@@ -381,6 +397,7 @@ def _sequence(p):                                         # three monomers on a 
 DRAW = {'select': _select, 'bond1': _bond(1), 'bond2': _bond(2), 'bond3': _bond(3), 'wedge': _wedge, 'hash': _hash,
         'chain': _chain, 'ring3': _ring(3), 'ring4': _ring(4), 'ring5': _ring(5), 'ring6': _ring(6), 'ring7': _ring(7),
         'ring8': _ring(8), 'benzene': _benzene, 'erase': _erase, 'charge+': _charge(1), 'charge-': _charge(-1),
+        'radical': _radical(1), 'diradical': _radical(2), 'radical+': _radical(1, 1), 'radical-': _radical(1, -1),
         'arrow': _arrow, 'equilibrium': _equilibrium, 'text': _text, 'new': _new, 'open': _open, 'save': _save,
         'undo': _undo, 'redo': _redo, 'copy': _copy, 'clean': _clean, 'fit': _fit, 'image': _image,
         'bold': _bold, 'dashed': _dashed, 'wavy': _wavy, 'hashed': _hashed, 'cyclopentadiene': _cyclopentadiene,

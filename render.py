@@ -249,16 +249,25 @@ class Renderer:
                     if self._collisions(a, alt['pieces']) < self._collisions(a, best['pieces']):
                         best = alt
             return best
-        if (at.el == 'C' and nb and not at.charge and not at.radical and at.hcount is None
+        if (at.el == 'C' and nb and not at.charge and not at.radical and at.hcount is None and not at.iso
                 and not (s['show_terminal_carbons'] and len(nb) == 1)):
             return None                                     # a plain vertex (a charged carbon or radical shows C, its
                                                             # H and its charge / dot: CH2•, CH3+)
         sym = at.el
+        mass = ''                                           # a labelled isotope: its mass number up before the symbol
+        if at.iso and model.isotope_mass(at.el, at.iso):
+            if at.el == 'H' and at.iso in (2, 3):
+                sym = 'DT'[at.iso - 2]
+            else:
+                mass = str(at.iso)
         hs = doc.implicit_h(a)
         ws = m.width(sym, fs)
         base = cy + ch / 2
         x0 = cx - ws / 2
         pieces = [(sym, x0, base, fs)]
+        wm = m.width(mass, small) + 0.2 if mass else 0.0
+        if mass:
+            pieces.append((mass, x0 - wm, base - ch + 0.32 * small, small))
         right_end = x0 + ws
         if hs:
             hcount = str(hs) if hs > 1 else ''
@@ -281,7 +290,7 @@ class Renderer:
                     if hcount:
                         out.append((hcount, right_end + wh, base + 0.28 * fs, small))
                 elif side == 'left':
-                    hx = x0 - wh - wc
+                    hx = x0 - wm - wh - wc                  # H3¹³C: the mass number stays on its element
                     out = [('H', hx, base, fs)]
                     if hcount:
                         out.append((hcount, hx + wh, base + 0.28 * fs, small))
@@ -313,7 +322,12 @@ class Renderer:
         for text, x, y, size in pieces:
             r = QRectF(x, y - m.cap(size), m.width(text, size), m.cap(size) + (0.2 * size if size == small else 0))
             rect = r if rect.isNull() else rect.united(r)
-        return dict(pieces=pieces, clip=(ws / 2 + s['margin'], ch / 2 + s['margin']), rect=rect,
+        avoid = []                                          # ¹⁵N: a bond coming at the 15 stops before it
+        if mass:
+            mp = pieces[1]
+            avoid.append(QRectF(mp[1] - cx, mp[2] - m.cap(small) - cy, wm, m.cap(small)).adjusted(
+                -s['margin'], -s['margin'], s['margin'], s['margin']))
+        return dict(pieces=pieces, clip=(ws / 2 + s['margin'], ch / 2 + s['margin']), rect=rect, avoid=avoid,
                     charge_rect=charge_rect)
 
     def _collisions(self, a, pieces):
@@ -474,12 +488,24 @@ class Renderer:
         return bool(lab and lab['clip'])
 
     # ------------------------------------------------------------------------------------------- bonds
-    def _end(self, a, ox, oy, ux, uy):
+    def _end(self, a, ox, oy, ux, uy, avoid=True):
         """Distance along (ux, uy) from atom a (offset ox, oy) to where a line may start (0 = unlabelled atom)."""
         lab = self.labels.get(a)
         if not lab or not lab['clip']:
             return 0.0
-        return exit_t(ox, oy, ux, uy, *lab['clip'])
+        t = exit_t(ox, oy, ux, uy, *lab['clip'])
+        for r in lab.get('avoid', ()) if avoid else ():     # a box the line must also clear (an isotope's mass)
+            lo, hi = 0.0, math.inf
+            for o, u, a0, a1 in ((ox, ux, r.left(), r.right()), (oy, uy, r.top(), r.bottom())):
+                if abs(u) < 1e-9:
+                    if not a0 <= o <= a1:
+                        lo, hi = 1.0, 0.0
+                    continue
+                t0, t1 = sorted(((a0 - o) / u, (a1 - o) / u))
+                lo, hi = max(lo, t0), min(hi, t1)
+            if lo <= hi and hi > t:
+                t = hi
+        return t
 
     def _seg(self, a, b, ox=0.0, oy=0.0, trim_a=0.0, trim_b=0.0):
         """End points (pt) of a line between atoms a and b, offset by (ox, oy), stopped short of labels; or None."""
@@ -491,6 +517,9 @@ class Renderer:
         ux, uy = (x2 - x1) / L, (y2 - y1) / L
         t1 = max(self._end(a, ox, oy, ux, uy), trim_a)
         t2 = max(self._end(b, ox, oy, -ux, -uy), trim_b)
+        if t1 + t2 >= L - 2.5:                              # crowded by an isotope's mass number: rather a bond that
+            t1 = max(self._end(a, ox, oy, ux, uy, False), trim_a)     # meets it than no bond at all
+            t2 = max(self._end(b, ox, oy, -ux, -uy, False), trim_b)
         if t1 + t2 >= L - 0.2:
             return None
         return (x1 + ox + ux * t1, y1 + oy + uy * t1, x2 + ox - ux * t2, y2 + oy - uy * t2)

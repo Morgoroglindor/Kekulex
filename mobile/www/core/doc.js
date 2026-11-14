@@ -148,13 +148,31 @@ export class Doc {
     for (const v of vals) if (v >= s) return v - s;
     return 0;
   }
+  usualH(a) {                                            // the H it has with no H typed
+    const at = this.atoms.get(a), keep = at.hcount;
+    at.hcount = null;
+    try { return this.implicitH(a); } finally { at.hcount = keep; }
+  }
+  /** The element tapped again on its atom (ChemDraw's key again): one H fewer each time, then all of them back
+   * (NH2 -> NH -> N -> NH2); a carbon first shows its CH3. */
+  cycleHydrogens(a) {
+    const at = this.atoms.get(a), full = this.usualH(a), typed = at.hcount !== null && at.hcount !== undefined;
+    if (at.el === 'C' && !typed) { at.hcount = full; return; }
+    const now = typed ? at.hcount : full;
+    if (now <= 0) at.hcount = at.el === 'C' ? full : null;
+    else at.hcount = now - 1;
+  }
   valenceProblem(a) {
     const at = this.atoms.get(a), bonds = this.bondSum(a);
     if (at.label) return bonds > 1 && NICKNAMES[at.label] ? `${at.label} attaches by one bond, but has ${bonds}.` : '';
     const vals = this.valences(a);
     if (at.hcount !== null && at.hcount !== undefined) {
-      return vals && ['C', 'N', 'O', 'F', 'B'].includes(at.el) && bonds + at.hcount > 4
-        ? `${at.el} with ${at.hcount} H has room for ${Math.max(0, 4 - at.hcount)} bonds, but has ${bonds}.` : '';
+      if (vals && ['C', 'N', 'O', 'F', 'B'].includes(at.el) && bonds + at.hcount > 4)
+        return `${at.el} with ${at.hcount} H has room for ${Math.max(0, 4 - at.hcount)} bonds, but has ${bonds}.`;
+      const usual = this.usualH(a);
+      if (vals && !at.radical && at.hcount < usual)        // NH, CH2 on a chain end: an open valence (red)
+        return `${at.el} with ${at.hcount} H has an open valence: it usually has ${usual} H here (tap it again).`;
+      return '';
     }
     if (vals && vals.length && bonds > Math.max(...vals)) {
       const m = Math.max(...vals);

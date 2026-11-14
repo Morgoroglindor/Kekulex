@@ -188,6 +188,53 @@ def parse_label(text):
     return None
 
 
+SUPERSCRIPT_DIGITS = str.maketrans('⁰¹²³⁴⁵⁶⁷⁸⁹', '0123456789')
+ISOTOPE_LETTERS = {'D': 2, 'T': 3}                         # deuterium and tritium: hydrogen isotopes with a letter
+
+
+def label_isotope(text):
+    """(mass number, the label without it) of a typed label with an isotope: '13C' -> (13, 'C'), '[15N]H2' ->
+    (15, 'NH2'), '¹⁸O' -> (18, 'O'), 'D' -> (2, 'H'), 'T•' -> (3, 'H•'): D and T alone (or with a sign or dot) are
+    hydrogen. Anything else, and an isotope the element does not have (40C): (0, text)."""
+    import re
+    t = text.strip().translate(SUPERSCRIPT_DIGITS)
+    t = re.sub(r'^\[(\d{1,3}[A-Za-z]{1,2})\]', r'\1', t)   # [15N]H2, as SMILES writes it
+    m = re.fullmatch(r'(\d{1,3})\s*([A-Za-z].*)', t)
+    if m:
+        rest = case_guess(m.group(2)) or m.group(2)        # 15nh2 is 15NH2
+        sym = re.match(r'[A-Z][a-z]?', rest)
+        if sym:
+            el = sym.group(0)
+            if el not in _element_symbols() and len(el) == 2:
+                el = el[0]
+            if el in _element_symbols() and isotope_mass(el, int(m.group(1))):
+                return int(m.group(1)), rest
+        return 0, text
+    m = re.fullmatch(r'([DT])([+\-−]*\d*[+\-−]*[•·.*]*)', t)
+    if m:
+        return ISOTOPE_LETTERS[m.group(1)], 'H' + m.group(2)
+    return 0, text
+
+
+def isotope_mass(el, iso):
+    """The exact mass of that isotope of the element, or 0.0 when it has none such (or iso is 0)."""
+    if not iso:
+        return 0.0
+    from rdkit import Chem
+    try:
+        return Chem.GetPeriodicTable().GetMassForIsotope(el, iso)
+    except RuntimeError:
+        return 0.0
+
+
+def isotope_symbol(el, iso):
+    """How an atom's symbol is written: 'C', 'D', 'T', or (prefix, 'C') pieces are the renderer's - here the text:
+    '13C', 'D'."""
+    if el == 'H' and iso in (2, 3):
+        return 'DT'[iso - 2]
+    return f'{iso}{el}' if iso else el
+
+
 RADICAL_MARKS = '•·.*'                                     # typed after a label: CH3•, CH2••, O•, N•+ (or . / *)
 _ELEMENT_LABEL = re.compile(r'([A-Za-z][a-z]?)(H(\d*))?\s*(\d*)\s*([+\-]*)\s*([•·.*]*)\s*(?:(\d*)\s*([+\-]*))?')
 
@@ -274,6 +321,7 @@ class Atom:
     map: int = 0                                            # reaction atom-map number (0: none)
     hcount: int | None = None                               # hydrogens typed with the label (CH2, NH): fixed, whatever
                                                             # the bonds; None = the usual number for the valence
+    iso: int = 0                                            # isotope mass number (13 on C: 13C; 2 on H: D); 0 natural
 
 
 @dataclass
@@ -1047,6 +1095,49 @@ class Doc:
         else:
             at.hcount = now - 1
 
+    def needed_charge(self, a):
+        """The formal charge the atom's bonds and H call for, when it has none: +1 for N or P with four bonds, O or S
+        with three, a halogen with two; -1 for B with four, O with one bond and no H (O typed with 0 H), N with two
+        bonds and no H. None: it is fine as it is, or carbon (a cation or an anion is the user's call), or no single
+        charge fits."""
+        at = self.atoms[a]
+        if at.label or at.charge or at.radical or at.el in ('C', 'H') or at.el not in VALENCE_ELECTRONS:
+            return None
+        if not self.valence_problem(a) and at.hcount is None:
+            return None
+        total = self.bond_sum(a) + (at.hcount or 0)
+        if not self.valence_problem(a) and at.hcount is not None and total == self.bond_sum(a) + self.usual_h(a):
+            return None
+        fits = []
+        for z in (1, -1, 2, -2):
+            at.charge = z
+            try:
+                vals = self._valences(a)
+                if vals and total in vals:
+                    fits.append(z)
+            finally:
+                at.charge = 0
+        return fits[0] if fits else None
+
+    def fix_charges(self, atom_ids=None):
+        """Gives each atom the formal charge its bonds and H call for (needed_charge); returns {atom: charge}."""
+        done = {}
+        for a in list(self.atoms):
+            if atom_ids is not None and a not in atom_ids:
+                continue
+            z = self.needed_charge(a)
+            if z is None:
+                continue
+            at = self.atoms[a]
+            hs = self.implicit_h(a)
+            at.charge = z
+            if at.hcount is not None:                       # NH3 typed on one bond: NH3+, whose H are the usual now
+                keep, at.hcount = at.hcount, None
+                if self.implicit_h(a) != hs:
+                    at.hcount = keep
+            done[a] = z
+        return done
+
     def lone_pair_count(self, a):
         """Lone pairs an atom has: (valence electrons - charge - bonds - H - unpaired) / 2 (O in water: 2)."""
         at = self.atoms[a]
@@ -1283,6 +1374,10 @@ class Doc:
         for k in range(0, len(radicals), 8):                # 2 doublet (•), 3 triplet (carbene, ••)
             chunk = radicals[k:k + 8]
             lines.append(f'M  RAD{len(chunk):3d}' + ''.join(f'{i:4d}{c:4d}' for i, c in chunk))
+        isos = [(index[a], self.atoms[a].iso) for a in order if self.atoms[a].iso and not self.atoms[a].label]
+        for k in range(0, len(isos), 8):                    # 13C, 15N, D: the mass number
+            chunk = isos[k:k + 8]
+            lines.append(f'M  ISO{len(chunk):3d}' + ''.join(f'{i:4d}{c:4d}' for i, c in chunk))
         lines.append('M  END')
         return '\n'.join(lines) + '\n', order
 
@@ -1318,6 +1413,8 @@ class Doc:
                               atom.GetFormalCharge())
             if atom.GetNumRadicalElectrons():
                 self.atoms[i].radical = min(atom.GetNumRadicalElectrons(), 2)
+            if atom.GetIsotope() and isotope_mass(atom.GetSymbol(), atom.GetIsotope()):
+                self.atoms[i].iso = atom.GetIsotope()
             ids.append(i); new.append(('atom', i))
         for b in mol.GetBonds():
             bt = b.GetBondType()
