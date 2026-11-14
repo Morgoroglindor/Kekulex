@@ -1,6 +1,6 @@
 {
   "name": "kekulex-mobile",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "private": true,
   "description": "Kekulex for Android phones and tablets: touch structure drawing, formula, masses and adducts",
   "type": "module",

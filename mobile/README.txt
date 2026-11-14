@@ -9,6 +9,7 @@ What it is
   www/core/chem.js     formula, masses, ions, SMILES, InChIKey (as chem.py)
   www/core/layout.js   usual drawings: skeleton templates, even bonds, ring-fusion H, checked wedges (as layout2d.py)
   www/core/draw.js     painting on a canvas (as render.py)
+  www/core/condensed.js typed labels read as condensed formulas: SO3K, N(CH3)2, COCH3 ... (as condensed.py)
   www/core/data.js     made from the desktop's Python by tools/export_data.py: do not edit
   www/app.js           tools, gestures, sheets, files
   tests/core.test.mjs  against the desktop's results (tests/reference.json, also from tools/export_data.py)
@@ -22,6 +23,10 @@ On the phone
   Top: the menu; the formula (tap it: masses, adducts, SMILES, InChIKey; it covers the selection, if any); undo, redo.
   Menu: structure from a name (PubChem, only the name is sent), paste SMILES / MOL, templates, clean up, open and send files.
   The drawing is kept between sessions.
+  Labels: elements, nicknames and condensed formulas (SO3K, CH2CH3, N(CH3)2, PO3H2 ...), also in lower case (so3k);
+  CH2 keeps two H, CH2• / C•• / O•+ make radicals, carbenes and radical cations, as on the desktop. Groups made on the
+  desktop select and move as one here, and captions pasted there (formula, masses, MS fragments) follow edits made here
+  (names, properties and isotope patterns keep their text until the desktop updates them).
 
 Desktop only
   NMR prediction and the 3D tab need 3D conformers (ETKDG + MMFF), which RDKit.js does not have; so do MD exports. Also .cdxml /

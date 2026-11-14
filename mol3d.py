@@ -154,3 +154,118 @@ def measure(model, conf_id, atoms):
 
 def atom_label(mol, i):
     return f'{mol.GetAtomWithIdx(i).GetSymbol()}{i + 1}'
+
+
+# ----------------------------------------------------------------------------------------------- surfaces and shape
+PROBE = 1.4                                                 # Å: a water molecule, for the solvent-accessible surface
+SURFACES = (('sas', 'Solvent accessible'), ('vdw', 'Van der Waals'))
+
+
+def vdw_radii(mol):
+    table = Chem.GetPeriodicTable()
+    return np.array([table.GetRvdw(a.GetAtomicNum()) for a in mol.GetAtoms()])
+
+
+def _sphere(n):
+    """n points spread evenly over the unit sphere (golden spiral)."""
+    k = np.arange(n) + 0.5
+    z = 1 - 2 * k / n
+    r = np.sqrt(1 - z * z)
+    phi = np.pi * (1 + 5 ** 0.5) * k
+    return np.stack((r * np.cos(phi), r * np.sin(phi), z), axis=1)
+
+
+def surface_dots(xyz, radii, n=240):
+    """Shrake-Rupley: (points, owning atom, area in Å²) of the outer surface of the union of the spheres."""
+    unit = _sphere(n)
+    points, owners, area = [], [], 0.0
+    reach = radii.max() * 2
+    for i, (c, r) in enumerate(zip(xyz, radii)):
+        near = np.where((np.linalg.norm(xyz - c, axis=1) < r + reach) & (np.arange(len(xyz)) != i))[0]
+        pts = c + unit * r
+        free = np.ones(n, dtype=bool)
+        for j in near:
+            free &= np.linalg.norm(pts - xyz[j], axis=1) >= radii[j]
+        points.append(pts[free])
+        owners.append(np.full(int(free.sum()), i))
+        area += 4 * np.pi * r * r * free.sum() / n
+    return np.concatenate(points), np.concatenate(owners), float(area)
+
+
+def surface_radii(model, kind):
+    radii = vdw_radii(model.mol)
+    return radii + PROBE if kind == 'sas' else radii
+
+
+def atom_values(model, scheme):
+    """A number per atom for colouring a surface: Gasteiger partial charge, or Crippen's logP contribution
+    (hydrophobicity). None for schemes that take the atom's own colour."""
+    mol = model.mol
+    if scheme == 'charge':
+        m = Chem.Mol(mol)
+        AllChem.ComputeGasteigerCharges(m)
+        vals = [m.GetAtomWithIdx(i).GetDoubleProp('_GasteigerCharge') for i in range(m.GetNumAtoms())]
+        return np.nan_to_num(np.array(vals, dtype=float))
+    if scheme == 'hydrophobicity':
+        from rdkit.Chem import rdMolDescriptors
+        return np.array([c[0] for c in rdMolDescriptors._CalcCrippenContribs(mol)], dtype=float)
+    return None
+
+
+def _donor_hydrogens(mol):
+    return [a.GetIdx() for a in mol.GetAtoms() if a.GetAtomicNum() == 1 and any(n.GetAtomicNum() in (7, 8) for n in a.GetNeighbors())]
+
+
+def _acceptors(mol):
+    """O always; N with a lone pair (not N+ with four bonds, not an amide-like or aromatic NH)."""
+    out = []
+    for a in mol.GetAtoms():
+        if a.GetAtomicNum() == 8:
+            out.append(a.GetIdx())
+        elif a.GetAtomicNum() == 7 and a.GetFormalCharge() <= 0 and a.GetDegree() < 4 and not (a.GetIsAromatic() and a.GetTotalNumHs()):
+            out.append(a.GetIdx())
+    return out
+
+
+def hydrogen_bonds(model, conf_id, max_dist=2.5, min_angle=120.0):
+    """[(hydrogen, acceptor)] in the conformer: H...A at most max_dist Å, D-H...A at least min_angle degrees, and at
+    least four bonds apart (no 1,2-diol style near-contacts)."""
+    mol = model.mol
+    xyz = model.positions(conf_id)
+    paths = Chem.GetDistanceMatrix(mol)
+    found = []
+    for h in _donor_hydrogens(mol):
+        d = mol.GetAtomWithIdx(h).GetNeighbors()[0].GetIdx()
+        for a in _acceptors(mol):
+            if a == d or paths[h][a] < 4:
+                continue
+            ha = xyz[a] - xyz[h]
+            dist = float(np.linalg.norm(ha))
+            if dist > max_dist:
+                continue
+            hd = xyz[d] - xyz[h]
+            cos = float(hd @ ha) / (np.linalg.norm(hd) * dist)
+            if np.degrees(np.arccos(np.clip(cos, -1, 1))) >= min_angle:
+                found.append((h, a))
+    return found
+
+
+def shape_properties(model, conf_id):
+    """[(name, text)] of the conformer's surfaces, volume and shape, and its hydrogen-bond counts."""
+    from rdkit.Chem import Descriptors3D, rdMolDescriptors
+    mol = model.mol
+    xyz = model.positions(conf_id)
+    _p, _o, sas = surface_dots(xyz, surface_radii(model, 'sas'))
+    _p, _o, vdw_area = surface_dots(xyz, surface_radii(model, 'vdw'))
+    volume = AllChem.ComputeMolVolume(mol, confId=conf_id, gridSpacing=0.25)
+    ovality = vdw_area / (4 * np.pi * (3 * volume / (4 * np.pi)) ** (2 / 3)) if volume else float('nan')
+    pmi = [getattr(Descriptors3D, f'PMI{k}')(mol, confId=conf_id) for k in (1, 2, 3)]
+    rows = [('Solvent-accessible area', f'{sas:.0f} Å² (probe {PROBE} Å)'),
+            ('Van der Waals area', f'{vdw_area:.0f} Å²'),
+            ('Van der Waals volume', f'{volume:.0f} Å³'),
+            ('Ovality', f'{ovality:.3f} (1 = a sphere)'),
+            ('Principal moments', ', '.join(f'{v:.0f}' for v in pmi) + ' amu·Å²'),
+            ('Radius of gyration', f'{Descriptors3D.RadiusOfGyration(mol, confId=conf_id):.2f} Å'),
+            ('H-bond donors / acceptors', f'{rdMolDescriptors.CalcNumHBD(mol)} / {rdMolDescriptors.CalcNumHBA(mol)}'),
+            ('H-bonds inside this conformer', str(len(hydrogen_bonds(model, conf_id))))]
+    return rows

@@ -5,13 +5,15 @@ import { createRequire } from 'node:module';
 import { test } from 'node:test';
 
 import { TEMPLATES } from '../www/core/data.js';
-import { analyse, insertMolblock, insertSmiles, parseLabel, setNickname } from '../www/core/chem.js';
+import { analyse, insertMolblock, insertSmiles, labelExtras, liveCaption, parseLabel, refreshLiveCaptions, setNickname } from '../www/core/chem.js';
+import { condensedSmiles, setRD } from '../www/core/condensed.js';
 import { Doc } from '../www/core/doc.js';
 import { findRings, layoutSmiles, usualForm } from '../www/core/layout.js';
 
 const require = createRequire(import.meta.url);
 const RD = await require('@rdkit/rdkit')();
 const REF = JSON.parse(readFileSync(new URL('./reference.json', import.meta.url), 'utf8'));
+setRD(RD);
 const strip = s => s.replace(/[/\\]/g, '');
 const canon = s => { const m = RD.get_mol(s); const c = m.get_smiles(); m.delete(); return c; };
 
@@ -156,4 +158,54 @@ test('kept kinds survive a round trip', () => {
   assert.deepEqual(d.toDict().shapes, dict.shapes);
   assert.equal(d.otherCount(), 1);
   assert.ok(d.addAtom(1, 1) > 9, 'new ids stay clear of kept ones');
+});
+
+// ---------------------------------------------------------------------------------------------- condensed, radicals, groups
+for (const [text, smiles] of REF.condensed) {
+  test(`condensed label as on the desktop: ${text}`, () => {
+    const mine = condensedSmiles(text);
+    assert.ok(mine, `${text} not read`);
+    assert.equal(canon(mine), smiles);
+  });
+}
+
+for (const [text, parsed, extras] of REF.labels) {
+  test(`typed label as on the desktop: ${text}`, () => {
+    assert.deepEqual(parseLabel(text) || [], parsed);
+    assert.deepEqual(labelExtras(text), extras);
+  });
+}
+
+for (const row of REF.radicals) {
+  test(`radicals and radical ions as on the desktop: ${row.formula}`, () => {
+    const d = Doc.fromDict(row.sed);
+    const info = analyse(RD, d);
+    assert.equal(info.formula, row.formula);
+    row.ions.forEach(([label, mz], k) => { assert.equal(info.ions[k].label, label); assert.ok(Math.abs(info.ions[k].mz - mz) < 1e-6); });
+  });
+}
+
+test('a nickname written as a condensed formula counts in full', () => {
+  const d = new Doc();
+  insertSmiles(RD, d, 'c1ccccc1');
+  const a = [...d.atoms.keys()][0];
+  const end = d.addAtom(d.atoms.get(a).x + 1, d.atoms.get(a).y);
+  d.addBond(a, end);
+  setNickname(RD, d, end, 'SO3K');
+  assert.equal(analyse(RD, d).formula, 'C6H5KO3S');
+});
+
+test('groups are kept and pick up their whole group; captions follow their structure', () => {
+  const d = new Doc();
+  const ids = insertSmiles(RD, d, 'CCO').ids;
+  const t = d.addText(0, 3, 'x');
+  d.texts.get(t).live = ['formula'];
+  d.other.groups = [{ id: 99, members: [...ids.map(i => ['atom', i]), ['text', t]] }];
+  const back = Doc.fromDict(JSON.parse(JSON.stringify(d.toDict())));
+  assert.equal(back.other.groups.length, 1);
+  assert.ok(back.withGroups(new Set([`atom:${ids[0]}`])).has(`text:${t}`));
+  back.atoms.get(ids[2]).el = 'N';
+  refreshLiveCaptions(RD, back);
+  assert.equal(back.texts.get(t).text, 'Chemical Formula: C2H7N');
+  assert.equal(liveCaption(RD, back, new Set(ids), ['name']), null);   // names stay as they were
 });

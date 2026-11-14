@@ -5,7 +5,7 @@ import { NICKNAMES, VALENCE, VALENCE_ELECTRONS } from './data.js';
 
 export const MERGE = 0.3;
 const MOL_BOND = 1.5;
-const OTHER_KINDS = ['shapes', 'grids', 'fills', 'seqs', 'tlcs'];
+const OTHER_KINDS = ['shapes', 'grids', 'fills', 'seqs', 'tlcs', 'groups'];
 const TAU = 2 * Math.PI;
 const mod = (a, n) => ((a % n) + n) % n;
 export const snapAngle = (a, deg = 15) => { const s = deg * Math.PI / 180; return Math.round(a / s) * s; };
@@ -129,17 +129,19 @@ export class Doc {
   // ---------------------------------------------------------------------------------------- chemistry
   bondSum(a) { return this.neighbors(a).reduce((s, [, b]) => s + this.bonds.get(b).order, 0); }
   valences(a) {
-    const at = this.atoms.get(a), base = VALENCE[at.el];
+    const at = this.atoms.get(a), base = VALENCE[at.el], r = at.radical || 0;
     if (!base) return null;
-    if (!at.charge) return base;
+    if (!at.charge) return r ? base.map(v => v - r).filter(v => v >= 0) : base;
     if (at.el === 'H') return [0];
     let e = VALENCE_ELECTRONS[at.el];
     if (e === undefined) return base.map(v => v - Math.abs(at.charge)).filter(v => v >= 0);
     e -= at.charge;
-    return [Math.max(0, Math.min(e, 8 - e))];
+    return [Math.max(0, Math.min(e, 8 - e) - r)];        // each unpaired electron (•) takes a bond away
   }
   implicitH(a) {
-    if (this.atoms.get(a).label) return 0;
+    const at = this.atoms.get(a);
+    if (at.label) return 0;
+    if (at.hcount !== null && at.hcount !== undefined) return at.hcount;   // typed: CH2, NH
     const vals = this.valences(a);
     if (!vals || !vals.length) return 0;
     const s = this.bondSum(a);
@@ -150,6 +152,10 @@ export class Doc {
     const at = this.atoms.get(a), bonds = this.bondSum(a);
     if (at.label) return bonds > 1 && NICKNAMES[at.label] ? `${at.label} attaches by one bond, but has ${bonds}.` : '';
     const vals = this.valences(a);
+    if (at.hcount !== null && at.hcount !== undefined) {
+      return vals && ['C', 'N', 'O', 'F', 'B'].includes(at.el) && bonds + at.hcount > 4
+        ? `${at.el} with ${at.hcount} H has room for ${Math.max(0, 4 - at.hcount)} bonds, but has ${bonds}.` : '';
+    }
     if (vals && vals.length && bonds > Math.max(...vals)) {
       const m = Math.max(...vals);
       const q = at.charge ? ` ${at.charge > 0 ? '+' : '−'}${Math.abs(at.charge)}` : '';
@@ -171,6 +177,60 @@ export class Doc {
     return out;
   }
   fragmentOf(a) { return this.fragments().find(f => f.includes(a)) || []; }
+
+  /** Ends of curved arrows tied to an atom or bond on the desktop (tail_on / head_on: [kind, id, dx, dy]) follow it. */
+  updateAttachedArrows() {
+    for (const ar of this.arrows.values()) {
+      for (const end of ['tail', 'head']) {
+        const on = ar[end + '_on'];
+        if (!on) continue;
+        let p = null;
+        if (on[0] === 'atom' && this.atoms.has(on[1])) { const at = this.atoms.get(on[1]); p = [at.x, at.y]; }
+        if (on[0] === 'bond' && this.bonds.has(on[1])) {
+          const bd = this.bonds.get(on[1]), u = this.atoms.get(bd.a), v = this.atoms.get(bd.b);
+          p = [(u.x + v.x) / 2, (u.y + v.y) / 2];
+        }
+        if (!p) { ar[end + '_on'] = null; continue; }
+        if (end === 'tail') { ar.x1 = p[0] + on[2]; ar.y1 = p[1] + on[3]; } else { ar.x2 = p[0] + on[2]; ar.y2 = p[1] + on[3]; }
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------------------- groups (desktop Object > Group)
+  groupOf(kind, i) {
+    if (kind === 'bond') { const bd = this.bonds.get(i); if (!bd) return null; kind = 'atom'; i = bd.a; }
+    for (const g of this.other.groups || []) if (g.members.some(([k, j]) => k === kind && j === i)) return g;
+    return null;
+  }
+  /** Keys 'kind:id' of everything in the groups the given items belong to, plus the items. */
+  withGroups(keys) {
+    const out = new Set(keys);
+    for (const key of keys) {
+      const [kind, id] = key.split(':');
+      const g = this.groupOf(kind, Number(id));
+      if (!g) continue;
+      const atoms = new Set();
+      for (const [k, j] of g.members) { out.add(`${k}:${j}`); if (k === 'atom') atoms.add(j); }
+      for (const [b, bd] of this.bonds) if (atoms.has(bd.a) && atoms.has(bd.b)) out.add(`bond:${b}`);
+    }
+    return out;
+  }
+  /** Forgets deleted members (atoms bonded to a grouped structure join it); drops groups left with under two objects. */
+  pruneGroups() {
+    const groups = this.other.groups || [];
+    if (!groups.length) return;
+    const table = { atom: this.atoms, bond: this.bonds, arrow: this.arrows, text: this.texts };
+    const exists = (k, j) => (table[k] ? table[k].has(j) : (this.other[k + 's'] || []).some(o => o.id === j));
+    const frags = this.fragments();
+    this.other.groups = groups.filter(g => {
+      const members = g.members.filter(([k, j]) => exists(k, j));
+      const atoms = new Set(members.filter(([k]) => k === 'atom').map(([, j]) => j));
+      for (const f of frags) if (f.some(a => atoms.has(a))) for (const a of f) if (!atoms.has(a)) { atoms.add(a); members.push(['atom', a]); }
+      const pieces = frags.filter(f => f.some(a => atoms.has(a))).length + members.filter(([k]) => k !== 'atom').length;
+      g.members = members;
+      return pieces >= 2;
+    });
+  }
 
   // ---------------------------------------------------------------------------------------- geometry
   bondAngles(a) {
@@ -355,11 +415,16 @@ export function buildBlock(atoms, bonds, title = '') {
   const n3 = v => String(v).padStart(3);
   const lines = [title, '  Kekulex 2D', '', `${n3(atoms.length)}${n3(bonds.length)}  0  0  0  0  0  0  0  0999 V2000`];
   for (const at of atoms) lines.push(`${f(at.x * MOL_BOND, 10)}${f(-at.y * MOL_BOND, 10)}${f(0, 10)} ${at.el.padEnd(3)} 0  0  0  0  0  0  0  0  0  0  0  0`);
+  const radicals = atoms.map((a, k) => [k + 1, a.radical === 1 ? 2 : a.radical ? 3 : 0]).filter(r => r[1]);
   for (const b of bonds) lines.push(`${n3(b.a + 1)}${n3(b.b + 1)}${n3(b.order)}${n3({ wedge: 1, hash: 6 }[b.stereo] || 0)}`);
   const charged = atoms.map((a, k) => [k + 1, a.charge]).filter(c => c[1]);
   for (let k = 0; k < charged.length; k += 8) {
     const chunk = charged.slice(k, k + 8);
     lines.push(`M  CHG${n3(chunk.length)}` + chunk.map(([i, c]) => String(i).padStart(4) + String(c).padStart(4)).join(''));
+  }
+  for (let k = 0; k < radicals.length; k += 8) {            // 2 doublet (•), 3 triplet (carbene ••)
+    const chunk = radicals.slice(k, k + 8);
+    lines.push(`M  RAD${n3(chunk.length)}` + chunk.map(([i, c]) => String(i).padStart(4) + String(c).padStart(4)).join(''));
   }
   lines.push('M  END');
   return lines.join('\n') + '\n';
@@ -373,7 +438,7 @@ export function parseBlock(block) {
   const atoms = [], bonds = [];
   for (let k = 0; k < n; k++) {
     const l = lines[4 + k];
-    atoms.push({ x: parseFloat(l.slice(0, 10)), y: -parseFloat(l.slice(10, 20)), el: l.slice(31, 34).trim(), charge: 0 });
+    atoms.push({ x: parseFloat(l.slice(0, 10)), y: -parseFloat(l.slice(10, 20)), el: l.slice(31, 34).trim(), charge: 0, radical: 0 });
   }
   for (let k = 0; k < m; k++) {
     const l = lines[4 + n + k];
@@ -385,6 +450,13 @@ export function parseBlock(block) {
     if (l.startsWith('M  CHG')) {
       const count = parseInt(l.slice(6, 9), 10);
       for (let k = 0; k < count; k++) atoms[parseInt(l.slice(9 + 8 * k, 13 + 8 * k), 10) - 1].charge = parseInt(l.slice(13 + 8 * k, 17 + 8 * k), 10);
+    }
+    if (l.startsWith('M  RAD')) {
+      const count = parseInt(l.slice(6, 9), 10);
+      for (let k = 0; k < count; k++) {
+        const v = parseInt(l.slice(13 + 8 * k, 17 + 8 * k), 10);
+        atoms[parseInt(l.slice(9 + 8 * k, 13 + 8 * k), 10) - 1].radical = v === 2 ? 1 : v ? 2 : 0;
+      }
     }
     if (l.startsWith('M  END')) break;
   }

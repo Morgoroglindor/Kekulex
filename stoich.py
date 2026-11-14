@@ -14,6 +14,7 @@ The limiting reactant's moles come from what was typed for it (moles; else volum
 x purity / MW; else mass x purity / MW); every other reactant follows from its equivalents, unless an amount was typed
 for it too (then its equivalents follow). Expected moles of a product = limiting moles x equivalents x completion.
 """
+import math
 import re
 from dataclasses import dataclass, field
 
@@ -32,10 +33,10 @@ KIND = {'mass': 'mass', 'rmass': 'mass', 'exp_mass': 'mass', 'measured': 'mass',
         'moles': 'moles', 'exp_moles': 'moles', 'pmoles': 'moles', 'volume': 'volume', 'molarity': 'molarity',
         'density': 'density', 'pct': 'percent', 'completion': 'percent', 'purity': 'percent', 'yield': 'percent',
         'equiv': 'number', 'mw': 'number'}
-UNITS = {'mass': {'g': 1.0, 'mg': 1e-3, 'µg': 1e-6, 'ug': 1e-6, 'kg': 1e3},
-         'moles': {'mol': 1.0, 'mmol': 1e-3, 'µmol': 1e-6, 'umol': 1e-6, 'kmol': 1e3},
-         'volume': {'ml': 1.0, 'l': 1e3, 'µl': 1e-3, 'ul': 1e-3},
-         'molarity': {'m': 1.0, 'mm': 1e-3, 'µm': 1e-6, 'um': 1e-6, 'mol/l': 1.0},
+UNITS = {'mass': {'g': 1.0, 'mg': 1e-3, 'µg': 1e-6, 'ug': 1e-6, 'ng': 1e-9, 'pg': 1e-12, 'kg': 1e3},
+         'moles': {'mol': 1.0, 'mmol': 1e-3, 'µmol': 1e-6, 'umol': 1e-6, 'nmol': 1e-9, 'pmol': 1e-12, 'kmol': 1e3},
+         'volume': {'ml': 1.0, 'l': 1e3, 'µl': 1e-3, 'ul': 1e-3, 'nl': 1e-6, 'pl': 1e-9},
+         'molarity': {'m': 1.0, 'mm': 1e-3, 'µm': 1e-6, 'um': 1e-6, 'nm': 1e-9, 'pm': 1e-12, 'mol/l': 1.0},
          'density': {'g/ml': 1.0, 'g/cm3': 1.0, 'kg/l': 1.0, 'g/l': 1e-3},
          'percent': {'%': 1.0, '': 1.0}, 'number': {'': 1.0, 'eq': 1.0, 'equiv': 1.0}}
 
@@ -68,7 +69,7 @@ def parse(text, kind):
     unit = (m.group(2) or '').strip()
     units = UNITS[kind]
     if kind == 'molarity':                                  # M and mM differ only by case
-        key = {'M': 'm', 'mM': 'mm', 'µM': 'µm', 'uM': 'um'}.get(unit, unit.lower())
+        key = {'M': 'm', 'mM': 'mm', 'µM': 'µm', 'μM': 'µm', 'uM': 'um', 'nM': 'nm', 'pM': 'pm'}.get(unit, unit.lower())
     else:
         key = unit.lower().replace('μ', 'µ')
     if key not in units:
@@ -197,8 +198,9 @@ def compute(doc, grid):
 
 
 def display(key, cell, decimal=','):
-    """(number text, unit text) of a cell as the grid shows it: masses in g / mg / µg, moles in mol / mmol / µmol,
-    volumes in mL / µL, two decimals, the locale's decimal separator."""
+    """(number text, unit text) of a cell as the grid shows it: masses, moles, volumes and molarities in the largest
+    unit that keeps the number at 1 or more (g ... pg, mol ... pmol, mL ... pL, M ... pM), two decimals (three
+    significant figures under 1), the locale's decimal separator."""
     v = cell.value
     if v is None:
         return '', ''
@@ -207,20 +209,32 @@ def display(key, cell, decimal=','):
     if key == 'formula':
         return str(v), ''
     kind = KIND.get(key, 'number')
-    unit = ''
-    if kind == 'mass':
-        v, unit = (v, 'g') if abs(v) >= 1 or v == 0 else (v * 1e3, 'mg') if abs(v) >= 1e-3 else (v * 1e6, 'µg')
-    elif kind == 'moles':
-        v, unit = (v, 'mol') if abs(v) >= 1 or v == 0 else (v * 1e3, 'mmol') if abs(v) >= 1e-3 else (v * 1e6, 'µmol')
-    elif kind == 'volume':
-        v, unit = (v, 'mL') if abs(v) >= 1 or v == 0 else (v * 1e3, 'µL')
-    elif kind == 'molarity':
-        unit = 'M'
-    elif kind == 'density':
-        unit = 'g/mL'
-    elif kind == 'percent':
-        unit = '%'
-    return f'{v:.2f}'.replace('.', decimal), unit
+    unit = {'density': 'g/mL', 'percent': '%'}.get(kind, '')
+    ladder = SHOWN_UNITS.get(kind)
+    if ladder:
+        unit = ladder[0][0]
+        if v:
+            for name, factor in ladder:                     # the largest unit that keeps the number at 1 or more
+                unit = name
+                if abs(v) / factor >= 1:
+                    break
+            v /= dict(ladder)[unit]
+    return _number(v).replace('.', decimal), unit
+
+
+# the units the grid shows, largest first, with their size in the row's base unit
+SHOWN_UNITS = {'mass': (('g', 1.0), ('mg', 1e-3), ('µg', 1e-6), ('ng', 1e-9), ('pg', 1e-12)),
+               'moles': (('mol', 1.0), ('mmol', 1e-3), ('µmol', 1e-6), ('nmol', 1e-9), ('pmol', 1e-12)),
+               'volume': (('mL', 1.0), ('µL', 1e-3), ('nL', 1e-6), ('pL', 1e-9)),
+               'molarity': (('M', 1.0), ('mM', 1e-3), ('µM', 1e-6), ('nM', 1e-9), ('pM', 1e-12))}
+
+
+def _number(v):
+    """Two decimals, or three significant figures for numbers under 1 (0.00123, not 0.00)."""
+    if v == 0 or abs(v) >= 1:
+        return f'{v:.2f}'
+    digits = 2 - math.floor(math.log10(abs(v)))
+    return f'{v:.{digits}f}'
 
 
 def new_grid_columns(doc, arrow=None):

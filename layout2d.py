@@ -241,6 +241,7 @@ def compute(mol):
     if not found:
         _face_rings_left(mol)
         regularise(mol)
+        uncrowd(mol)
         _keep_double_bond_geometry(mol)
         return
     if _align(mol, found[1]) < SAME_SHAPE:
@@ -255,6 +256,7 @@ def compute(mol):
             mol.RemoveAllConformers()
             mol.AddConformer(trial.GetConformer(), assignId=True)
     regularise(mol, set(found[1]))
+    uncrowd(mol, set(found[1]))
     _keep_double_bond_geometry(mol, set(found[1]))
     if found[0] == 'betalamic':
         _betalain_carboxylate_by_the_chain(mol)
@@ -394,12 +396,128 @@ def regularise(mol, fixed=(), rounds=400):
             shift = d * (now - want) / now * 0.5
             xy[p] += shift * move[p] * 2 / total
             xy[q] -= shift * move[q] * 2 / total
-    _place_substituents(mol, xy, frozen, rings)
-    for i, (x, y) in enumerate(xy):
-        conf.SetAtomPosition(i, (float(x), float(y), 0.0))
-    if clashes(mol) > before:
-        for i, (x, y) in enumerate(original):
+    # the angles pull against the bonds where an atom is crowded (P, S, cages): every bond back to one length, the
+    # angles giving way a little, so no part of the molecule comes out smaller than the rest. Cages too, unless that
+    # makes atoms overlap; then with the cages as drawn; then without evening.
+    free = np.array([0.0 if i in set(fixed) else 1.0 for i in range(len(xy))])
+    for evening in (free, move, None):
+        trial = xy.copy()
+        if evening is not None:
+            _even_bonds(mol, trial, evening)
+        _place_substituents(mol, trial, frozen, rings)
+        for i, (x, y) in enumerate(trial):
             conf.SetAtomPosition(i, (float(x), float(y), 0.0))
+        if clashes(mol) <= before:
+            return
+    for i, (x, y) in enumerate(original):
+        conf.SetAtomPosition(i, (float(x), float(y), 0.0))
+
+
+def _even_bonds(mol, xy, move, rounds=300, tolerance=0.02):
+    """Moves atoms (move: 1 free, 0 fixed) until every bond is one bond length, within tolerance."""
+    bonds = [(b.GetBeginAtomIdx(), b.GetEndAtomIdx()) for b in mol.GetBonds()]
+    for _ in range(rounds):
+        worst = 0.0
+        for p, q in bonds:
+            total = move[p] + move[q]
+            if not total:
+                continue
+            d = xy[q] - xy[p]
+            now = float(np.hypot(*d))
+            if now < 1e-6:
+                continue
+            worst = max(worst, abs(now - 1.0))
+            shift = d * (now - 1.0) / now * 0.5
+            xy[p] += shift * move[p] * 2 / total
+            xy[q] -= shift * move[q] * 2 / total
+        if worst < tolerance:
+            return
+
+
+CROWD = 0.8                                                # atoms closer than this (bond lengths) crowd each other
+
+
+def _crowd_pairs(mol):
+    """How close (bond lengths) each pair of atoms may come, 0 where it does not matter (bonded, or both on one atom:
+    1,3 pairs keep their bond angle). Two labelled atoms (O, N, Cl, H ...) need room for their letters: OH beside HO."""
+    n = mol.GetNumAtoms()
+    lab = np.array([a.GetAtomicNum() != 6 for a in mol.GetAtoms()])
+    need = np.where(lab[:, None] & lab[None], 1.25, np.where(lab[:, None] | lab[None], 0.9, CROWD))
+    np.fill_diagonal(need, 0.0)
+    for a in mol.GetAtoms():
+        nb = [x.GetIdx() for x in a.GetNeighbors()]
+        for p in nb:
+            need[a.GetIdx(), p] = need[p, a.GetIdx()] = 0.0
+            for q in nb:
+                need[p, q] = 0.0
+    return np.triu(need, 1)
+
+
+def _crowding(xy, pairs, bond):
+    d = np.linalg.norm(xy[:, None] - xy[None], axis=2) / bond
+    return float(np.clip(pairs - d, 0, None)[pairs > 0].sum()), d
+
+
+def _angle_penalty(mol, xy, i):
+    """How much the bonds at atom i squeeze together (under 50 degrees between two of them)."""
+    nb = [x.GetIdx() for x in mol.GetAtomWithIdx(i).GetNeighbors()]
+    if len(nb) < 2:
+        return 0.0
+    ang = sorted(float(np.arctan2(*(xy[n] - xy[i])[::-1])) % (2 * pi) for n in nb)
+    gaps = [((ang[(k + 1) % len(ang)] - ang[k]) % (2 * pi)) for k in range(len(ang))]
+    return max(0.0, radians(50) - min(gaps)) / radians(50)
+
+
+def uncrowd(mol, fixed=(), rounds=30):
+    """Atoms laid almost on top of each other (two OH of a diphosphate, a ring-fusion H on a nitrogen): an end atom
+    or a branch is turned about the atom it hangs on, in 15 degree steps, to where nothing crowds it. Ring bonds and
+    template atoms stay; cages that only crowd in their own rings are left as they are."""
+    if mol.GetNumBonds() == 0:
+        return
+    conf = mol.GetConformer()
+    xy = conf.GetPositions()[:, :2].copy()
+    bond = float(np.median([_length(conf, b) for b in mol.GetBonds()])) or 1.0
+    pairs = _crowd_pairs(mol)
+    fixed = set(fixed)
+    n_atoms = mol.GetNumAtoms()
+    total, d = _crowding(xy, pairs, bond)
+    tried = set()
+    for _ in range(rounds):
+        if total <= 1e-6:
+            break
+        bad = [(pairs[i, j] - d[i, j], i, j) for i, j in zip(*np.nonzero(pairs)) if d[i, j] < pairs[i, j]
+               and (i, j) not in tried]
+        if not bad:
+            break
+        _w, i, j = max(bad)
+        tried.add((i, j))
+        best = None
+        for x in (int(i), int(j)):
+            for b in mol.GetAtomWithIdx(x).GetBonds():
+                if b.IsInRing():
+                    continue
+                pivot = b.GetOtherAtomIdx(x)
+                side = _branch(mol, x, pivot)
+                if side & fixed or len(side) > n_atoms / 2:
+                    continue
+                members = sorted(side)
+                rel = xy[members] - xy[pivot]
+                base_pen = _angle_penalty(mol, xy, pivot)
+                for step in range(1, 24):
+                    turn = radians(15 * ((step + 1) // 2) * (1 if step % 2 else -1))
+                    c, s_ = cos(turn), sin(turn)
+                    trial = xy.copy()
+                    trial[members] = xy[pivot] + np.column_stack((rel[:, 0] * c - rel[:, 1] * s_,
+                                                                  rel[:, 0] * s_ + rel[:, 1] * c))
+                    score, dd = _crowding(trial, pairs, bond)
+                    score += 2.0 * max(0.0, _angle_penalty(mol, trial, pivot) - base_pen)
+                    if best is None or score < best[0] - 1e-9:
+                        best = (score, trial, dd)
+        if best is not None and best[0] < total - 1e-3:
+            total, xy, d = best[0], best[1], best[2]
+            tried.clear()
+    for k in range(n_atoms):
+        conf.SetAtomPosition(k, (float(xy[k, 0]), float(xy[k, 1]), 0.0))
 
 
 def _branch(mol, start, away_from):

@@ -80,6 +80,8 @@ def read(path):
         return '' if hexc in ('#000000', '') else hexc
 
     rev = _reversed_nicknames()
+    hcount = {}                                             # radical atoms -> their hydrogens in the file
+    graphics = {}                                           # CDXML graphic id -> shape id (polymer brackets)
     nodes = {}                                              # CDXML node id -> atom id
     frag_atoms = {}                                         # CDXML fragment id -> atom ids
     grids = []
@@ -95,8 +97,12 @@ def read(path):
             if tag in ('fragment', 'group'):
                 if tag == 'fragment':
                     read_fragment(el)
-                else:
+                else:                                       # a ChemDraw group: its objects stay together
+                    before = set(doc.all_items())
                     walk(el)
+                    new = [it for it in doc.all_items() if it not in before and it[0] in model.GROUPABLE]
+                    if new:
+                        doc.make_group(new)
             elif tag == 't':
                 read_text(el)
             elif tag == 'arrow':
@@ -131,6 +137,9 @@ def read(path):
                 except Exception:
                     el = 'C'
                 a = doc.add_atom(x, y, el, int(n.get('Charge', 0)))
+                doc.atoms[a].radical = {'Doublet': 1, 'Triplet': 2, 'Singlet': 2}.get(n.get('Radical', ''), 0)
+                if n.get('NumHydrogens') is not None and doc.atoms[a].radical:
+                    hcount[a] = int(n.get('NumHydrogens'))
             doc.atoms[a].color = color(n)
             nodes[n.get('id')] = a
             frag_atoms.setdefault(frag.get('id'), []).append(a)
@@ -237,6 +246,7 @@ def read(path):
                 bt = g.get('BracketType', 'SquarePair')
                 kind = 'parens' if 'Round' in bt else 'braces' if 'Curly' in bt else 'brackets'
             i = doc.add_shape(x1, y1, x2, y2, kind)
+            graphics[g.get('id')] = i
             doc.shapes[i].color = color(g)
             words = (g.get('RectangleType') or g.get('OvalType') or '').split()   # Dashed / Shaded / Filled ...
             for word, style in (('Dashed', 'dashed'), ('Shaded', 'shaded'), ('Filled', 'filled'),
@@ -245,6 +255,24 @@ def read(path):
                     doc.shapes[i].style = style
 
     walk(root)
+    for bg in root.iter('bracketedgroup'):                  # polymer brackets: the repeat count on the bracket pair
+        label = (bg.get('SRULabel') or bg.get('RepeatCount') or '').strip()
+        if not label:
+            continue
+        shapes = [graphics[ba.get('GraphicID')] for ba in bg.iter('bracketattachment') if ba.get('GraphicID') in graphics]
+        if not shapes:                                       # no bracket drawn: one around the atoms
+            atoms = [nodes[n] for n in (bg.get('BracketedObjectIDs') or '').split() if n in nodes]
+            if not atoms:
+                continue
+            xs = [doc.atoms[a].x for a in atoms]
+            ys = [doc.atoms[a].y for a in atoms]
+            shapes = [doc.add_shape(min(xs) - 0.5, min(ys) - 0.7, max(xs) + 0.5, max(ys) + 0.7, 'brackets')]
+        for s in shapes:
+            if doc.shapes[s].kind in model.BRACKET_KINDS:
+                doc.shapes[s].params['repeat'] = label
+    for a, h in hcount.items():                             # a radical with other hydrogens than its valence gives
+        if a in doc.atoms and doc.implicit_h(a) != h:
+            doc.atoms[a].hcount = h
     for g in grids:
         read_grid(g, doc, frag_atoms, BL)
     if unknown:
@@ -320,6 +348,18 @@ def write(doc, path, program='Kekulex'):
         return f'{v:.2f}'
 
     out = []
+    all_nodes, shape_gid = {}, {}                           # atom -> node id, shape -> graphic id (polymer brackets)
+    grouped = {}                                            # group id -> its objects' XML, written as one <group>
+
+    def emit(item, xml):
+        g = doc.group_of(item)
+        if g is None:
+            out.append(xml)
+            return
+        if g not in grouped:
+            grouped[g] = []
+            out.append(('group', g))                        # the group goes where its first object was
+        grouped[g].append(xml)
     pt = lambda x, y: f'{f(x * BL)} {f(y * BL)}'
     PT = Chem.GetPeriodicTable()
     for frag in doc.fragments():
@@ -328,6 +368,7 @@ def write(doc, path, program='Kekulex'):
         body = []
         for a in frag:
             node_id[a] = next(ids)
+            all_nodes[a] = node_id[a]
         for a in frag:
             at = doc.atoms[a]
             lab = r.labels.get(a)
@@ -346,6 +387,8 @@ def write(doc, path, program='Kekulex'):
                 attrs += f' Element="{PT.GetAtomicNumber(at.el)}"'
             if at.charge:
                 attrs += f' Charge="{at.charge}"'
+            if at.radical:
+                attrs += f' Radical="{"Doublet" if at.radical == 1 else "Triplet"}"'
             if label_xml or at.el != 'C':
                 attrs += f' NumHydrogens="{doc.implicit_h(a)}" NeedsClean="yes"'
             attrs += cattr(at.color)
@@ -368,12 +411,12 @@ def write(doc, path, program='Kekulex'):
                     attrs += f' DoublePosition="{ {0: "Center", -1: "Left", 1: "Right"}[bd.side] }"'
             attrs += cattr(bd.color)
             body.append(f'<b {attrs}/>')
-        out.append(f'<fragment id="{fid}">' + ''.join(body) + '</fragment>')
+        emit(('atom', frag[0]), f'<fragment id="{fid}">' + ''.join(body) + '</fragment>')
     for i, t in doc.texts.items():
         size = t.size or s['caption_size']
         face = (FACE_BOLD if t.bold else 0) | (FACE_ITALIC if t.italic else 0) | (FACE_FORMULA if t.formula else 0)
         just = {'left': 'Left', 'center': 'Center', 'right': 'Right'}[t.align]
-        out.append(f'<t id="{next(ids)}" p="{f(t.x * BL)} {f(t.y * BL + ASCENT * size)}" Justification="{just}" '
+        emit(('text', i), f'<t id="{next(ids)}" p="{f(t.x * BL)} {f(t.y * BL + ASCENT * size)}" Justification="{just}" '
                    f'CaptionJustification="{just}" InterpretChemically="no"><s font="3" size="{f(size)}" face="{face}"'
                    f'{cattr(t.color)}>{escape(t.text)}</s></t>')
     for i, ar in doc.arrows.items():
@@ -402,9 +445,9 @@ def write(doc, path, program='Kekulex'):
             ctr = (mx + ux / ul * d, my + uy / ul * d)
             attrs += (f' AngularSize="{f(ang if ar.bend > 0 else -ang)}" Center3D="{f(ctr[0])} {f(ctr[1])} 0"'
                       f' MajorAxisEnd3D="{f(ctr[0] + R)} {f(ctr[1])} 0" MinorAxisEnd3D="{f(ctr[0])} {f(ctr[1] + R)} 0"')
-        out.append(f'<arrow {attrs}{cattr(ar.color)}/>')
+        emit(('arrow', i), f'<arrow {attrs}{cattr(ar.color)}/>')
     for i, sh in doc.shapes.items():
-        if sh.kind in model.BIO_KINDS or sh.kind in ('arc', 'orbital'):   # these stay in .sed files only
+        if sh.kind in model.BIO_KINDS or sh.kind in ('arc', 'orbital', 'image'):   # these stay in .sed files only
             continue
         bb = f'{f(sh.x1 * BL)} {f(sh.y1 * BL)} {f(sh.x2 * BL)} {f(sh.y2 * BL)}'
         look = {'dashed': 'Dashed', 'shaded': 'Shaded', 'filled': 'Filled', 'shadow': 'Shadow', 'bold': 'Bold'}.get(
@@ -423,7 +466,20 @@ def write(doc, path, program='Kekulex'):
             g = 'GraphicType="Oval"' + (f' OvalType="{kinds}"' if kinds else '')
         else:
             g = f'GraphicType="Bracket" BracketType="{ {"brackets": "SquarePair", "parens": "RoundPair", "braces": "CurlyPair"}[sh.kind] }"'
-        out.append(f'<graphic id="{next(ids)}" BoundingBox="{bb}" {g}{cattr(sh.color)}/>')
+        shape_gid[i] = next(ids)
+        emit(('shape', i), f'<graphic id="{shape_gid[i]}" BoundingBox="{bb}" {g}{cattr(sh.color)}/>')
+    for i, sh in doc.shapes.items():                        # polymer brackets: ChemDraw's bracketed group (SRU)
+        rep = str(sh.params.get('repeat', '')).strip() if sh.kind in model.BRACKET_KINDS else ''
+        if not rep or i not in shape_gid:
+            continue
+        inside = next((atoms for r, atoms in doc.repeat_units() if r == rep and all(
+            min(sh.x1, sh.x2) < doc.atoms[a].x < max(sh.x1, sh.x2) for a in atoms)), None)
+        if not inside:
+            continue
+        objs = ' '.join(str(all_nodes[a]) for a in sorted(inside) if a in all_nodes)
+        usage = 'BracketUsage="SRU" PolymerRepeatPattern="HeadToTail"'
+        out.append(f'<bracketedgroup id="{next(ids)}" BracketedObjectIDs="{objs}" {usage} SRULabel={quoteattr(rep)}>'
+                   f'<bracketattachment id="{next(ids)}" GraphicID="{shape_gid[i]}"/></bracketedgroup>')
     b = r.bounds()
     W, H = render.page_size(s)
     bbox = f'{f(b.left())} {f(b.top())} {f(b.right())} {f(b.bottom())}' if not b.isNull() else '0 0 0 0'
@@ -442,6 +498,8 @@ def write(doc, path, program='Kekulex'):
             f'<colortable>{table}</colortable><fonttable><font id="3" charset="iso-8859-1" name={quoteattr(s["font"])}/>'
             f'</fonttable><page id="{next(ids)}" BoundingBox="0 0 {f(W)} {f(H)}" HeaderPosition="36" FooterPosition="36" '
             f'PrintTrimMarks="yes" HeightPages="1" WidthPages="1">')
+    out = [x if isinstance(x, str) else f'<group id="{next(ids)}">' + ''.join(grouped[x[1]]) + '</group>'
+           for x in out]
     with open(path, 'w', encoding='utf-8', newline='\n') as fh:
         fh.write(head + '\n'.join(out) + '</page></CDXML>\n')
 

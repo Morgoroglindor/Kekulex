@@ -58,6 +58,8 @@ class Info:
     inchikey: str = ''
     errors: list = field(default_factory=list)              # human-readable problems (valence ...)
     fragments: int = 0
+    repeat: str = ''                                        # polymer brackets with a letter (n): the masses are for 1
+    radicals: int = 0                                       # unpaired electrons drawn (•): odd -> [M]•+ ions
 
 
 def charge_text(z):
@@ -66,8 +68,9 @@ def charge_text(z):
     return ('' if abs(z) == 1 else str(abs(z))) + ('+' if z > 0 else '−')
 
 
-def ion_label(base, z):
-    return f'[{base}]{charge_text(z)}'
+def ion_label(base, z, radical=False):
+    """[M+H]+, or [M]•+ for an odd-electron ion (a radical cation, as in EI mass spectra)."""
+    return f'[{base}]{"•" if radical else ""}{charge_text(z)}'
 
 
 def hill(counts):
@@ -91,6 +94,13 @@ def to_mol(doc, atom_ids=None):
     mol = Chem.MolFromMolBlock(block, sanitize=False, removeHs=False)
     if mol is None:
         return None, order, 'The structure could not be read.'
+    for k, a in enumerate(order):                           # radicals and typed H counts (CH2••, CH3•, CH3+ ...)
+        at = doc.atoms[a]
+        if not at.label and (at.radical or at.hcount is not None):
+            atom = mol.GetAtomWithIdx(k)
+            atom.SetNoImplicit(True)
+            atom.SetNumExplicitHs(doc.implicit_h(a))
+            atom.SetNumRadicalElectrons(at.radical)
     try:
         Chem.SanitizeMol(mol)
         Chem.AssignChiralTypesFromBondDirs(mol)
@@ -120,7 +130,48 @@ def analyse(doc, atom_ids=None):
         if problem:
             info.errors.append(problem)
     full, grown = doc.expanded()
+    repeats = doc.repeat_units(set(ids))
     ids = [a for a in full.atoms if a in expand_ids(grown, ids)]
+    counts, mono, avg, charge, unknown = _tally(full, ids)
+    info.radicals = sum(full.atoms[a].radical for a in ids)      # unpaired electrons (•)
+    if unknown:
+        info.errors.append('Unknown element: ' + ', '.join(sorted(set(unknown))))
+    symbolic = []
+    for rep, unit in repeats:                               # polymer brackets: the unit inside counts rep times
+        unit = set(expand_ids(grown, unit)) & set(ids)
+        uc, um, ua, uq, _u = _tally(full, unit)
+        if rep.isdigit() and int(rep) >= 1:
+            k = int(rep) - 1
+            for e, c in uc.items():
+                counts[e] = counts.get(e, 0) + k * c
+            mono, avg, charge = mono + k * um, avg + k * ua, charge + k * uq
+        else:
+            symbolic.append((rep, uc))
+    _masses(info, counts, charge, mono, avg)
+    if symbolic:                                            # (C2H4)n: masses and ions are for n = 1
+        ends = dict(counts)
+        for _rep, uc in symbolic:
+            for e, c in uc.items():
+                ends[e] = ends.get(e, 0) - c
+        ends = {e: c for e, c in ends.items() if c > 0}
+        units = ''.join(f'({formula_text(uc)}){rep}' for rep, uc in symbolic)
+        units_html = ''.join('(' + ''.join(e + (f'<sub>{uc[e]}</sub>' if uc[e] > 1 else '') for e in hill(uc)) +
+                             f')<sub><i>{rep}</i></sub>' for rep, uc in symbolic)
+        ends_html = ''.join(e + (f'<sub>{ends[e]}</sub>' if ends[e] > 1 else '') for e in hill(ends))
+        info.formula = (formula_text(ends) if ends else '') + units
+        info.formula_html = ends_html + units_html + (f'<sup>{charge_text(charge)}</sup>' if charge else '')
+        info.repeat = ', '.join(rep for rep, _uc in symbolic)
+    mol, _order, err = to_mol(full, set(ids))
+    if mol is not None:
+        _identifiers(info, mol)
+    elif err and not info.errors:
+        info.errors.append(err)
+    return info
+
+
+def _tally(full, ids):
+    """(element counts, monoisotopic mass, average mass, charge, unknown elements) of these atoms of the expanded
+    drawing full, with their implicit hydrogens."""
     counts = {}
     mono = avg = 0.0
     charge = 0
@@ -139,15 +190,7 @@ def analyse(doc, atom_ids=None):
         mono += m + hs * H
         avg += w + hs * PT.GetAtomicWeight('H')
         charge += at.charge
-    if unknown:
-        info.errors.append('Unknown element: ' + ', '.join(sorted(set(unknown))))
-    _masses(info, counts, charge, mono, avg)
-    mol, _order, err = to_mol(full, set(ids))
-    if mol is not None:
-        _identifiers(info, mol)
-    elif err and not info.errors:
-        info.errors.append(err)
-    return info
+    return counts, mono, avg, charge, unknown
 
 
 def analyse_mol(mol):
@@ -191,12 +234,13 @@ def _masses(info, counts, charge, mono, avg):
     els = hill(counts)
     info.formula = formula_text(counts)
     info.formula_html = ''.join(e + (f'<sub>{counts[e]}</sub>' if counts[e] > 1 else '') for e in els)
-    if charge:
-        info.formula_html += f'<sup>{charge_text(charge)}</sup>'
+    if charge or info.radicals:
+        info.formula_html += f'<sup>{"•" * info.radicals}{charge_text(charge)}</sup>'
     if avg:
         info.analysis = '; '.join(f'{e}, {100 * PT.GetAtomicWeight(e) * counts[e] / avg:.2f}' for e in els)
     if charge:                                              # a charged structure is an ion already
-        info.ions.append(Ion(ion_label('M', charge), charge, (mono - charge * ELECTRON) / abs(charge), dict(counts)))
+        info.ions.append(Ion(ion_label('M', charge, info.radicals % 2), charge, (mono - charge * ELECTRON) / abs(charge),
+                             dict(counts)))
     for label, n, gain, loss, dz in ADDUCTS_POS + ADDUCTS_NEG:
         z = n * charge + dz
         if z == 0 or (charge and n > 1):
@@ -210,7 +254,7 @@ def _masses(info, counts, charge, mono, avg):
             ion[e] = ion.get(e, 0) - c
         if any(c < 0 for c in ion.values()):
             continue
-        info.ions.append(Ion(ion_label(label, z), z, (n * mono + _mono(gain) - _mono(loss) - z * ELECTRON) / abs(z), ion))
+        info.ions.append(Ion(ion_label(label, z, n * info.radicals % 2), z, (n * mono + _mono(gain) - _mono(loss) - z * ELECTRON) / abs(z), ion))
 
 
 # ------------------------------------------------------------------------------------------------ isotope pattern
@@ -356,6 +400,43 @@ def properties(doc, atom_ids=None):
         ('Rule of five', 'passes' if violations <= 1 else f'{violations} violations',
          'Lipinski: MW ≤ 500, logP ≤ 5, ≤ 5 donors, ≤ 10 acceptors (one violation allowed)'),
     ]
+
+
+ANALYSIS_KEYS = ('formula', 'exact', 'mz', 'mw', 'analysis')       # Show analysis / Paste all, in this order
+
+
+def live_caption(doc, atom_ids, keys):
+    """The text of a pasted analysis caption for these atoms: one line per key - an ANALYSIS_KEYS entry, 'name'
+    (the IUPAC name) or 'prop:<name>' (a chem.properties row). None when the atoms make no structure."""
+    info = analyse(doc, atom_ids)
+    if not info.atoms:
+        return None
+    props = None
+    lines = []
+    per = f' ({info.repeat} = 1)' if info.repeat else ''
+    for key in keys:
+        if key == 'formula':
+            lines.append(f'Chemical Formula: {info.formula}{charge_text(info.charge)}')
+        elif key == 'exact':
+            lines.append(f'Exact Mass: {info.exact:.2f}{per}')
+        elif key == 'mw':
+            lines.append(f'Molecular Weight: {info.average:.2f}{per}')
+        elif key == 'mz':
+            lines.append('m/z: ' + ', '.join(f'{m:.2f} ({p:.1f}%)' for m, p in isotope_pattern(info.counts, 0)[:4]))
+        elif key == 'analysis':
+            lines.append(f'Elemental Analysis: {info.analysis}')
+        elif key == 'name':
+            name = iupac_name(doc, atom_ids) if not info.errors else ''
+            lines.append(name or '(no name found)')
+        elif key == 'ms':                                   # a fragment: formula and m/z (or neutral mass)
+            import ms
+            lines.append(ms.describe(doc, atom_ids, chr(10)))
+        elif key.startswith('prop:'):
+            if props is None:
+                props = {n: v for n, v, _tip in properties(doc, atom_ids)}
+            if key[5:] in props:
+                lines.append(f'{key[5:]}: {props[key[5:]]}')
+    return '\n'.join(lines)
 
 
 # ------------------------------------------------------------------------------------------------ names

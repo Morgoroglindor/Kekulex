@@ -48,6 +48,14 @@ class InfoPanel(QtWidgets.QWidget):
             form.addRow(label, r)
         form.addRow('Charge:', self.charge)
         lay.addLayout(form)
+        brow = QtWidgets.QHBoxLayout()
+        brow.addStretch(1)
+        b = QtWidgets.QPushButton('Paste all under the structure')
+        b.setToolTip('Formula, exact mass, m/z, molecular weight and elemental analysis as one caption under the '
+                     'structure (it moves with it)')
+        b.clicked.connect(self.paste_all)
+        brow.addWidget(b)
+        lay.addLayout(brow)
         self.table = QtWidgets.QTableWidget(0, 2)
         self.table.setHorizontalHeaderLabels(['Ion', 'm/z'])
         self.table.verticalHeader().hide()
@@ -89,9 +97,27 @@ class InfoPanel(QtWidgets.QWidget):
         self.props.horizontalHeader().setStretchLastSection(True)
         self.props.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         self.props.setAlternatingRowColors(True)
-        self.props.setToolTip('Calculated with RDKit. Double-click a row to paste it under the structure.')
+        self.props.setToolTip('Calculated with RDKit. Tick rows and press Paste, or double-click a row, to put them '
+                              'under the structure.')
         self.props.cellDoubleClicked.connect(self._paste_property_row)
-        self.tabs.addTab(self.props, 'Properties')
+        self.props.itemChanged.connect(self._property_ticked)
+        self._ticked = set()                                # property names ticked for Paste (kept across refreshes)
+        ppage = QtWidgets.QWidget()
+        play = QtWidgets.QVBoxLayout(ppage)
+        play.setContentsMargins(4, 6, 4, 4)
+        play.addWidget(self.props, 1)
+        prow = QtWidgets.QHBoxLayout()
+        for text, how in (('All', True), ('None', False)):
+            tb = QtWidgets.QToolButton(); tb.setText(text); tb.setAutoRaise(True)
+            tb.clicked.connect(lambda _c=False, h=how: self._tick_all(h))
+            prow.addWidget(tb)
+        prow.addStretch(1)
+        self.paste_props = QtWidgets.QPushButton('Paste')
+        self.paste_props.setToolTip('The ticked properties as one caption under the structure (it moves with it)')
+        self.paste_props.clicked.connect(self.paste_properties)
+        prow.addWidget(self.paste_props)
+        play.addLayout(prow)
+        self.tabs.addTab(ppage, 'Properties')
         self.tabs.currentChanged.connect(lambda _i: self.refresh(keep_choice=True))
         self.timer = QtCore.QTimer(self, singleShot=True, interval=120)
         self.timer.timeout.connect(self.refresh)
@@ -122,9 +148,12 @@ class InfoPanel(QtWidgets.QWidget):
         if key == 'name':
             if not getattr(self, 'iupac', ''):
                 return
-            self.canvas.add_caption_below(self._target(), self.iupac)
+            self.canvas.add_caption_below(self._target(), self.iupac, live=['name'])
             return
-        if key == 'formula':
+        if not isinstance(self._target(), tuple):
+            self._paste_live([key], formula=True)
+            return
+        if key == 'formula':                                # a sequence: a fixed caption from its analysis
             text = f'Chemical Formula: {info.formula}{chem.charge_text(info.charge)}'
         elif key == 'exact':
             text = f'Exact Mass: {info.exact:.2f}'
@@ -136,9 +165,58 @@ class InfoPanel(QtWidgets.QWidget):
             text = f'Elemental Analysis: {info.analysis}'
         self.canvas.add_caption_below(self._target(), text, formula=True)
 
+    def _paste_live(self, keys, formula=False):
+        """A caption with these chem.live_caption lines under the target structure; it stays up to date."""
+        target = self._target()
+        if isinstance(target, tuple):
+            return
+        text = chem.live_caption(self.canvas.doc, target, keys)
+        if text:
+            self.canvas.add_caption_below(target, text, formula=formula, live=keys)
+
     def _paste_property_row(self, row, _col):
         name, value = self.props.item(row, 0).text(), self.props.item(row, 1).text()
-        self.canvas.add_caption_below(self._target(), f'{name}: {value}')
+        if isinstance(self._target(), tuple):
+            self.canvas.add_caption_below(self._target(), f'{name}: {value}')
+        else:
+            self._paste_live(['prop:' + name])
+
+    def _property_ticked(self, item):
+        if item.column() != 0:
+            return
+        if item.checkState() == QtCore.Qt.CheckState.Checked:
+            self._ticked.add(item.text())
+        else:
+            self._ticked.discard(item.text())
+
+    def _tick_all(self, on):
+        state = QtCore.Qt.CheckState.Checked if on else QtCore.Qt.CheckState.Unchecked
+        for r in range(self.props.rowCount()):
+            self.props.item(r, 0).setCheckState(state)
+
+    def paste_properties(self):
+        """The ticked properties (all of them when none is ticked) as one caption under the structure."""
+        rows = [(self.props.item(r, 0).text(), self.props.item(r, 1).text()) for r in range(self.props.rowCount())]
+        chosen = [row for row in rows if row[0] in self._ticked] or rows
+        if not chosen:
+            return
+        if isinstance(self._target(), tuple):
+            self.canvas.add_caption_below(self._target(), '\n'.join(f'{n}: {v}' for n, v in chosen))
+        else:
+            self._paste_live(['prop:' + n for n, _v in chosen])
+
+    def paste_all(self):
+        """ChemDraw's Analysis window with every line ticked: one caption under the structure."""
+        info = getattr(self, 'info', None)
+        if not info or not info.atoms:
+            return
+        if isinstance(self._target(), tuple):               # a sequence: a fixed caption
+            mz = ', '.join(f'{m:.2f} ({p:.1f}%)' for m, p in chem.isotope_pattern(info.counts, 0)[:4])
+            text = (f'Chemical Formula: {info.formula}{chem.charge_text(info.charge)}\nExact Mass: {info.exact:.2f}\n'
+                    f'm/z: {mz}\nMolecular Weight: {info.average:.2f}\nElemental Analysis: {info.analysis}')
+            self.canvas.add_caption_below(self._target(), text, formula=True)
+            return
+        self._paste_live(list(chem.ANALYSIS_KEYS), formula=True)
 
     @staticmethod
     def _value():
@@ -153,13 +231,16 @@ class InfoPanel(QtWidgets.QWidget):
         sel = self.canvas.selected_atoms()
         if sel:
             out.append(('Selection', sel))
-        frags = doc.fragments()
-        if len(frags) == 1:
-            out.append(('Structure', None))
+        units = self.canvas.analysis_units(set(doc.atoms))  # grouped structures count as one
+        if sel and any(set(u) == sel for u in units if len(doc.fragments(u)) > 1):
+            out[0] = ('Group', sel)
+        if len(units) == 1:
+            out.append(('Group' if len(doc.fragments()) > 1 else 'Structure', None))
         else:
-            for k, f in enumerate(frags, 1):
-                out.append((f'Structure {k}: {chem.analyse(doc, f).formula}', set(f)))
-            if frags:
+            for k, u in enumerate(units, 1):
+                kind = 'Group' if len(doc.fragments(u)) > 1 else 'Structure'
+                out.append((f'{kind} {k}: {chem.analyse(doc, u).formula}', set(u)))
+            if units:
                 out.append(('All structures together', None))
         import biopolymer
         chosen = self.canvas.selected('seq')
@@ -206,10 +287,14 @@ class InfoPanel(QtWidgets.QWidget):
         if self.tabs.currentIndex() == 1:                   # properties only while their tab is shown
             rows = chem.properties(self.canvas.doc, ids) if info.atoms else []
             self.props.setRowCount(len(rows))
+            self.props.blockSignals(True)
             for r, (name, value, tip) in enumerate(rows):
                 a, b = QtWidgets.QTableWidgetItem(name), QtWidgets.QTableWidgetItem(value)
                 a.setToolTip(tip); b.setToolTip(tip)
+                a.setFlags(a.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable)
+                a.setCheckState(QtCore.Qt.CheckState.Checked if name in self._ticked else QtCore.Qt.CheckState.Unchecked)
                 self.props.setItem(r, 0, a); self.props.setItem(r, 1, b)
+            self.props.blockSignals(False)
 
     def show_info(self, info):
         self.info = info

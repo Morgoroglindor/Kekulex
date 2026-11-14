@@ -15,14 +15,18 @@ Drawing (Help > How to draw in the program says the same)
   Hotkeys          ChemDraw's layout (taken from ChemDraw's hotkeys.xml; case matters, capital = Shift). Point at:
                    an atom - c n o s p f h i l(Cl) b(Br), Shift+C Cl, Shift+S Si, Shift+O OMe, Shift+N NO2,
                      Shift+P Ph, y Boc, e Et, m Me ... (groups are drawn out in full); 1 bond, 2 C=O, 4 / 5 wedge /
-                     hash, 6 / 7 / v / u rings, a phenyl, z ethynyl, Shift+K tBu, 9 two methyls; + / - charge
+                     hash, 6 / 7 / v / u rings, a phenyl, z ethynyl, Shift+K tBu, 9 two methyls; + / - charge;
+                     t (or Enter) types its label; with the Text tool, just point at it and type
                    a bond - 1 2 3 order, l / r / c double-bond side, w wedge, h hash, 4-8 / v fused ring,
                      a fused benzene, z fused cyclopentadiene
                    nothing - j benzene tool, x bond, Shift+X chain, e arrow, t text, Space select
                    Help > Keyboard shortcuts lists all of them.
   Select           click / Shift+click / drag a box; drag to move; drop one atom on another to merge; arrows nudge.
+                   Drag the round handle at the selection's top right corner to turn it freely (Shift: 15° steps).
   SMILES box       paste a SMILES, Enter. Ctrl+V pastes SMILES or MOL text. File > Open reads .mol, .sdf, .smi.
   Clean up         Ctrl+Shift+K or Ctrl+Alt+K lays the selected structures out again (RDKit), keeping stereo.
+                   Ctrl+Shift+K stays Kekulex's while its window is in front, even if another program (Notion)
+                   registered it system-wide (winkeys.py).
   Usual drawings   a structure from a name or SMILES, or cleaned up, follows the usual orientation of common skeletons
                    (steroids, triterpenes, betalains, purines, indoles, quinolines, flavonoids, penicillins, sugars
                    ...: layout2d.py). A betalain by name comes in its usual form (ring NH, iminium N+).
@@ -33,19 +37,88 @@ Drawing (Help > How to draw in the program says the same)
                    conformers again, minimize one or all. Export for MD programs: PDB, MOL2 (Gasteiger charges),
                    GROMACS .gro, AMBER .inpcrd, LAMMPS data, SDF, XYZ. They hold coordinates and bonds; force-field
                    parameters come from ACPYPE / antechamber, CGenFF or LigParGen, which read the MOL2.
+                   Surfaces: solvent accessible (1.4 Å probe) or van der Waals, solid, translucent, mesh or dots,
+                   coloured by element, Gasteiger partial charge or Crippen hydrophobicity. Also H-bonds inside
+                   the molecule, depth fading, perspective, axes, background colour, and the conformer's
+                   properties: surface areas, volume, ovality, principal moments, radius of gyration, H-bond
+                   donors / acceptors.
+  Autosave         unsaved work is copied every minute to %APPDATA%\Kekulex\autosave (autosave.py); after a crash
+                   or power cut, Kekulex offers the drawing back when it next starts. Saving or closing on purpose
+                   removes the copy.
   Optional parts   the installer asks whether to include NMR prediction (about 70 MB) and the 3D
                    tab; run it again to add or remove them. A part left out disappears from the menus.
 
 ChemDraw-like features (0.3.0)
   Page view            the drawing sits on an A4 / Letter page (File > Document settings); View > Whole page.
   Nicknames            atom labels OMe, CO2H, Boc, Ph, NO2, OTs, TMS ... stay short on the drawing (turned round,
-                       MeO2C, when bonded on the right) and count in full for formula / SMILES / MOL;
+                       MeO2C, when bonded on the right) and count in full for formula / SMILES / MOL; so do condensed
+                       formulas typed on an atom (condensed.py): SO3K, SO3Na, CO2Na (as salts), CH2CH3, COCH3, C(O)CH3,
+                       N(CH3)2, CH(CH3)2, (CH2)3CH3, PO3H2, P(O)(OH)2, SO2NH2, SO2Cl, OCF3, CH=CH2, NMe3+ ...;
+                       all in lower case works too (so3k, ch2cl, nh2, boc: two letters are one symbol only for
+                       Cl Br Na Li Mg Si and nicknames, so co is C + O, never cobalt).
                        Structure > Expand label draws them out. Labels and captions are typed in place.
   Bond styles          wedge, hashed wedge, bold, hashed, dashed (dashed second line on a double bond), wavy.
   Arrows               reaction, equilibrium, retrosynthetic, resonance, dashed, curved, fish-hook (click a curved
                        arrow again with its tool to bend it the other way).
+  Radicals and ions     point at an atom and press . for a radical (•), again for a carbene / diradical (••), again
+                       for none; or right-click > Atom > Radical, Charge > Radical cation •+ / anion •−, Hydrogens
+                       (0-3 or automatic). Typed labels say it too: CH2• , CH3+, O•+, C••, and CH2 on a carbon keeps
+                       exactly two H. Each unpaired electron takes one H away; carbocations (CH3+), acylium ions and
+                       carbenes are allowed, so MS fragments and reactive intermediates can be drawn. Formula, masses
+                       and SMILES follow; odd-electron ions are listed as [M]•+. Kept in .sed, MOL (RAD) and .cdxml.
+  MS fragments         right-click a bond > Bond > Cleave (MS fragments): each way of breaking it, named by its two
+                       pieces and their m/z - a radical cation (M•+) gives A+ + B• or A• + B+ (alpha cleavage:
+                       acetone M•+ -> CH3C≡O+ m/z 43.0178 + CH3•), an even-electron ion ([M+H]+) the inductive
+                       cleavage A+ + B (neutral), a neutral molecule A• + B• or A+ + B−. The pieces are drawn under an
+                       arrow with live captions (formula, m/z or neutral mass); break them again for a fragmentation
+                       tree. Ring bonds are not offered (one piece). ms.py.
+  Match m/z            Structure > Match m/z (Ctrl+M): a measured m/z within so many ppm against every drawn structure's
+                       ions and adducts (charged fragments as themselves; double-click selects it) and against
+                       elemental compositions of the ion (elements C H N O S by default, any of P F Cl Br I Si B Na K
+                       and caps such as N4 can be added), with ppm, RDBE and even / odd electron; the usual ratio rules
+                       (H/C, N/C, O/C ...) leave out impossible formulas.
+  Mechanisms           curved and fish-hook arrows drawn from an atom or bond to an atom or bond stay on them when the
+                       structure moves (drag the arrow alone to move its ends). Right-click > Atom > Lone pairs: none,
+                       all it has (counted from its electrons) or 1-3, drawn as dot pairs in the free directions.
+  Find                 Edit > Find (Ctrl+F): selects captions holding the text, atoms with that label or element, or a
+                       substructure written as SMILES / SMARTS (C(=O)O, c1ccccc1, [OX2H]), nicknames included.
+  Reactions            Structure > Reaction > Map atoms: atoms of the reactants and products get matching numbers (:1,
+                       :2 ..., from the largest common substructures); Clear atom map; Check balance: what the products
+                       have more or fewer than the reactants, and a by-product that would balance it (H2O, HCl, CO2 ...).
+                       Only the arrow's own row and step count; reagents over / under the arrow are left out.
+  Forms                Structure > Forms > Tautomers / Resonance forms: the other forms of the selected structure drawn
+                       to its right, laid out like it, with equilibrium or resonance arrows (RDKit).
+  Check structure      also lists stereocentres with no wedge, wedges that start at an atom that is not a stereocentre,
+                       and atoms with too many wedges.
+  Snap guides          dragging a selection lines its edges or centre up with another object's (pink guides); hold
+                       Alt to move freely.
+  Reaction schemes     right-click a reaction arrow > Reaction conditions: reagents over the arrow, solvent / temperature
+                       / time under it (formula style, grouped with the arrow, which grows to fit). Object > Arrange as
+                       reaction scheme: the selected structures and arrows in one row, centred on one line, evenly spaced.
+  Batch export         File > Batch export: an SDF or a SMILES list (SMILES, then a name) to one grid sheet or one
+                       picture per structure (PNG / SVG / PDF), named, in this drawing's style. batch.py.
   Shapes               brackets, parentheses, braces, rectangle, rounded rectangle, oval, line.
+  Pictures             Ctrl+V pastes a copied picture (from a browser, a screenshot, Word, a copied PNG / JPEG file) at
+                       its own size, File > Insert picture reads one, and image files dropped on the window land where
+                       they fall. A picture moves, scales (Object > Scale) and flips with the drawing, sits behind the
+                       structures, and goes into exports (PNG, SVG, PDF) and .sed files (not .cdxml). Copied SMILES text
+                       still pastes as a structure even when a picture came with it. pictures.py.
+  Readable drawings    nothing is drawn on anything else: an atom's H goes to the side that is free (OH beside HO),
+                       charges and radical dots keep off other bonds and labels, atom numbers, R/S and map numbers look
+                       round their atom for a clear spot, lone pairs sit in free directions just off the letter, labels
+                       read the other way when that is clear (TBSO, BocHN, Me3N+), analysis captions and MS fragments
+                       move down past what is already there, and the layout turns crowded end groups apart (two OH of a
+                       diphosphate). overlaps.py finds what still overlaps; the tests keep it at none for common
+                       molecules. Very crowded cages with every number switched on can still touch.
+  Polymer brackets     right-click a bracket pair > Bracket / shape > Polymer repeat count: n (or 3, x ...) at the
+                       foot of the right bracket. The atoms inside count that many times in the formula and masses;
+                       a letter gives C2H6(C2H4)n, with the masses for n = 1. Written to .cdxml as ChemDraw's
+                       bracketed group (SRU, with its label) and read back.
   Captions             size, bold, italic, formula style (H2SO4 with subscripts), left / centre / right, colour.
+  Groups               Object > Group (Ctrl+G) / Ungroup (Ctrl+Shift+G): grouped structures, captions, arrows and shapes
+                       select, move, turn and are analysed as one (a salt or mixture: one formula, mass and properties;
+                       the Structure list shows "Group"). Captions pasted under a structure join its group and move with
+                       it. Kept in .sed files, copies and .cdxml (as ChemDraw groups).
   Object menu          align (edges, centres), distribute, Flip Horizontal / Vertical (the mirror image: stereo
                        inverts), Rotate 180 degrees Horizontal / Vertical (Ctrl+Shift+H / V: turned over, same
                        molecule), Rotate... (Ctrl+R), 15 degree steps (Ctrl+] / Ctrl+[), Scale... (Ctrl+K), colour.
@@ -80,9 +153,12 @@ ChemDraw-like features (0.3.0)
                        .cdxml yet: keep .sed for that). .cdx opens the structures (through RDKit). Not read: TLC
                        plates, orbitals, spectra.
   Analysis panel       Analysis tab: formula, exact mass, m/z with isotopes, MW, elemental analysis (each with
-                       Paste, which puts it under the structure as a caption), adduct m/z, isotope pattern of the
-                       chosen ion. Properties tab: logP, MR, tPSA, H-bond donors / acceptors, rotatable bonds,
-                       rings, heavy atoms, fraction sp3, stereocentres, rule of five (RDKit).
+                       Paste, which puts it under the structure as a caption; "Paste all under the structure" puts them
+                       all in one caption), adduct m/z, isotope pattern of the chosen ion. Properties tab: logP, MR,
+                       tPSA, H-bond donors / acceptors, rotatable bonds, rings, heavy atoms, fraction sp3,
+                       stereocentres, rule of five (RDKit); tick rows and press Paste (none ticked: all of them), or
+                       double-click one row. Pasted values (and Show analysis captions) are live: they are rewritten
+                       whenever the structure changes, until you type over the caption or ungroup it.
   NMR prediction       Structure > Predict 1H / 13C NMR (also right-click > Analysis): CSP5 (MIT, machine learning
                        on measured spectra, solvent aware: CDCl3, DMSO-d6, CD3OD, D2O ...). A window with the
                        simulated spectrum (mouse as in Spectra viewer: drag a box to zoom, wheel zooms ppm, Ctrl+wheel

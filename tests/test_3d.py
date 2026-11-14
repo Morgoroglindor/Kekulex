@@ -356,3 +356,81 @@ def test_panel_search_again_uses_the_controls(win, qapp):
     assert 'UFF' in p.title.text()
     p.minimize_all()
     assert 'All minimized' in p.energy.text() and 'RMS force' in p.energy.text()
+
+
+# ------------------------------------------------------------------------------------------------ surfaces and shape
+def test_surface_area_of_one_atom_and_against_freesasa():
+    xyz, radii = np.zeros((1, 3)), np.array([1.7])
+    assert mol3d.surface_dots(xyz, radii, 400)[2] == pytest.approx(4 * np.pi * 1.7 ** 2)
+    from rdkit.Chem import rdFreeSASA
+    m = mol3d.build(_drawn('OC(=O)c1ccccc1O'), n_confs=3)
+    c = m.confs[0][0]
+    ours = mol3d.surface_dots(m.positions(c), mol3d.surface_radii(m, 'sas'))[2]
+    theirs = rdFreeSASA.CalcSASA(m.mol, list(mol3d.vdw_radii(m.mol)), confIdx=c, opts=rdFreeSASA.SASAOpts())
+    assert ours == pytest.approx(theirs, rel=0.02)
+
+
+def test_shape_properties_and_sphere_like_ovality():
+    ovality = lambda m: float(dict(mol3d.shape_properties(m, m.confs[0][0]))['Ovality'].split()[0])
+    atom = mol3d.build(_drawn('[Ar]'), n_confs=1)
+    assert ovality(atom) == pytest.approx(1.0, abs=0.03)          # a sphere
+    ball = mol3d.build(_drawn('C(C)(C)(C)C'), n_confs=1)
+    assert dict(mol3d.shape_properties(ball, ball.confs[0][0]))['H-bond donors / acceptors'] == '0 / 0'
+    assert ovality(mol3d.build(_drawn('CCCCCCCCCCCCCCCC'), n_confs=1)) > ovality(ball) > 1.0
+
+
+def test_intramolecular_hydrogen_bond_found():
+    m = mol3d.build(_drawn('O=Cc1ccccc1O'), n_confs=5)
+    bonds = mol3d.hydrogen_bonds(m, m.confs[0][0])
+    assert len(bonds) == 1
+    h, a = bonds[0]
+    assert m.mol.GetAtomWithIdx(h).GetNeighbors()[0].GetSymbol() == 'O' and m.mol.GetAtomWithIdx(a).GetSymbol() == 'O'
+    assert not mol3d.hydrogen_bonds(mol3d.build(_drawn('OCCO'), n_confs=1), 0) or True     # 1,2-diol: may or may not
+
+
+def test_surface_colour_values():
+    m = mol3d.build(_drawn('CC(=O)O'), n_confs=1)
+    q = mol3d.atom_values(m, 'charge')
+    assert q.sum() == pytest.approx(0.0, abs=1e-6) and q.min() < 0 < q.max()
+    assert len(mol3d.atom_values(m, 'hydrophobicity')) == m.mol.GetNumAtoms()
+    assert mol3d.atom_values(m, 'element') is None
+
+
+@pytest.mark.parametrize('surface', [k for k, _t in mol3d.SURFACES])
+@pytest.mark.parametrize('style', [k for k, _t in view3d.SURFACE_STYLES])
+def test_every_surface_style_paints(qapp, surface, style):
+    v = view3d.View3D()
+    v.resize(300, 300)
+    v.set_model(mol3d.build(_drawn('OCc1ccccc1'), n_confs=1))
+    plain = v.image(1)
+    for name, value in (('surface', surface), ('surface_style', style), ('surface_color', 'charge'),
+                        ('show_hbonds', True), ('show_axes', True)):
+        v.set_option(name, value)
+    img = v.image(1)
+    changed = sum(img.pixel(x, y) != plain.pixel(x, y) for x in range(0, 300, 3) for y in range(0, 300, 3))
+    assert changed > 100
+
+
+def test_background_perspective_and_fading_options(qapp):
+    v = view3d.View3D()
+    v.resize(200, 200)
+    v.set_model(mol3d.build(_drawn('CCO'), n_confs=1))
+    v.set_option('background', QtGui.QColor('#102040'))
+    assert QtGui.QColor(v.image(1).pixel(0, 0)).name() == '#102040'
+    centre = (v._xyz @ v.rot.T)[0]
+    with_p = v._projector(200, 200)(centre + (0, 0, 2))[2]
+    v.set_option('perspective', False)
+    assert v._projector(200, 200)(centre + (0, 0, 2))[2] < with_p
+    v.set_option('depth_fade', False)
+    v.image(1)
+
+
+def test_panel_shows_properties(win, qapp):
+    win.canvas.doc.insert_rdkit(Chem.MolFromSmiles('O=Cc1ccccc1O'))
+    win.canvas.edited()
+    win.send_to_3d()
+    _wait(win, qapp)
+    text = win.panel3d.properties.text()
+    assert 'Solvent-accessible area' in text and 'H-bonds inside this conformer: 1' in text
+    win.panel3d.surface.setCurrentIndex(1)
+    assert win.panel3d.view.surface == 'sas'

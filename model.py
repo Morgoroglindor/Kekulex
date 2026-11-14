@@ -14,6 +14,7 @@ label is a nickname (OMe, Boc ...): drawn as that text, written out in full by e
 """
 import copy
 import math
+import re
 from dataclasses import asdict, dataclass, field
 
 MERGE = 0.3                                                 # a new atom this close to an existing one is that atom
@@ -33,8 +34,8 @@ GROUPS = {'Me': 'C', 'Et': 'CC', 'Ac': 'C(C)=O', 'CO2Me': 'C(=O)OC', 'CF3': 'C(F
 VALENCE_ELECTRONS = {'B': 3, 'C': 4, 'N': 5, 'O': 6, 'F': 7, 'Si': 4, 'P': 5, 'S': 6, 'Cl': 7, 'Se': 6, 'Br': 7,
                      'I': 7, 'As': 5, 'Te': 6, 'Li': 1, 'Na': 1, 'K': 1, 'Mg': 2}
 # Nicknames: an atom shows the short label (OMe, Boc ...) and counts as the whole group for the formula and SMILES.
-NICKNAMES = {k: v for k, v in GROUPS.items() if k not in ('SO2', 'Cy', 'cPent', 'cPr', 'cBu', 'Cp', 'ethynyl')}
-NICKNAMES.update({
+FIXED_NICKNAMES = {k: v for k, v in GROUPS.items() if k not in ('SO2', 'Cy', 'cPent', 'cPr', 'cBu', 'Cp', 'ethynyl')}
+FIXED_NICKNAMES.update({
     'CO2H': 'C(=O)O', 'COOH': 'C(=O)O', 'CO2Et': 'C(=O)OCC', 'CHO': 'C=O', 'CN': 'C#N', 'OAc': 'OC(C)=O',
     'NHAc': 'NC(C)=O', 'SO3H': 'S(=O)(=O)O', 'SO2Me': 'S(=O)(=O)C', 'TMS': '[Si](C)(C)C', 'TBS': '[Si](C)(C)C(C)(C)C',
     'TBDMS': '[Si](C)(C)C(C)(C)C', 'TIPS': '[Si](C(C)C)(C(C)C)C(C)C', 'Ts': 'S(=O)(=O)c1ccc(C)cc1',
@@ -46,6 +47,34 @@ NICKNAMES.update({
     'THP': 'C1CCCCO1', 'CONH2': 'C(N)=O', 'SMe': 'SC', 'CH2OH': 'CO', 'CCl3': 'C(Cl)(Cl)Cl', 'Tr': 'C(c1ccccc1)(c1ccccc1)c1ccccc1',
     'Ph3P': 'P(c1ccccc1)(c1ccccc1)c1ccccc1', 'PPh3': 'P(c1ccccc1)(c1ccccc1)c1ccccc1', 'Piv': 'C(=O)C(C)(C)C',
     'OPiv': 'OC(=O)C(C)(C)C', 'Mes': 'c1c(C)cc(C)cc1C', 'Np': 'c1cccc2ccccc12', 'Py': 'c1ccccn1'})
+
+
+class _Nicknames(dict):
+    """The nicknames above, and any label that reads as a condensed formula (SO3K, CH2CH3, N(CH3)2 ...:
+    condensed.py), so that typed groups count in full like the named ones. Iterating gives the named ones only."""
+    def _formula(self, key):
+        if not isinstance(key, str) or dict.__contains__(self, key):
+            return None
+        import condensed
+        return condensed.smiles(key)
+
+    def __contains__(self, key):
+        return dict.__contains__(self, key) or self._formula(key) is not None
+
+    def __missing__(self, key):
+        smiles = self._formula(key)
+        if smiles is None:
+            raise KeyError(key)
+        return smiles
+
+    def get(self, key, default=None):
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+
+NICKNAMES = _Nicknames(FIXED_NICKNAMES)
 LABEL_TOKEN = r'[A-Z][a-z]*\d*'
 
 
@@ -58,10 +87,72 @@ def label_order(label, reverse):
     """The label's tokens in reading order for an atom bonded on its right (reverse: CO2Me -> MeO2C, NO2 -> O2N), and
     the index of the token that sits on the atom. Labels that do not split into chemical tokens (TMS, iPr) never turn."""
     import re
+    sign = re.search(r'[+\-−]+$', label)                     # the count before it stays with its group (NMe3)
+    if reverse and sign and sign.start() > 0:               # NMe3+ -> Me3N+: the charge stays at the end
+        stem, anchor = label_order(label[:sign.start()], True)
+        if len(stem) > 1:
+            return stem + [sign.group(0)], anchor
     toks = re.findall(LABEL_TOKEN + r'|[^A-Z]+', label)
     if reverse and len(toks) > 1 and ''.join(toks) == label and all(re.fullmatch(LABEL_TOKEN, t) and _token_ok(t) for t in toks):
         return toks[::-1], len(toks) - 1
+    whole =_nickname_tokens(label)                         # OTBS -> TBSO, NHBoc -> BocHN: a nickname turns as one
+    if reverse and whole and len(whole) > 1:
+        return whole[::-1], len(whole) - 1
+    if reverse and '(' in label:                            # N(CH3)2 -> (H3C)2N: a bracket turns as one piece
+        units = _label_units(re.findall(LABEL_TOKEN + r'|\(|\)\d*', label))
+        if units and ''.join(_flat(units)) == label:
+            out = _flat(_turned(units))
+            heavy = [k for k, t in enumerate(out) if re.fullmatch(LABEL_TOKEN, t) and t.rstrip('0123456789') != 'H']
+            return out, heavy[-1]
     return toks, 0
+
+
+def _nickname_tokens(label):
+    """label split into element tokens and whole nicknames (TBS, Boc, Ph ...), or None when it does not split so."""
+    import re
+    names = sorted((k for k in FIXED_NICKNAMES if k.isalpha() and len(k) > 1 and k[0].isupper()), key=len, reverse=True)
+    out, i = [], 0
+    while i < len(label):
+        nick = next((n for n in names if label.startswith(n, i) and not label[i + len(n):i + len(n) + 1].islower()), None)
+        if nick:
+            m = re.match(r'\d*', label[i + len(nick):])
+            out.append(nick + m.group(0)); i += len(nick) + len(m.group(0))
+            continue
+        m = re.match(LABEL_TOKEN, label[i:])
+        if not m or not _token_ok(m.group(0)):
+            return None
+        out.append(m.group(0)); i += len(m.group(0))
+    return out if any(t.rstrip('0123456789') in FIXED_NICKNAMES and len(t.rstrip('0123456789')) > 1 for t in out) else None
+
+
+def _label_units(toks):
+    """Tokens grouped by brackets: ['N', ['(', 'C', 'H3', ')2']]; None if they do not all read as chemistry."""
+    import re
+    stack = [[]]
+    for t in toks:
+        if t == '(':
+            stack.append(['('])
+        elif t.startswith(')'):
+            if len(stack) < 2:
+                return None
+            group = stack.pop() + [t]
+            stack[-1].append(group)
+        elif re.fullmatch(LABEL_TOKEN, t) and _token_ok(t):
+            stack[-1].append(t)
+        else:
+            return None
+    return stack[0] if len(stack) == 1 and len(stack[0]) > 1 else None
+
+
+def _turned(units):
+    out = []
+    for u in reversed(units):
+        out.append(['('] + _turned(u[1:-1]) + [u[-1]] if isinstance(u, list) else u)
+    return out
+
+
+def _flat(units):
+    return [t for u in units for t in (_flat(u) if isinstance(u, list) else [u])]
 
 
 def parse_label(text):
@@ -72,21 +163,98 @@ def parse_label(text):
     text = text.strip().replace('−', '-')
     if text in NICKNAMES:
         return ('nickname', text)
-    m = re.fullmatch(r'([A-Za-z][a-z]?)(?:H\d*)?\s*(\d*)\s*([+\-]*)', text)
+    low = {k.lower(): k for k in NICKNAMES}                 # the fixed nicknames: boc is Boc, not B-O-C
+    if text != text.upper() and text.lower() in low:
+        return ('nickname', low[text.lower()])
+    guess = case_guess(text)                                # all lower case: nh2 is NH2, not nihonium
+    if guess and guess != text:
+        what = parse_label(guess)
+        if what is not None:
+            return what
+    m = _ELEMENT_LABEL.fullmatch(text)
     if m:
         sym = m.group(1)[0].upper() + m.group(1)[1:].lower()
-        try:
-            ok = Chem.GetPeriodicTable().GetAtomicNumber(sym) > 0
-        except RuntimeError:
-            ok = False
+        ok = sym in _element_symbols()
         if ok:
-            signs = m.group(3)
-            n = int(m.group(2)) if m.group(2) else len(signs)
+            signs = m.group(5)
+            n = int(m.group(4)) if m.group(4) else len(signs)
+            after = label_charge(text)                      # O•+: the sign after the radical dot
+            if after is not None and not signs:
+                return ('element', sym, after)
             return ('element', sym, 0 if not signs else (n if signs[0] == '+' else -n))
     low = {k.lower(): k for k in NICKNAMES}
     if text.lower() in low:
         return ('nickname', low[text.lower()])
     return None
+
+
+RADICAL_MARKS = '•·.*'                                     # typed after a label: CH3•, CH2••, O•, N•+ (or . / *)
+_ELEMENT_LABEL = re.compile(r'([A-Za-z][a-z]?)(H(\d*))?\s*(\d*)\s*([+\-]*)\s*([•·.*]*)\s*(?:(\d*)\s*([+\-]*))?')
+
+
+def label_extras(text):
+    """(hydrogens typed, or None; unpaired electrons) of a typed element label: 'CH2' -> (2, 0), 'CH3•' -> (3, 1),
+    'C••' -> (None, 2), 'O•+' -> (None, 1), 'N' -> (None, 0). Nicknames and formulas: (None, 0)."""
+    text = text.strip().replace('−', '-')
+    guess = case_guess(text)
+    if guess:
+        text = guess
+    m = _ELEMENT_LABEL.fullmatch(text)
+    if not m or (m.group(1)[0].upper() + m.group(1)[1:].lower()) not in _element_symbols():
+        return None, 0
+    hs = None if m.group(2) is None else int(m.group(3) or 1)
+    return hs, min(len(m.group(6)), 2)
+
+
+def label_charge(text):
+    """The charge of a typed element label whose sign follows the radical dot ('O•+' -> 1), else None."""
+    m = _ELEMENT_LABEL.fullmatch(text.strip().replace('−', '-'))
+    if not m or not m.group(8):
+        return None
+    n = int(m.group(7)) if m.group(7) else len(m.group(8))
+    return n if m.group(8)[0] == '+' else -n
+
+
+# Two lower-case letters read as one symbol when a label is typed all in lower case (so3k, ch2cl, co2et); any other
+# pair is two one-letter elements, so co is C + O, never cobalt
+_LOWER_PAIRS = ('cl', 'br', 'na', 'li', 'mg', 'si', 'me', 'et', 'ph', 'ac', 'bn', 'bz', 'bu', 'pr', 'ts', 'tf', 'cy')
+
+
+def _element_symbols():
+    global _SYMBOLS
+    if _SYMBOLS is None:
+        from rdkit import Chem
+        table = Chem.GetPeriodicTable()
+        _SYMBOLS = {table.GetElementSymbol(z) for z in range(1, 119)}
+    return _SYMBOLS
+
+
+_SYMBOLS = None
+
+
+def case_guess(text):
+    """An all-lower-case label in capitals ChemDraw-style ('so3k' -> 'SO3K', 'ch2cl' -> 'CH2Cl', 'ome' -> 'OMe'),
+    or None when it has capitals already or cannot be read that way."""
+    import re
+    if not text or text != text.lower() or not re.search('[a-z]', text):
+        return None
+    element = _element_symbols().__contains__
+    out, k = [], 0
+    while k < len(text):
+        ch = text[k]
+        if not ch.isalpha():
+            out.append(ch); k += 1
+            continue
+        pair = text[k:k + 2]
+        if len(pair) == 2 and pair.isalpha() and pair in _LOWER_PAIRS:
+            out.append(pair.capitalize()); k += 2
+        elif element(ch.upper()):
+            out.append(ch.upper()); k += 1
+        elif len(pair) == 2 and pair.isalpha() and (element(pair.capitalize()) or pair.capitalize() in NICKNAMES):
+            out.append(pair.capitalize()); k += 2
+        else:
+            return None
+    return ''.join(out)
 
 
 @dataclass
@@ -100,6 +268,12 @@ class Atom:
     highlight: str = ''                                     # a coloured disc behind the atom ('' = none)
     charge_pos: list | None = None                          # where its charge sign was dragged: [dx, dy] from the
                                                             # atom in bond lengths; None = placed automatically
+    radical: int = 0                                        # unpaired electrons: 1 radical (•), 2 carbene / diradical
+    lone_pairs: int = 0                                     # lone pairs drawn as dot pairs: 0 none, -1 all it has,
+                                                            # n: that many
+    map: int = 0                                            # reaction atom-map number (0: none)
+    hcount: int | None = None                               # hydrogens typed with the label (CH2, NH): fixed, whatever
+                                                            # the bonds; None = the usual number for the valence
 
 
 @dataclass
@@ -126,6 +300,8 @@ class Arrow:
     kind: str = 'forward'                                   # one of ARROW_KINDS
     bend: float = 0.0                                       # curved arrows: bulge, as a fraction of the length (+/- side)
     color: str = ''
+    tail_on: list | None = None                             # electron-pushing arrows: [kind, id, dx, dy] - the tail
+    head_on: list | None = None                             # (head) stays at that atom / bond plus the offset
 
 
 @dataclass
@@ -139,9 +315,13 @@ class Text:
     italic: bool = False
     formula: bool = False                                   # numbers after letters drawn as subscripts (H2SO4)
     color: str = ''
+    on_arrow: list | None = None                            # reaction conditions: [arrow id, 'above' | 'below']
+    live: list = field(default_factory=list)                # a pasted analysis: the property keys it shows, kept up to
+                                                            # date with the structure in its group (chem.live_caption)
 
 
 SHAPE_KINDS = ('rect', 'roundrect', 'oval', 'line', 'brackets', 'parens', 'braces')
+BRACKET_KINDS = ('brackets', 'parens', 'braces')             # these can be polymer brackets (params['repeat'])
 # ChemDraw's other drawing elements and the orbitals (elements.py draws them): a circle (centre x1,y1, edge x2,y2),
 # an arc (chord x1,y1 -> x2,y2, params['angle'] 90 / 120 / 180 / 270), an orbital (node x1,y1, tip x2,y2,
 # params['type'] s / sigma / lobe / p / hybrid / dxy / dz2)
@@ -224,10 +404,18 @@ class Fill:
     color: str = '#FFF59D'
 
 
+@dataclass
+class Group:
+    """Objects that select, move and analyse as one (Object > Group): structures by their atoms (their bonds come with
+    them) and any arrows, captions, shapes, grids, sequences and plates, as [[kind, id]]."""
+    members: list = field(default_factory=list)
+
+
 KINDS = {'atom': Atom, 'bond': Bond, 'arrow': Arrow, 'text': Text, 'shape': Shape, 'grid': Grid, 'fill': Fill,
-         'seq': Sequence, 'tlc': TLC}
+         'seq': Sequence, 'tlc': TLC, 'group': Group}             # groups last: they point at the others
 PLURAL = {'atom': 'atoms', 'bond': 'bonds', 'arrow': 'arrows', 'text': 'texts', 'shape': 'shapes', 'grid': 'grids',
-          'fill': 'fills', 'seq': 'seqs', 'tlc': 'tlcs'}
+          'fill': 'fills', 'seq': 'seqs', 'tlc': 'tlcs', 'group': 'groups'}
+GROUPABLE = ('atom', 'arrow', 'text', 'shape', 'grid', 'seq', 'tlc')
 
 
 def angle_of(dx, dy):
@@ -250,6 +438,7 @@ class Doc:
         self.fills = {}
         self.seqs = {}
         self.tlcs = {}
+        self.groups = {}
         self.style = {}                                     # overrides of render.DEFAULT_STYLE
         self._next = 1
 
@@ -261,7 +450,7 @@ class Doc:
     def table(self, kind):
         return {'atom': self.atoms, 'bond': self.bonds, 'arrow': self.arrows, 'text': self.texts,
                 'shape': self.shapes, 'grid': self.grids, 'fill': self.fills, 'seq': self.seqs,
-                'tlc': self.tlcs}[kind]
+                'tlc': self.tlcs, 'group': self.groups}[kind]
 
     def add_atom(self, x, y, el='C', charge=0):
         i = self._id()
@@ -413,7 +602,8 @@ class Doc:
                 if elements.contains(s, x, y, r, BL=float(self.style.get('bond_length', 14.4))):
                     return i
                 continue
-            if s.style in ('filled', 'shaded', 'shadow') and x1 - r <= x <= x2 + r and y1 - r <= y <= y2 + r:
+            if (s.style in ('filled', 'shaded', 'shadow') or s.kind == 'image') and \
+                    x1 - r <= x <= x2 + r and y1 - r <= y <= y2 + r:       # a picture: anywhere on it
                 return i
             if s.kind == 'line':
                 d = seg_dist(x, y, s.x1, s.y1, s.x2, s.y2)
@@ -439,21 +629,24 @@ class Doc:
         base = VALENCE.get(at.el)
         if base is None:
             return None
+        r = at.radical
         if not at.charge:
-            return base
+            return tuple(v - r for v in base if v - r >= 0) if r else base
         if at.el == 'H':                                    # H+ and H- make no bond
             return (0,)
         e = VALENCE_ELECTRONS.get(at.el)
         if e is None:
             return tuple(v - abs(at.charge) for v in base if v - abs(at.charge) >= 0)
         e -= at.charge
-        return (max(0, min(e, 8 - e)),)
+        return (max(0, min(e, 8 - e) - r),)
 
     def implicit_h(self, a):
         """Hydrogens the atom carries without them being drawn (0 for elements without a usual valence and for
         nicknames, whose hydrogens are in the group)."""
         if self.atoms[a].label:
             return 0
+        if self.atoms[a].hcount is not None:                # typed with the label: CH2, NH ...
+            return self.atoms[a].hcount
         vals = self._valences(a)
         if not vals:
             return 0
@@ -476,10 +669,30 @@ class Doc:
                 return f'{at.label} attaches by one bond, but has {bonds}.'
             return ''
         vals = self._valences(a)
+        if at.hcount is not None:                           # the user said how many H: only too many is wrong
+            if vals and at.el in ('C', 'N', 'O', 'F', 'B') and bonds + at.hcount > 4:
+                return f'{at.el} with {at.hcount} H has room for {max(0, 4 - at.hcount)} bonds, but has {bonds}.'
+            return ''
         if vals and bonds > max(vals):
             charge = f' {"+" if at.charge > 0 else "−"}{abs(at.charge)}' if at.charge else ''
             return (f'{at.el}{charge} takes at most {max(vals)} bond{"s" if max(vals) != 1 else ""}, but has {bonds}.')
         return ''
+
+    def repeat_units(self, atom_ids=None):
+        """Polymer brackets: [(repeat label, atom ids inside the pair)] for each bracket / parenthesis pair given a
+        repeat count (Shape.params['repeat']: 'n', '3' ...) with atoms of atom_ids (None: any) inside it."""
+        out = []
+        for sh in self.shapes.values():
+            rep = str(sh.params.get('repeat', '')).strip() if sh.kind in BRACKET_KINDS else ''
+            if not rep:
+                continue
+            x1, x2 = sorted((sh.x1, sh.x2))
+            y1, y2 = sorted((sh.y1, sh.y2))
+            inside = {a for a, at in self.atoms.items() if (atom_ids is None or a in atom_ids)
+                      and x1 < at.x < x2 and y1 < at.y < y2}
+            if inside:
+                out.append((rep, inside))
+        return out
 
     def fragments(self, atom_ids=None):
         """Connected structures, as sorted lists of atom ids (only atoms in atom_ids, when given)."""
@@ -775,6 +988,47 @@ class Doc:
                 t = self.tlcs[i]; pts += [(t.x, t.y), (t.x + t.w, t.y + t.h)]
         return pts
 
+    def anchor(self, kind, i):
+        """Where an arrow attached to atom / bond i sits: the atom, or the bond's middle; None when it is gone."""
+        if kind == 'atom' and i in self.atoms:
+            return self.atoms[i].x, self.atoms[i].y
+        if kind == 'bond' and i in self.bonds:
+            a, b = self.atoms[self.bonds[i].a], self.atoms[self.bonds[i].b]
+            return (a.x + b.x) / 2, (a.y + b.y) / 2
+        return None
+
+    def attach_arrow_end(self, ar, end, item):
+        """Ties end ('tail' / 'head') of arrow ar to item (atom / bond), keeping where it is now as the offset."""
+        x, y = (ar.x1, ar.y1) if end == 'tail' else (ar.x2, ar.y2)
+        p = self.anchor(*item) if item else None
+        setattr(ar, end + '_on', [item[0], item[1], round(x - p[0], 4), round(y - p[1], 4)] if p else None)
+
+    def update_attached_arrows(self):
+        """Moves the attached ends of arrows with their atoms and bonds; an end whose atom / bond is gone comes loose."""
+        for ar in self.arrows.values():
+            for end in ('tail', 'head'):
+                on = getattr(ar, end + '_on')
+                if not on:
+                    continue
+                p = self.anchor(on[0], on[1])
+                if p is None:
+                    setattr(ar, end + '_on', None)
+                    continue
+                x, y = p[0] + on[2], p[1] + on[3]
+                if end == 'tail':
+                    ar.x1, ar.y1 = x, y
+                else:
+                    ar.x2, ar.y2 = x, y
+
+    def lone_pair_count(self, a):
+        """Lone pairs an atom has: (valence electrons - charge - bonds - H - unpaired) / 2 (O in water: 2)."""
+        at = self.atoms[a]
+        e = VALENCE_ELECTRONS.get(at.el)
+        if e is None or at.label:
+            return 0
+        free = e - at.charge - self.bond_sum(a) - self.implicit_h(a) - at.radical
+        return max(0, free // 2)
+
     def transform(self, sel, fn):
         """Apply fn(x, y) -> (x, y) to everything in sel."""
         for a in self.atoms_of(sel):
@@ -797,6 +1051,86 @@ class Doc:
                 (ax, ay), (bx, by) = fn(t.x, t.y), fn(t.x + t.w, t.y + t.h)
                 t.x, t.y, t.w, t.h = min(ax, bx), min(ay, by), abs(bx - ax), abs(by - ay)
 
+    # ------------------------------------------------------------------------------------------- groups
+    def group_of(self, item):
+        """The id of the group holding item (a bond: through its atoms), or None."""
+        kind, i = item
+        if kind == 'bond':
+            if i not in self.bonds:
+                return None
+            kind, i = 'atom', self.bonds[i].a
+        for g, grp in self.groups.items():
+            if [kind, i] in grp.members:
+                return g
+        return None
+
+    def group_items(self, g):
+        """Everything group g holds, as [(kind, id)]: its members and the bonds between its atoms."""
+        items = [(k, i) for k, i in self.groups[g].members if i in self.table(k)]
+        atoms = {i for k, i in items if k == 'atom'}
+        return items + [('bond', b) for b, bd in self.bonds.items() if bd.a in atoms and bd.b in atoms]
+
+    def with_groups(self, items):
+        """items, plus everything in the groups they belong to."""
+        out = set(items)
+        for g in {self.group_of(it) for it in items} - {None}:
+            out.update(self.group_items(g))
+        return out
+
+    def make_group(self, items):
+        """Groups the objects in items (whole structures: every atom of a structure touched), taking in any group
+        they already belong to; returns the group's id, or None for fewer than two objects."""
+        items = self.with_groups(items)
+        touched = self.atoms_of(items)
+        frags = [set(f) for f in self.fragments() if touched & set(f)]
+        atoms = set().union(*frags)
+        others = sorted((k, i) for k, i in items if k in GROUPABLE and k != 'atom' and i in self.table(k))
+        if len(frags) + len(others) < 2:
+            return None
+        for g in {self.group_of(it) for it in items} - {None}:
+            del self.groups[g]
+        g = self._id()
+        self.groups[g] = Group([['atom', a] for a in sorted(atoms)] + [[k, i] for k, i in others])
+        return g
+
+    def ungroup(self, items):
+        """Dissolves the groups that items belong to; returns how many."""
+        found = {self.group_of(it) for it in items} - {None}
+        for g in found:
+            del self.groups[g]
+        return len(found)
+
+    def join_group(self, item, near):
+        """Puts item into the group of the structure holding the atoms near (a new group of the two when it has
+        none), as a caption pasted under a structure stays with it."""
+        near = [a for a in near if a in self.atoms]
+        if not near:
+            return
+        g = self.group_of(('atom', near[0]))
+        if g is None:
+            atoms = set().union(*[set(f) for f in self.fragments() if set(near) & set(f)])
+            g = self._id()
+            self.groups[g] = Group([['atom', a] for a in sorted(atoms)])
+        if list(item) not in self.groups[g].members:
+            self.groups[g].members.append(list(item))
+
+    def prune_groups(self):
+        """Forgets deleted members (atoms bonded to a grouped structure join it); drops groups left with fewer than
+        two objects."""
+        if not self.groups:
+            return
+        frags = [set(f) for f in self.fragments()]
+        for g in list(self.groups):
+            grp = self.groups[g]
+            members = [[k, i] for k, i in grp.members if i in self.table(k)]
+            atoms = {i for k, i in members if k == 'atom'}
+            mine = [f for f in frags if f & atoms]
+            others = [m for m in members if m[0] != 'atom']
+            if len(mine) + len(others) < 2:
+                del self.groups[g]
+            else:
+                grp.members = [['atom', a] for a in sorted(set().union(*mine))] + others
+
     def all_items(self):
         return ([('atom', i) for i in self.atoms] + [('bond', i) for i in self.bonds] +
                 [('arrow', i) for i in self.arrows] + [('text', i) for i in self.texts] +
@@ -814,6 +1148,7 @@ class Doc:
             keep |= {('atom', a) for a in atoms}
             keep |= {('bond', i) for i, b in self.bonds.items() if b.a in atoms and b.b in atoms}
             keep |= {('fill', i) for i, f in self.fills.items() if set(f.atoms) <= atoms}
+            keep |= {('group', i) for i, g in self.groups.items() if all(tuple(m) in keep for m in g.members)}
 
         def items(kind):
             return [dict(id=i, **asdict(v)) for i, v in self.table(kind).items() if keep is None or (kind, i) in keep]
@@ -829,7 +1164,7 @@ class Doc:
 
     def insert_dict(self, d, dx=0.0, dy=0.0, keep_ids=False):
         """Add the items of a to_dict() result (shifted by dx, dy); returns the new items as [(kind, id)]."""
-        new, idmap = [], {}
+        new, idmap, moved = [], {}, {}
         for kind in KINDS:
             for item in d.get(PLURAL[kind], []):
                 item = dict(item)
@@ -842,6 +1177,18 @@ class Doc:
                     if any(a not in idmap for a in item['atoms']):
                         continue
                     item['atoms'] = [idmap[a] for a in item['atoms']]
+                if kind == 'group':                         # members follow their new ids; the lost are dropped
+                    item['members'] = [[k, moved[(k, j)]] for k, j in item.get('members', []) if (k, j) in moved]
+                    if not item['members']:
+                        continue
+                if kind == 'text' and item.get('on_arrow'):  # conditions follow their arrow's new id
+                    on = item['on_arrow']
+                    item['on_arrow'] = [moved[('arrow', on[0])], on[1]] if ('arrow', on[0]) in moved else None
+                if kind == 'arrow':                         # attached ends follow their atom / bond, or come loose
+                    for end in ('tail_on', 'head_on'):
+                        on = item.get(end)
+                        if on:
+                            item[end] = [on[0], moved[(on[0], on[1])], *on[2:]] if (on[0], on[1]) in moved else None
                 if kind == 'grid':                          # its columns point at atoms: follow them, drop the lost
                     for side in ('reactants', 'products'):
                         cols = []
@@ -863,8 +1210,10 @@ class Doc:
                     i = self._id()
                 if kind == 'atom':
                     idmap[old] = i
+                moved[(kind, old)] = i
                 self.table(kind)[i] = KINDS[kind](**item)
-                new.append((kind, i))
+                if kind != 'group':                         # a group is not an object to select
+                    new.append((kind, i))
         return new
 
     def copy(self):
@@ -903,6 +1252,10 @@ class Doc:
         for k in range(0, len(charged), 8):
             chunk = charged[k:k + 8]
             lines.append(f'M  CHG{len(chunk):3d}' + ''.join(f'{i:4d}{c:4d}' for i, c in chunk))
+        radicals = [(index[a], 2 if self.atoms[a].radical == 1 else 3) for a in order if self.atoms[a].radical]
+        for k in range(0, len(radicals), 8):                # 2 doublet (•), 3 triplet (carbene, ••)
+            chunk = radicals[k:k + 8]
+            lines.append(f'M  RAD{len(chunk):3d}' + ''.join(f'{i:4d}{c:4d}' for i, c in chunk))
         lines.append('M  END')
         return '\n'.join(lines) + '\n', order
 
@@ -936,6 +1289,8 @@ class Doc:
         for k, atom in enumerate(mol.GetAtoms()):
             i = self.add_atom(center[0] + (pos[k].x - cx) / L, center[1] - (pos[k].y - cy) / L, atom.GetSymbol(),
                               atom.GetFormalCharge())
+            if atom.GetNumRadicalElectrons():
+                self.atoms[i].radical = min(atom.GetNumRadicalElectrons(), 2)
             ids.append(i); new.append(('atom', i))
         for b in mol.GetBonds():
             bt = b.GetBondType()

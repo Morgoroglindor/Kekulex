@@ -306,6 +306,53 @@ def test_parse_units():
         stoich.parse('5 furlongs', 'mass')
 
 
+def test_small_amounts_are_not_shown_as_zero():
+    import stoich
+    show = lambda key, v: stoich.display(key, stoich.Cell(v), '.')
+    assert show('mass', 2.5e-7) == ('250.00', 'ng')
+    assert show('moles', 3.2e-9) == ('3.20', 'nmol')
+    assert show('volume', 4e-6) == ('4.00', 'nL')
+    assert show('molarity', 0.002) == ('2.00', 'mM')
+    assert show('molarity', 5e-8) == ('50.00', 'nM')
+    assert show('mass', 1.5e-14) == ('0.0150', 'pg')            # below the smallest unit: significant figures
+    assert show('equiv', 0.001234) == ('0.00123', '')
+    assert show('mass', 0.0) == ('0.00', 'g')
+    assert show('mass', 12.0) == ('12.00', 'g')
+    assert stoich.parse('50 nM', 'molarity') == pytest.approx(5e-8)
+    assert stoich.parse('3 nmol', 'moles') == pytest.approx(3e-9)
+    assert stoich.parse('250 ng', 'mass') == pytest.approx(2.5e-7)
+
+
+def test_selection_turns_with_the_rotation_handle(win):
+    c = win.canvas
+    doc = Doc()
+    a, b = doc.add_atom(0, 0), doc.add_atom(2, 0)
+    doc.add_bond(a, b)
+    c.set_doc(doc)
+    c.set_tool('select')
+    c.set_selection([('atom', a), ('atom', b), ('bond', next(iter(doc.bonds)))])
+    win.repaint()
+    rend = c.renderer()
+    handle, _r = c._rotate_handle(rend)
+    hx, hy = handle.x() / rend.BL, handle.y() / rend.BL
+    cx, cy = (doc.atoms[a].x + doc.atoms[b].x) / 2, doc.atoms[a].y          # set_doc may have moved it on the page
+    x0 = doc.atoms[a].x
+    r = math.hypot(hx - cx, hy - cy)
+    start = math.atan2(hy - cy, hx - cx)
+    end = start + math.radians(90)                              # a quarter turn, clockwise on screen (y down)
+    QTest.mousePress(c, QtCore.Qt.MouseButton.LeftButton, pos=c.to_px(hx, hy).toPoint())
+    for k in range(1, 11):
+        t = start + (end - start) * k / 10
+        QTest.mouseMove(c, c.to_px(cx + r * math.cos(t), cy + r * math.sin(t)).toPoint())
+    QTest.mouseRelease(c, QtCore.Qt.MouseButton.LeftButton, pos=c.to_px(cx + r * math.cos(end), cy + r * math.sin(end)).toPoint())
+    pa, pb = doc.atoms[a], doc.atoms[b]
+    assert math.hypot(pb.x - pa.x, pb.y - pa.y) == pytest.approx(2.0)
+    assert abs(pb.x - pa.x) < 0.15 and abs(pb.y - pa.y) == pytest.approx(2.0, abs=0.05)   # now upright
+    assert (pa.x + pb.x) / 2 == pytest.approx(cx) and (pa.y + pb.y) / 2 == pytest.approx(cy)
+    c.undo()                                                    # the whole turn is one undo step
+    assert (c.doc.atoms[a].x, c.doc.atoms[b].x) == pytest.approx((x0, x0 + 2))
+
+
 def test_stoichiometry_calculations(win):
     import stoich
     c = win.canvas
@@ -436,8 +483,12 @@ def test_pubchem_lookups(win, monkeypatch):
     monkeypatch.setattr(pubchem, 'name_for_inchikey', lambda key: ('phenol', 'phenol'))
     from PyQt6 import QtWidgets
     monkeypatch.setattr(QtWidgets.QInputDialog, 'getText', staticmethod(lambda *a, **k: ('phenol', True)))
+    win.set_tool('bond')
     win.name_to_structure()
     assert chem.analyse(win.canvas.doc).smiles == 'Oc1ccccc1'
+    c = win.canvas                                          # the new structure is selected, ready to drag or turn
+    assert c.tool == 'select' and c.selected_atoms() == set(c.doc.atoms)
+    assert c._rotate_handle(c.renderer()) is not None
     win.structure_to_name()
     assert any(t.text == 'phenol' for t in win.canvas.doc.texts.values())
 
@@ -573,3 +624,177 @@ def test_structure_to_name_caption(win):
     assert [t.text for t in c.doc.texts.values()] == ['4-nitrophenol']
     win.info.paste('name')
     assert len(c.doc.texts) == 2
+
+
+# ------------------------------------------------------------------------------------------------ groups
+def _salt_doc():
+    d = Doc()
+    d.insert_rdkit(chem.mol_from_text('C[NH3+]'), (2, 2))
+    d.insert_rdkit(chem.mol_from_text('[Cl-]'), (5, 2))
+    d.insert_rdkit(chem.mol_from_text('c1ccccc1'), (12, 2))
+    return d
+
+
+def test_group_selects_moves_and_analyses_as_one(win):
+    c = win.canvas
+    c.set_doc(_salt_doc())
+    doc = c.doc
+    salt = [f for f in doc.fragments() if len(f) <= 2]
+    c.set_tool('select')
+    c.set_selection([('atom', a) for f in salt for a in f])
+    c.group_selection()
+    assert len(doc.groups) == 1
+    c.set_selection([])
+    one = doc.atoms[salt[1][0]]
+    click(c, one.x, one.y)                                  # one member picks up the whole group
+    assert c.selected_atoms() == {a for f in salt for a in f}
+    before = {a: (doc.atoms[a].x, doc.atoms[a].y) for f in salt for a in f}
+    drag(c, one.x, one.y, one.x + 1, one.y + 2)
+    for a, (x, y) in before.items():                        # all of it moved, by the same amount
+        assert (doc.atoms[a].x - x, doc.atoms[a].y - y) == pytest.approx((1, 2), abs=0.15)
+    win.info.refresh()
+    assert win.info.which.currentText() == 'Group'
+    assert win.info.info.formula == 'CH6ClN'
+    labels = [win.info.which.itemText(k) for k in range(win.info.which.count())]
+    assert any(t.startswith('Group 1: CH6ClN') or t.startswith('Group 2: CH6ClN') for t in labels)
+    win.info.paste_all()                                    # the caption joins the group and moves with it
+    t = next(iter(doc.texts))
+    assert doc.group_of(('text', t)) is not None
+    c.ungroup_selection()
+    assert not doc.groups
+
+
+def test_groups_kept_in_files_and_copies(win):
+    d = _salt_doc()
+    salt = [f for f in d.fragments() if len(f) <= 2]
+    g = d.make_group([('atom', a) for f in salt for a in f])
+    back = Doc.from_dict(d.to_dict())
+    assert [sorted(map(tuple, x.members)) for x in back.groups.values()] == [sorted(map(tuple, d.groups[g].members))]
+    copy = Doc()
+    new = copy.insert_dict(d.to_dict(d.group_items(g)), 3, 0)
+    assert len(copy.groups) == 1 and all(k != 'group' for k, _i in new)
+    d.remove_atom(salt[1][0])                               # a group left with one structure dissolves
+    d.prune_groups()
+    assert not d.groups
+
+
+def test_caption_under_a_structure_moves_with_it(win):
+    c = win.canvas
+    c.set_doc(_doc('CCO'))
+    win.info.refresh()
+    win.info.paste('formula')
+    t = next(iter(c.doc.texts))
+    assert c.doc.group_of(('text', t)) is not None
+    win.info.tabs.setCurrentIndex(1)
+    win.info.refresh(keep_choice=True)
+    win.info.props.item(0, 0).setCheckState(QtCore.Qt.CheckState.Checked)       # LogP
+    win.info.props.item(2, 0).setCheckState(QtCore.Qt.CheckState.Checked)       # tPSA
+    win.info.paste_properties()
+    texts = [x.text for x in c.doc.texts.values()]
+    assert any(x.startswith('LogP:') and '\ntPSA:' in x for x in texts)
+
+
+def test_clean_up_keeps_every_bond_one_length():
+    import layout2d
+    from rdkit import Chem
+    for smiles in ('Nc1ncnc2c1ncn2[C@@H]1O[C@H](COP(=O)(O)OP(=O)(O)OP(=O)(O)O)[C@@H](O)[C@H]1O',
+                   'C1CN2CC3=CCO[C@H]4CC(=O)N5[C@H]6[C@H]4[C@H]3C[C@H]2[C@@]61C7=CC=CC=C75'):
+        mol = Chem.MolFromSmiles(smiles)
+        layout2d.compute(mol)
+        conf = mol.GetConformer()
+        lens = [layout2d._length(conf, b) for b in mol.GetBonds()]
+        med = sorted(lens)[len(lens) // 2]
+        assert min(lens) / med > 0.95 and max(lens) / med < 1.05
+
+
+def test_ctrl_g_groups_and_ctrl_shift_g_ungroups(win):
+    c = win.canvas
+    c.set_doc(_salt_doc())
+    c.set_tool('select')
+    c.select_all()
+    c.setFocus()
+    QTest.keyClick(c, QtCore.Qt.Key.Key_G, QtCore.Qt.KeyboardModifier.ControlModifier)
+    assert len(c.doc.groups) == 1
+    QTest.keyClick(c, QtCore.Qt.Key.Key_G, QtCore.Qt.KeyboardModifier.ControlModifier | QtCore.Qt.KeyboardModifier.ShiftModifier)
+    assert not c.doc.groups
+
+
+def test_ctrl_shift_k_cleans_up_from_anywhere_in_the_window(win):
+    calls = []
+    win.a_clean.triggered.disconnect()
+    win.a_clean.triggered.connect(lambda _c=False: calls.append(1))
+    for w in (win.canvas, win.smiles_box, win.info.which):
+        w.setFocus()
+        QTest.keyClick(w, QtCore.Qt.Key.Key_K, QtCore.Qt.KeyboardModifier.ControlModifier | QtCore.Qt.KeyboardModifier.ShiftModifier)
+    assert len(calls) == 3
+
+
+def test_claimed_keys():
+    import winkeys
+    assert winkeys.parse('Ctrl+Shift+K') == (0x4B, True, True, False)
+    claims = {winkeys.parse('Ctrl+Shift+K'): 'clean'}
+    assert winkeys.matches(claims, 0x4B, True, True, False) == 'clean'
+    assert winkeys.matches(claims, 0x4B, True, False, False) is None          # Ctrl+K stays Scale
+    assert winkeys.matches(claims, 0x4B, False, True, False) is None          # Shift+K stays the tBu hotkey
+    assert winkeys.matches(claims, 0x4B, True, True, False, win=True) is None
+    with pytest.raises(ValueError):
+        winkeys.parse('Ctrl+F5')
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='Windows keyboard hook')
+def test_key_hook_follows_the_window(win, qapp):
+    keys = qapp.kekulex_keys
+    keys.install()
+    assert keys.active
+    keys.release()
+    assert not keys.active
+
+
+@pytest.mark.parametrize('label, smiles', [
+    ('SO3K', 'O=S(=O)([O-])c1ccccc1.[K+]'), ('SO3Na', 'O=S(=O)([O-])c1ccccc1.[Na+]'), ('SO3H', 'O=S(=O)(O)c1ccccc1'),
+    ('SO3-', 'O=S(=O)([O-])c1ccccc1'), ('CO2Na', 'O=C([O-])c1ccccc1.[Na+]'), ('COOK', 'O=C([O-])c1ccccc1.[K+]'),
+    ('CH2CH3', 'CCc1ccccc1'), ('OC2H5', 'CCOc1ccccc1'), ('COCH3', 'CC(=O)c1ccccc1'), ('C(O)CH3', 'CC(=O)c1ccccc1'),
+    ('OCOCH3', 'CC(=O)Oc1ccccc1'), ('NHCOCH3', 'CC(=O)Nc1ccccc1'), ('CONH2', 'NC(=O)c1ccccc1'),
+    ('N(CH3)2', 'CN(C)c1ccccc1'), ('CH(CH3)2', 'CC(C)c1ccccc1'), ('(CH2)3CH3', 'CCCCc1ccccc1'),
+    ('PO3H2', 'O=P(O)(O)c1ccccc1'), ('P(O)(OH)2', 'O=P(O)(O)c1ccccc1'), ('PO(OEt)2', 'CCOP(=O)(OCC)c1ccccc1'),
+    ('SO2NH2', 'NS(=O)(=O)c1ccccc1'), ('SO2Cl', 'O=S(=O)(Cl)c1ccccc1'), ('SO3Me', 'COS(=O)(=O)c1ccccc1'),
+    ('B(OH)2', 'OB(O)c1ccccc1'), ('OCF3', 'FC(F)(F)Oc1ccccc1'), ('CH=CH2', 'C=Cc1ccccc1'), ('CN', 'N#Cc1ccccc1'),
+    ('NCO', 'O=C=Nc1ccccc1'), ('SCN', 'N#CSc1ccccc1'), ('CH2Ph', 'c1ccc(Cc2ccccc2)cc1'), ('C6H5', 'c1ccc(-c2ccccc2)cc1'),
+    ('NMe3+', 'C[N+](C)(C)c1ccccc1'), ('N(CH3)3+', 'C[N+](C)(C)c1ccccc1'), ('CH2CO2H', 'O=C(O)Cc1ccccc1'),
+])
+def test_condensed_labels_count_in_full(label, smiles):
+    from rdkit import Chem
+    d = _doc('c1ccccc1C')
+    a = next(i for i, at in d.atoms.items() if len(d.neighbors(i)) == 1)
+    what = model.parse_label(label)
+    assert what == ('nickname', label)
+    d.set_nickname(a, label)
+    assert chem.analyse(d).smiles == Chem.MolToSmiles(Chem.MolFromSmiles(smiles))
+    assert d.atoms[a].label == label                       # it stays short on the drawing
+
+
+def test_single_atom_labels_stay_elements():
+    assert model.parse_label('OH') == ('element', 'O', 0)
+    assert model.parse_label('NH3+') == ('element', 'N', 1)
+    assert model.parse_label('Na+') == ('element', 'Na', 1)
+    assert model.parse_label('Xq3') is None
+    assert 'SO3K' in model.NICKNAMES and 'OH' not in model.NICKNAMES and '' not in model.NICKNAMES
+
+
+def test_typing_a_condensed_label_on_a_carbon(win):
+    c = win.canvas
+    c.set_doc(_doc('c1ccccc1C'))
+    a = next(i for i, at in c.doc.atoms.items() if len(c.doc.neighbors(i)) == 1)
+    c.set_tool('text')
+    at = c.doc.atoms[a]
+    click(c, at.x, at.y)
+    QTest.keyClicks(c.editor[0], 'SO3K')
+    QTest.keyClick(c.editor[0], QtCore.Qt.Key.Key_Return)
+    assert c.doc.atoms[a].label == 'SO3K'
+    assert chem.analyse(c.doc).formula == 'C6H5KO3S'             # the CH3 became the SO3K
+
+
+def test_bracketed_labels_turn_round_on_the_left():
+    assert model.label_order('N(CH3)2', True) == (['(', 'H3', 'C', ')2', 'N'], 4)
+    assert model.label_order('(CH2)3CH3', True) == (['H3', 'C', '(', 'H2', 'C', ')3'], 4)
+    assert model.label_order('N(CH3)2', False)[1] == 0

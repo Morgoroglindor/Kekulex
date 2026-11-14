@@ -12,10 +12,12 @@ pictures as PNG, SVG and PDF or to the clipboard (Ctrl+Shift+C) for PowerPoint /
 import json
 import os
 import sys
+import time
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 
 import applog
+import autosave
 import biodraw
 import biopolymer
 import canvas as canvas_mod
@@ -29,6 +31,7 @@ import nmr
 import render
 import templates
 import theme
+import winkeys
 from canvas import Canvas
 from info_panel import InfoPanel
 from model import Doc
@@ -177,6 +180,31 @@ class StyleDialog(QtWidgets.QDialog):
         return s
 
 
+
+def claim_keys(window, text, action):
+    """Keeps a key that another program registers system-wide (Notion takes Ctrl+Shift+K) for this program while it is
+    in front: the main window's action runs, in whichever main window is active."""
+    app = QtWidgets.QApplication.instance()
+    keys = getattr(app, 'kekulex_keys', None)
+    if keys is None:
+        keys = app.kekulex_keys = winkeys.KeyClaim(app)
+        keys.windows = []
+    keys.windows.append(window)
+
+    def run():
+        live = [w for w in keys.windows if not sip_deleted(w)]
+        active = QtWidgets.QApplication.activeWindow()
+        target = next((w for w in live if w is active or (active is not None and w.isAncestorOf(active))), None)
+        target = target or (live[-1] if live else None)
+        if target is not None:
+            getattr(target, action).trigger()
+    keys.claim(text, run)
+
+
+def sip_deleted(obj):
+    from PyQt6 import sip
+    return sip.isdeleted(obj)
+
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
@@ -184,6 +212,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.dirty = False
         self.settings = theme.settings()
         self.canvas = Canvas(self)
+        self.autosave = autosave.Slot()                     # a copy of unsaved work, for crash recovery
+        self._revision = self._autosaved = 0
+        self.autosave_timer = QtCore.QTimer(self, interval=autosave.INTERVAL_S * 1000)
+        self.autosave_timer.timeout.connect(self.autosave_now)
+        self.autosave_timer.start()
         self.panel3d = None
         self.tabs = QtWidgets.QTabWidget()
         self.tabs.setDocumentMode(True)
@@ -340,6 +373,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.a_clean = self._act('C&lean up structure', self.canvas.clean_up, 'Ctrl+Shift+K', 'clean',
                                  'Lay out the selected structures (or all) again')
         self.a_clean.setShortcuts([QtGui.QKeySequence('Ctrl+Shift+K'), QtGui.QKeySequence('Ctrl+Alt+K')])
+        self.a_clean.setShortcutContext(QtCore.Qt.ShortcutContext.ApplicationShortcut)   # also from the program's other windows
+        claim_keys(self, 'Ctrl+Shift+K', 'a_clean')
         self.a_fit = self._act('&Fit to window', self.canvas.fit, 'Ctrl+0', 'fit', 'Show the whole drawing')
         self.a_send3d = self._act('Send to &3D', self.send_to_3d, 'Ctrl+3', 'send3d',
                                   'Show the selected molecule in the 3D tab')
@@ -448,6 +483,10 @@ class MainWindow(QtWidgets.QMainWindow):
         di = m.addMenu('&Distribute')
         di.addAction('&Horizontally', lambda: c.distribute('h'))
         di.addAction('&Vertically', lambda: c.distribute('v'))
+        if any(c.doc.group_of(it) is not None for it in c.sel):
+            m.addAction(self.a_ungroup)
+        else:
+            m.addAction(self.a_group)
         fr = m.addMenu('Add &Frame')
         for text, kind in (('&Rectangle', 'rect'), ('R&ounded rectangle', 'roundrect'), ('&Brackets', 'brackets'),
                            ('&Parentheses', 'parens'), ('Bra&ces', 'braces')):
@@ -467,6 +506,24 @@ class MainWindow(QtWidgets.QMainWindow):
             ch = am.addMenu('&Charge')
             for text, z in (('+1', 1), ('0', 0), ('−1', -1), ('+2', 2), ('−2', -2)):
                 ch.addAction(text, lambda z=z: c.edit_selected('atom', charge=z))
+            ch.addSeparator()
+            for text, z, r in (('Radical cation •+', 1, 1), ('Radical anion •−', -1, 1)):
+                ch.addAction(text, lambda z=z, r=r: c.edit_selected('atom', charge=z, radical=r))
+            rm = am.addMenu('&Radical')
+            for text, r in (('&None', 0), ('&Radical •', 1), ('&Carbene / diradical ••', 2)):
+                a_ = rm.addAction(text, lambda r=r: c.edit_selected('atom', radical=r))
+                a_.setCheckable(True)
+                a_.setChecked(all(c.doc.atoms[a].radical == r for a in atoms))
+            hm = am.addMenu('&Hydrogens')
+            for text, h in (('&Automatic (from the valence)', None), ('&0', 0), ('&1', 1), ('&2', 2), ('&3', 3)):
+                a_ = hm.addAction(text, lambda h=h: c.edit_selected('atom', hcount=h))
+                a_.setCheckable(True)
+                a_.setChecked(all(c.doc.atoms[a].hcount == h for a in atoms))
+            lm = am.addMenu('Lone &pairs')
+            for text, n in (('&None', 0), ('&All it has', -1), ('&1', 1), ('&2', 2), ('&3', 3)):
+                a_ = lm.addAction(text, lambda n=n: c.edit_selected('atom', lone_pairs=n))
+                a_.setCheckable(True)
+                a_.setChecked(all(c.doc.atoms[a].lone_pairs == n for a in atoms))
             if item and item[0] == 'atom':
                 am.addAction('Edit &label…', lambda a=item[1]: c.edit_label(a))
             if any(c.doc.atoms[a].label for a in atoms):
@@ -490,6 +547,9 @@ class MainWindow(QtWidgets.QMainWindow):
             for text, side in (('&Automatic', None), ('&Left', -1), ('&Right', 1), ('&Centred', 0)):
                 pm.addAction(text, lambda s=side: c.edit_selected('bond', side=s))
             bm.addAction('&Reverse direction', c.reverse_bonds)
+            target = item[1] if item and item[0] == 'bond' else (bonds[0] if len(bonds) == 1 else None)
+            if target is not None:
+                self._cleave_menu(bm.addMenu('Clea&ve (MS fragments)'), target)
             self._swatch_menu(bm, '&Highlight', HIGHLIGHT_COLORS, c.set_highlight)
         if 'text' in sel_kinds:
             tm = m.addMenu('Te&xt')
@@ -519,6 +579,12 @@ class MainWindow(QtWidgets.QMainWindow):
             for text, kind in (('&Brackets', 'brackets'), ('&Parentheses', 'parens'), ('Bra&ces', 'braces'),
                                ('&Rectangle', 'rect'), ('R&ounded rectangle', 'roundrect'), ('O&val', 'oval')):
                 km.addAction(text, lambda k=kind: self._set_shape_kind(k))
+            km.addSeparator()
+            km.addAction('Polymer &repeat count (n)…', lambda f=frames: self.set_repeat(f))
+        straight = [i for i in c.selected('arrow') if not c.doc.arrows[i].kind.startswith('curved')]
+        if len(straight) == 1:
+            m.addAction('Reaction &conditions (above / below the arrow)…',
+                        lambda a=straight[0]: self.conditions_dialog(a))
         if 'grid' in sel_kinds:
             gm = m.addMenu('T&able')
             gid = c.selected('grid')[0]
@@ -784,6 +850,40 @@ class MainWindow(QtWidgets.QMainWindow):
         sub.addAction('Custom…', lambda: self._custom_color(apply))
         sub.addAction('Remove', lambda: apply(''))
 
+    def _cleave_menu(self, menu, b):
+        """Bond > Cleave: each way of breaking bond b, named by its two fragments with their m/z."""
+        import ms
+        c = self.canvas
+        opts = ms.options(c.doc, b)
+        if not opts:
+            menu.addAction('(a ring bond: breaking it leaves one piece)').setEnabled(False)
+            return
+        for k, (spec, how) in enumerate(opts):
+            a, bb = (ms.describe(p) for p, _cut in ms.pieces(c.doc, b, spec))
+            menu.addAction(f'{a}   +   {bb}     ({how.split(":")[0]})', lambda k=k: c.cleave_bond(b, k))
+
+    def set_repeat(self, shapes):
+        """Makes bracket pairs polymer brackets: n (or 3, x, m ...) at the foot of the right bracket; the atoms
+        inside then count that many times in the formula and masses (a letter: shown as (unit)n, masses for 1)."""
+        c = self.canvas
+        shapes = [i for i in shapes if i in c.doc.shapes and c.doc.shapes[i].kind in model.BRACKET_KINDS]
+        if not shapes:
+            return
+        cur = str(c.doc.shapes[shapes[0]].params.get('repeat', '')) or 'n'
+        text, ok = QtWidgets.QInputDialog.getText(
+            self, 'Polymer repeat count', 'Repeat count of the unit inside the brackets\n'
+            '(a letter such as n, or a number; empty: plain brackets):', text=cur)
+        if not ok:
+            return
+        text = text.strip()
+        c.snapshot()
+        for i in shapes:
+            if text:
+                c.doc.shapes[i].params['repeat'] = text
+            else:
+                c.doc.shapes[i].params.pop('repeat', None)
+        c.edited()
+
     def _set_shape_kind(self, kind):
         c = self.canvas
         shapes = c.selected('shape')
@@ -890,8 +990,11 @@ class MainWindow(QtWidgets.QMainWindow):
         m.addAction(self._act('Save &as…', self.save_as, 'Ctrl+Shift+S'))
         m.addSeparator()
         m.addAction(self._act('&Insert SMILES / MOL…', self.insert_dialog, 'Ctrl+I'))
+        m.addAction(self._act('Insert &picture (PNG, JPEG …)…', self.insert_picture,
+                              tip='A picture on the drawing; Ctrl+V also pastes a copied picture'))
         m.addAction(self._act('Export &picture (PNG, SVG, PDF)…', self.export_picture, 'Ctrl+E'))
         m.addAction(self._act('Export &MOL…', self.export_mol))
+        m.addAction(self._act('&Batch export (SDF / SMILES list to pictures)…', self.batch_export))
         m.addSeparator()
         m.addAction(self._act('&Document settings (page size, style)…', self.style_dialog))
         m.addAction(self._act('Print Pre&view…', self.print_preview))
@@ -914,6 +1017,8 @@ class MainWindow(QtWidgets.QMainWindow):
         ca.addAction('&Three-letter text (H-Ala-Gly-OH)', lambda: self.copy_sequence('three'))
         m.addAction(self._act('&Delete', self.canvas.delete_selection))
         m.addAction(self._act('Select &all', self.canvas.select_all, 'Ctrl+A'))
+        m.addAction(self._act('&Find…', self.find_dialog, 'Ctrl+F',
+                              tip='Select captions, labels or a substructure (SMILES / SMARTS)'))
 
         m = mb.addMenu('&View')
         m.addAction(self._act('Zoom &in', lambda: self.canvas.set_zoom(self.canvas.zoom * 1.25), 'Ctrl+='))
@@ -942,6 +1047,11 @@ class MainWindow(QtWidgets.QMainWindow):
         theme.add_menu(self, m, self._retheme)
 
         m = mb.addMenu('&Object')
+        self.a_group = self._act('&Group', self.canvas.group_selection, 'Ctrl+G',
+                                 tip='The selected objects select, move and are analysed as one')
+        self.a_ungroup = self._act('&Ungroup', self.canvas.ungroup_selection, 'Ctrl+Shift+G')
+        m.addAction(self.a_group); m.addAction(self.a_ungroup)
+        m.addSeparator()
         al = m.addMenu('&Align')
         for text, how, key in (('&Left edges', 'left', 'Ctrl+Alt+L'), ('Horizontal &centres', 'hcenter', 'Ctrl+Alt+H'),
                                ('&Right edges', 'right', 'Ctrl+Alt+R'), ('&Top edges', 'top', 'Ctrl+Alt+T'),
@@ -950,6 +1060,8 @@ class MainWindow(QtWidgets.QMainWindow):
         di = m.addMenu('&Distribute')
         di.addAction(self._act('&Horizontally', lambda: self.canvas.distribute('h')))
         di.addAction(self._act('&Vertically', lambda: self.canvas.distribute('v')))
+        m.addAction(self._act('Arrange as reaction &scheme', self.canvas.arrange_scheme,
+                              tip='Structures and arrows in one row, centred on one line, evenly spaced'))
         m.addSeparator()
         self._transform_actions(m)
         m.addSeparator()
@@ -961,6 +1073,18 @@ class MainWindow(QtWidgets.QMainWindow):
         m.addAction(self._act('Show &analysis (formula, mass, m/z …)', self.canvas.add_analysis, 'Ctrl+Shift+A'))
         m.addAction(self._act('Analyze &stoichiometry', self.canvas.analyze_stoichiometry))
         m.addAction(self._act('Check s&tructure', self.check_structure))
+        fm = m.addMenu('&Forms')
+        fm.addAction(self._act('&Tautomers', lambda: self.canvas.add_forms('tautomers'),
+                               tip='The other tautomers of the selected structure, to its right'))
+        fm.addAction(self._act('&Resonance forms', lambda: self.canvas.add_forms('resonance'),
+                               tip='The other resonance structures of the selected structure, to its right'))
+        rm = m.addMenu('Reactio&n')
+        rm.addAction(self._act('&Map atoms', self.canvas.map_reaction,
+                               tip='Number matching atoms in reactants and products (:1, :2 ...)'))
+        rm.addAction(self._act('&Clear atom map', self.canvas.clear_map))
+        rm.addAction(self._act('Check &balance', self.check_balance))
+        m.addAction(self._act('Match m/&z…', self.match_mz, 'Ctrl+M',
+                              tip='A measured m/z against the structures drawn and elemental compositions'))
         if self.panel3d:
             m.addAction(self.a_send3d)
         m.addSeparator()
@@ -1028,6 +1152,49 @@ class MainWindow(QtWidgets.QMainWindow):
         s = render.style_of(self.canvas.doc)
         self.a_stereo.setChecked(bool(s['show_stereo']))
         self.a_numbers.setChecked(bool(s['show_atom_numbers']))
+
+    def conditions_dialog(self, arrow):
+        """Reagents and conditions over and under a reaction arrow."""
+        c = self.canvas
+        have = c.conditions_of(arrow)
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle('Reaction conditions')
+        form = QtWidgets.QFormLayout(dlg)
+        boxes = {}
+        for where, label in (('above', 'Above the arrow (reagents)'), ('below', 'Below (solvent, temperature, time)')):
+            e = QtWidgets.QPlainTextEdit()
+            e.setFixedHeight(56)
+            if have[where] is not None:
+                e.setPlainText(c.doc.texts[have[where]].text)
+            boxes[where] = e
+            form.addRow(label, e)
+        bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Ok |
+                                        QtWidgets.QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(dlg.accept); bb.rejected.connect(dlg.reject)
+        form.addRow(bb)
+        if dlg.exec():
+            c.set_conditions(arrow, boxes['above'].toPlainText(), boxes['below'].toPlainText())
+
+    def check_balance(self):
+        import reactions
+        arrows = [i for k, i in self.canvas.sel if k == 'arrow']
+        text, _diff = reactions.balance(self.canvas.doc, arrows[0] if arrows else None)
+        QtWidgets.QMessageBox.information(self, 'Check balance', text)
+
+    def match_mz(self):
+        from ms_dialog import MatchDialog
+        if getattr(self, '_match', None) is None:
+            self._match = MatchDialog(self)
+        self._match.show(); self._match.raise_(); self._match.activateWindow()
+        self._match.mz.setFocus()
+
+    def find_dialog(self):
+        text, ok = QtWidgets.QInputDialog.getText(
+            self, 'Find', 'Text in a caption, an atom label or element (OMe, Br),\n'
+            'or a substructure as SMILES / SMARTS (C(=O)O, c1ccccc1, [OX2H]):', text=getattr(self, '_last_find', ''))
+        if ok and text.strip():
+            self._last_find = text.strip()
+            self.canvas.find(text.strip())
 
     def check_structure(self):
         problems = self.canvas.check_structure()
@@ -1215,10 +1382,58 @@ class MainWindow(QtWidgets.QMainWindow):
     # ------------------------------------------------------------------------------------------- state
     def _on_change(self):
         self.dirty = True
+        self._revision += 1
         self._title()
         self._sync_toggles()
         self.a_undo.setEnabled(bool(self.canvas.undo_stack))
         self.a_redo.setEnabled(bool(self.canvas.redo_stack))
+
+    def autosave_now(self):
+        """The autosave timer: a copy of the drawing while it has unsaved changes made since the last copy."""
+        if not self.dirty or self.canvas.doc.is_empty():
+            self.autosave.clear()
+            return
+        if self._revision != self._autosaved and self.autosave.write(self.canvas.doc, self.path):
+            self._autosaved = self._revision
+
+    def _saved(self):
+        """The drawing on screen is what is on disk (or a new, empty one): no copy is needed."""
+        self.dirty = False
+        self.autosave.clear()
+        self._autosaved = self._revision
+
+    def recover(self):
+        """At start-up: offers the drawings an earlier Kekulex left unsaved when it stopped (a crash, a power cut);
+        the newest opens here, unsaved, so Save puts it back where it came from."""
+        found = autosave.orphans()
+        if not found:
+            return False
+        sed, meta = found[0]
+        when = time.strftime('%d %b %Y, %H:%M', time.localtime(meta['saved']))
+        name = os.path.basename(meta.get('path') or '') or 'an untitled drawing'
+        more = f'\n\n({len(found) - 1} more will be offered the next time Kekulex starts.)' if len(found) > 1 else ''
+        box = QtWidgets.QMessageBox(QtWidgets.QMessageBox.Icon.Question, APP_NAME,
+                                    f'Kekulex closed without saving {name} (last copy {when}).\n\n'
+                                    f'Open the recovered drawing?{more}', parent=self)
+        keep = box.addButton('Recover', QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+        box.addButton('Discard', QtWidgets.QMessageBox.ButtonRole.DestructiveRole)
+        box.exec()
+        if box.clickedButton() is not keep:
+            autosave.discard(sed)
+            return False
+        try:
+            with open(sed, encoding='utf-8') as f:
+                doc = Doc.from_dict(json.load(f))
+        except (OSError, ValueError) as e:
+            QtWidgets.QMessageBox.warning(self, APP_NAME, f'The recovered copy could not be read:\n{e}')
+            return False
+        self.canvas.set_doc(doc)
+        self.path = meta.get('path') or None
+        self._on_change()                                   # unsaved until the user saves it
+        autosave.discard(sed)
+        self.autosave_now()
+        self.statusBar().showMessage('Recovered drawing - save it to keep it.', 10000)
+        return True
 
     def _title(self):
         name = os.path.basename(self.path) if self.path else 'Untitled'
@@ -1241,6 +1456,8 @@ class MainWindow(QtWidgets.QMainWindow):
         theme.save_geometry(self, 'main')
         if self.panel3d:
             self.panel3d.wait()
+        self.autosave_timer.stop()
+        self.autosave.clear()                               # closed on purpose: nothing to recover
         e.accept()
 
     def _dir(self):
@@ -1269,7 +1486,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._maybe_save():
             self.path = None
             self.canvas.set_doc(Doc())
-            self.dirty = False
+            self._saved()
             self._title()
 
     def open(self, path=None):
@@ -1303,7 +1520,7 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(self, APP_NAME, f'Could not open {os.path.basename(path)}:\n{e}')
             return
         self.canvas.set_doc(doc)
-        self.dirty = False
+        self._saved()
         self._remember(path)
         self._title()
         self._sync_toggles()
@@ -1329,7 +1546,7 @@ class MainWindow(QtWidgets.QMainWindow):
         except OSError as e:
             QtWidgets.QMessageBox.warning(self, APP_NAME, f'Could not save:\n{e}')
             return False
-        self.dirty = False
+        self._saved()
         self._remember(self.path)
         self._title()
         return True
@@ -1378,6 +1595,10 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self.settings.setValue('last_dir', os.path.dirname(path))
         self.statusBar().showMessage(f'Exported {path}', 5000)
+
+    def batch_export(self):
+        from batch_dialog import BatchDialog
+        BatchDialog(self).exec()
 
     def export_mol(self):
         doc = self._subset()
@@ -1437,16 +1658,57 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.canvas.sel and self.copy():
             self.canvas.delete_selection()
 
+    def _select_inserted(self):
+        """What was just pasted or inserted stays selected, under the select tool, ready to drag or turn."""
+        if self.canvas.tool not in ('select', 'lasso'):
+            self.set_tool('select')
+
     def paste(self):
+        import pictures
         md = QtWidgets.QApplication.clipboard().mimeData()
         if md.hasFormat(MIME):
             self.canvas.insert_items(json.loads(bytes(md.data(MIME)).decode('utf-8')))
+            self._select_inserted()
+            return
+        img = pictures.from_mime(md)
+        if img is not None and not (md.hasText() and self._is_structure_text(md.text())):
+            self.canvas.insert_image(img)                   # a copied picture (or image file): placed as it is
+            self.statusBar().showMessage('Picture pasted: drag it to move it, Object > Scale to resize.', 6000)
         elif md.hasText():
             text = md.text().strip()
             if text.upper().startswith(('PEPTIDE1{', 'RNA1{')):     # HELM: a sequence
                 self.paste_sequence(None, text)
             else:
                 self.insert_text(md.text())
+
+    @staticmethod
+    def _is_structure_text(text):
+        """True when clipboard text reads as SMILES / MOL (then it wins over a picture copied with it)."""
+        text = (text or '').strip()
+        if not text or len(text) > 200000:
+            return False
+        if 'M  END' in text:
+            return chem.mol_from_text(text) is not None
+        lines = [x.strip() for x in text.replace('\r', '\n').split('\n') if x.strip()]
+        from rdkit import RDLogger
+        RDLogger.DisableLog('rdApp.*')
+        try:
+            return bool(lines) and len(lines) < 200 and all(chem.mol_from_text(x) is not None for x in lines)
+        finally:
+            RDLogger.EnableLog('rdApp.*')
+
+    def insert_picture(self):
+        """File > Insert picture: an image file placed on the drawing."""
+        import pictures
+        path, _f = QtWidgets.QFileDialog.getOpenFileName(
+            self, 'Insert picture', self._dir(), 'Pictures (' + ' '.join('*' + e for e in pictures.IMAGE_EXTS) + ')')
+        if not path:
+            return
+        img = QtGui.QImage(path)
+        if img.isNull():
+            QtWidgets.QMessageBox.warning(self, APP_NAME, f'Could not read {os.path.basename(path)} as a picture.')
+            return
+        self.canvas.insert_image(img)
 
     def insert_text(self, text):
         mols = []
@@ -1467,6 +1729,7 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.information(self, APP_NAME, 'This is not a SMILES or MOL structure:\n' + text[:200])
             return False
         self.canvas.insert_items(mols=mols)
+        self._select_inserted()
         return True
 
     def insert_smiles_box(self):
@@ -1481,10 +1744,17 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ------------------------------------------------------------------------------------------- drag and drop
     def dragEnterEvent(self, e):
-        if e.mimeData().hasUrls():
+        if e.mimeData().hasUrls() or e.mimeData().hasImage():
             e.acceptProposedAction()
 
     def dropEvent(self, e):
+        import pictures
+        img = pictures.from_mime(e.mimeData())
+        if img is not None:                                 # a picture (or image file) dropped: placed where it fell
+            pos = self.canvas.mapFrom(self, e.position().toPoint())
+            self.canvas.insert_image(img, self.canvas.to_model(QtCore.QPointF(pos)))
+            e.acceptProposedAction()
+            return
         for url in e.mimeData().urls():
             if url.isLocalFile():
                 self.open(url.toLocalFile())
@@ -1512,7 +1782,7 @@ class MainWindow(QtWidgets.QMainWindow):
             doc.style = dict(render.STYLE_SHEETS[name])
             self.path = None
             self.canvas.set_doc(doc)
-            self.dirty = False
+            self._saved()
             self._title()
 
     # ------------------------------------------------------------------------------------------- printing
@@ -1594,7 +1864,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 '<li><b>ChemDraw files</b>:.cdxml opens and saves (structures, captions, arrows, shapes, style); '
                 '.cdx opens the structures.</li>'
                 '<li><b>Select</b>: click, Shift+click or drag a box; drag to move; drop one atom on another to merge '
-                'them. Arrow keys nudge.</li>'
+                'them. Arrow keys nudge. Drag the round handle at the top right of the selection to turn it freely '
+                '(Shift: 15° steps).</li>'
                 '<li><b>SMILES box</b> (top): paste a SMILES and press Enter. Ctrl+V pastes SMILES or MOL text too.</li>'
                 '<li>Right or middle mouse button drag: pan. Ctrl+wheel: zoom. Ctrl+0: fit.</li></ul>'
                 '<h3>Figures</h3><p>Ctrl+Shift+C copies the selection (or everything) as a picture for PowerPoint or '
@@ -1639,6 +1910,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 ('Ctrl+R', 'rotate…'), ('Ctrl+] / Ctrl+[', 'rotate 15°'), ('Ctrl+K', 'scale…'),
                 ('Ctrl+E', 'export picture'), ('Ctrl+I', 'insert SMILES / MOL'),
                 ('Ctrl+= / Ctrl+- / Ctrl+0', 'zoom in / out / fit'), ('+ / -', 'charge (over an atom)'),
+                ('.', 'radical over an atom: •, then •• (carbene), then none'),
+                ('t', 'type the label of the atom under the mouse (CH2, CH3•, O•+ ...)'),
                 ('Enter', 'type the label of the atom under the mouse'),
                 ('Ctrl+Shift+E', 'expand label'), ('Ctrl+Shift+A', 'show analysis'),
                 ('Ctrl+Alt+L / H / R', 'align left / centres / right'), ('Ctrl+Alt+T / V / B', 'align top / middles / bottom'),
@@ -1672,6 +1945,8 @@ def main(argv=None):
     w = MainWindow()
     w.show()
     QtCore.QTimer.singleShot(0, w.canvas.fit)
+    if not os.environ.get('KEKULEX_NO_RECOVERY'):
+        w.recover()                                         # drawings left unsaved by a crash
     if len(argv) > 1 and os.path.exists(argv[1]):
         w.open(argv[1])
     return app.exec()

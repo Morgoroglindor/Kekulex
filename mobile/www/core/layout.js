@@ -155,6 +155,71 @@ function branch(nb, start, awayFrom) {
   return [...seen];
 }
 
+const CROWD = 0.8;                                           // as layout2d.CROWD
+
+/** Atoms laid almost on top of each other (two OH of a diphosphate): an end atom or a branch is turned about the atom
+ * it hangs on, in 15 degree steps, to where nothing crowds it (layout2d.uncrowd). */
+function uncrowd(g, fixed = new Set(), rounds = 30) {
+  const n = g.atoms.length;
+  if (!g.bonds.length) return;
+  const nb = adjacency(g);
+  const ringBond = new Set();
+  for (const r of findRings(g)) r.forEach((a, k) => { const b = r[(k + 1) % r.length]; ringBond.add(`${a},${b}`); ringBond.add(`${b},${a}`); });
+  const bond = median(g.bonds.map(b => length(g, b))) || 1;
+  const lab = g.atoms.map(a => a.el !== 'C');
+  const need = Array.from({ length: n }, (_, i) => Array.from({ length: n }, (_, j) =>
+    (i === j ? 0 : lab[i] && lab[j] ? 1.25 : lab[i] || lab[j] ? 0.9 : CROWD)));
+  for (let i = 0; i < n; i++) for (const [p] of nb[i]) { need[i][p] = need[p][i] = 0; for (const [q] of nb[i]) need[p][q] = 0; }
+  const xy = g.atoms.map(a => [a.x, a.y]);
+  const score = pts => {
+    let s = 0;
+    for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) if (need[i][j]) {
+      const d = Math.hypot(pts[i][0] - pts[j][0], pts[i][1] - pts[j][1]) / bond;
+      if (d < need[i][j]) s += need[i][j] - d;
+    }
+    return s;
+  };
+  const squeeze = (pts, i) => {
+    if (nb[i].length < 2) return 0;
+    const ang = nb[i].map(([m]) => (Math.atan2(pts[m][1] - pts[i][1], pts[m][0] - pts[i][0]) + 2 * Math.PI) % (2 * Math.PI)).sort((a, b) => a - b);
+    const gaps = ang.map((a, k) => ((ang[(k + 1) % ang.length] - a) + 2 * Math.PI) % (2 * Math.PI) || 2 * Math.PI);
+    const lim = 50 * Math.PI / 180;
+    return Math.max(0, lim - Math.min(...gaps)) / lim;
+  };
+  let total = score(xy), cur = xy;
+  const tried = new Set();
+  for (let r = 0; r < rounds && total > 1e-6; r++) {
+    let worst = null;
+    for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) if (need[i][j] && !tried.has(`${i},${j}`)) {
+      const d = Math.hypot(cur[i][0] - cur[j][0], cur[i][1] - cur[j][1]) / bond;
+      if (d < need[i][j] && (!worst || need[i][j] - d > worst[0])) worst = [need[i][j] - d, i, j];
+    }
+    if (!worst) break;
+    tried.add(`${worst[1]},${worst[2]}`);
+    let best = null;
+    for (const x of [worst[1], worst[2]]) {
+      for (const [pivot] of nb[x]) {
+        if (ringBond.has(`${x},${pivot}`)) continue;
+        const side = branch(nb, x, pivot);
+        if (side.some(a => fixed.has(a)) || side.length > n / 2) continue;
+        const base = squeeze(cur, pivot);
+        for (let step = 1; step < 24; step++) {
+          const turn = (15 * Math.floor((step + 1) / 2) * (step % 2 ? 1 : -1)) * Math.PI / 180, c = Math.cos(turn), s = Math.sin(turn);
+          const trial = cur.map(p => [p[0], p[1]]);
+          for (const a of side) {
+            const dx = cur[a][0] - cur[pivot][0], dy = cur[a][1] - cur[pivot][1];
+            trial[a] = [cur[pivot][0] + dx * c - dy * s, cur[pivot][1] + dx * s + dy * c];
+          }
+          const sc = score(trial) + 2 * Math.max(0, squeeze(trial, pivot) - base);
+          if (!best || sc < best[0] - 1e-9) best = [sc, trial];
+        }
+      }
+    }
+    if (best && best[0] < total - 1e-3) { total = best[0]; cur = best[1]; tried.clear(); }
+  }
+  cur.forEach((p, i) => { g.atoms[i].x = p[0]; g.atoms[i].y = p[1]; });
+}
+
 function placeSubstituents(g, nb, frozen, rings) {
   if (!rings.length) return;
   const ringBond = new Set();
@@ -385,6 +450,7 @@ function attempt(RD, smiles, gentle) {
     if (!gentle) {
       const rings2 = findRings(g);
       regularise(g, rings2, found ? new Set(found.fixed.keys()) : new Set());
+      uncrowd(g, found ? new Set(found.fixed.keys()) : new Set());
       if (found && found.name === 'betalamic') betalainCarboxylateByTheChain(RD, mol, g);
     } else if (g.atoms.length > heavy) {
       const nb = adjacency(g);                             // the hydrogens still need a place

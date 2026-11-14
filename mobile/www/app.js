@@ -1,5 +1,6 @@
 // app.js - Kekulex on a phone or tablet: the touch tools, the page, the sheets. The chemistry is in core/.
-import { analyse, insertLayout, insertMolblock, insertSmiles, parseLabel, putGroup, setNickname } from './core/chem.js';
+import { analyse, insertLayout, insertMolblock, insertSmiles, labelExtras, parseLabel, putGroup, refreshLiveCaptions, setNickname } from './core/chem.js';
+import { setRD } from './core/condensed.js';
 import { GROUPS, NICKNAMES, TEMPLATES } from './core/data.js';
 import { Doc, snapAngle } from './core/doc.js';
 import { bounds, DRAWN_SHAPES, paint, toCanvas } from './core/draw.js';
@@ -86,10 +87,15 @@ function snapshot() {
   redo = [];
 }
 function edited() {
+  doc.pruneGroups();
+  doc.updateAttachedArrows();                              // curved arrows drawn on the desktop stay on their atoms
   state.sel = new Set([...state.sel].filter(exists));
   renderSelBar(); schedule(); syncHistory();
   clearTimeout(infoTimer);
-  infoTimer = setTimeout(() => { updateFormula(); autosave(); }, 120);
+  infoTimer = setTimeout(() => {
+    try { refreshLiveCaptions(RD, doc); schedule(); } catch { /* a caption that cannot be worked out keeps its text */ }
+    updateFormula(); autosave();
+  }, 120);
 }
 function exists(key) {
   const [kind, id] = parseKey(key);
@@ -207,7 +213,7 @@ function selectMolecule(item) {
     const a = item[0] === 'atom' ? item[1] : doc.bonds.get(item[1]).a;
     for (const id of doc.fragmentOf(a)) add.add(key('atom', id));
   } else add.add(key(...item));
-  return add;
+  return doc.withGroups(add);                               // a grouped structure comes with its group
 }
 
 // ---------------------------------------------------------------------------------------------- touch
@@ -481,7 +487,12 @@ function setElement(a, text) {
   const at = doc.atoms.get(a);
   if (!parsed) return false;
   if (parsed[0] === 'nickname') setNickname(RD, doc, a, parsed[1]);
-  else { at.el = parsed[1]; at.charge = parsed[2]; at.label = ''; }
+  else {
+    at.el = parsed[1]; at.charge = parsed[2]; at.label = '';
+    const [hs, radical] = labelExtras(text);                // CH2, CH3•, O•+: typed H and unpaired electrons
+    at.radical = radical; at.hcount = null;
+    if (hs !== null && hs !== doc.implicitH(a)) at.hcount = hs;
+  }
   return true;
 }
 
@@ -873,6 +884,7 @@ async function main() {
   try {
     RD = await window.initRDKitModule({ locateFile: () => 'rdkit/RDKit_minimal.wasm' });
     RD.prefer_coordgen(true);
+    setRD(RD);
   } catch (e) {
     splash.textContent = `The chemistry module did not start: ${e?.message || e}`;
     return;

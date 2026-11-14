@@ -5,12 +5,57 @@ const K = { font: 10 / 14.4, line: 0.6 / 14.4, bold: 2 / 14.4, hash: 2.5 / 14.4,
 export const FONT = 'Arial, Roboto, "Noto Sans", sans-serif';
 const SUB = 0.75;
 
-function chargeGlyph(z) { return (Math.abs(z) === 1 ? '' : Math.abs(z)) + (z > 0 ? '+' : '−'); }
+import { NICKNAMES, VALENCE } from './data.js';
 
+function chargeGlyph(z) { return (Math.abs(z) === 1 ? '' : Math.abs(z)) + (z > 0 ? '+' : '−'); }
+/** Radical dots and charge beside an atom: •, ••, +, •+, 2−. */
+function signGlyph(at) { return '•'.repeat(at.radical || 0) + (at.charge ? chargeGlyph(at.charge) : ''); }
+
+const TOKEN = /^[A-Z][a-z]*\d*$/;
+const tokenOk = t => { const l = t.replace(/\d+$/, ''); return !!VALENCE[l] || !!NICKNAMES[l] || ['Mg', 'Li', 'Na', 'K', 'Zn', 'Cu'].includes(l); };
+
+/** The label's tokens in reading order for an atom bonded on its right (CO2Me -> MeO2C, N(CH3)2 -> (H3C)2N) and the
+ * index of the token on the atom (model.label_order). */
 function tokens(label, reverse) {
+  const sign = /[+\-−]+$/.exec(label);
+  if (reverse && sign && sign.index > 0) {                 // NMe3+ -> Me3N+: the charge stays at the end
+    const [stem, anchor] = tokens(label.slice(0, sign.index), true);
+    if (stem.length > 1) return [[...stem, sign[0]], anchor];
+  }
   const toks = label.match(/[A-Z][a-z]*\d*|[^A-Z]+/g) || [label];
-  const ok = t => /^[A-Z][a-z]*\d*$/.test(t);
-  if (reverse && toks.length > 1 && toks.every(ok)) return [[...toks].reverse(), toks.length - 1];
+  if (reverse && toks.length > 1 && !toks.every(t => TOKEN.test(t) && tokenOk(t))) {   // OTBS -> TBSO: a nickname turns as one
+    const names = Object.keys(NICKNAMES).filter(k => /^[A-Z][A-Za-z]+$/.test(k)).sort((a, b) => b.length - a.length);
+    const out = [];
+    let i = 0, ok = true, nick = false;
+    while (i < label.length && ok) {
+      const n = names.find(k => label.startsWith(k, i) && !/[a-z]/.test(label[i + k.length] || ''));
+      if (n) { const d = /^\d*/.exec(label.slice(i + n.length))[0]; out.push(n + d); i += n.length + d.length; nick = true; continue; }
+      const m = /^[A-Z][a-z]*\d*/.exec(label.slice(i));
+      if (!m || !tokenOk(m[0])) { ok = false; break; }
+      out.push(m[0]); i += m[0].length;
+    }
+    if (ok && nick && out.length > 1) return [[...out].reverse(), out.length - 1];
+  }
+  if (reverse && toks.length > 1 && toks.join('') === label && toks.every(t => TOKEN.test(t) && tokenOk(t))) return [[...toks].reverse(), toks.length - 1];
+  if (reverse && label.includes('(')) {                     // a bracket turns round as one piece
+    const parts = label.match(/[A-Z][a-z]*\d*|\(|\)\d*/g) || [];
+    const stack = [[]];
+    let ok = parts.join('') === label;
+    for (const t of parts) {
+      if (!ok) break;
+      if (t === '(') stack.push(['(']);
+      else if (t.startsWith(')')) { if (stack.length < 2) { ok = false; break; } const g = stack.pop(); g.push(t); stack[stack.length - 1].push(g); }
+      else if (TOKEN.test(t) && tokenOk(t)) stack[stack.length - 1].push(t);
+      else ok = false;
+    }
+    if (ok && stack.length === 1 && stack[0].length > 1) {
+      const turned = units => [...units].reverse().map(u => (Array.isArray(u) ? ['(', ...turned(u.slice(1, -1)), u[u.length - 1]] : u));
+      const flat = units => units.flatMap(u => (Array.isArray(u) ? flat(u) : [u]));
+      const out = flat(turned(stack[0]));
+      const heavy = out.map((t, k) => [t, k]).filter(([t]) => TOKEN.test(t) && t.replace(/\d+$/, '') !== 'H').map(([, k]) => k);
+      if (heavy.length) return [out, heavy[heavy.length - 1]];
+    }
+  }
   return [toks, 0];
 }
 
@@ -33,10 +78,10 @@ function labelOf(ctx, doc, a, BL, showCarbons = false) {
       if (p.wd) pieces.push([p.digits, x + p.w, base + 0.28 * fs, small]);
       x += p.w + p.wd;
     }
-    if (at.charge) pieces.push([chargeGlyph(at.charge), x + 0.02 * BL, base - ch + 0.15 * fs, small]);
+    if (at.charge || at.radical) pieces.push([signGlyph(at), x + 0.02 * BL, base - ch + 0.15 * fs, small]);
     return { pieces, hw: aw / 2 + margin, hh: ch / 2 + margin };
   }
-  if (at.el === 'C' && nb.length && !at.charge && !showCarbons) return null;
+  if (at.el === 'C' && nb.length && !at.charge && !at.radical && (at.hcount === null || at.hcount === undefined) && !showCarbons) return null;
   const ws = width(at.el, fs), x0 = cx - ws / 2;
   pieces.push([at.el, x0, base, fs]);
   let rightEnd = x0 + ws;
@@ -61,8 +106,8 @@ function labelOf(ctx, doc, a, BL, showCarbons = false) {
       if (count) pieces.push([count, cx + wh / 2, hy + 0.28 * fs, small]);
     }
   }
-  if (at.charge) {
-    const glyph = chargeGlyph(at.charge);
+  if (at.charge || at.radical) {
+    const glyph = signGlyph(at);
     if (at.charge_pos) pieces.push([glyph, cx + at.charge_pos[0] * BL - width(glyph, small) / 2, cy + at.charge_pos[1] * BL + ch * SUB / 2, small]);
     else pieces.push([glyph, rightEnd + 0.02 * BL, base - ch + 0.1 * fs, small]);
   }

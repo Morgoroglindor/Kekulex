@@ -71,6 +71,7 @@ BOND_STYLE_KEYS = {'b': 'bold', 'B': 'bold', 'd': 'dashed', 'D': 'dashed', 'y': 
 TOOL_KEYS = {'g': 'tlc', 'G': 'orb:p:shaded', 'j': 'benzene', 'J': 'cyclopentadiene', 'x': 'bond1', 'X': 'chain', 'e': 'arrow', 't': 'text',
              ' ': 'select'}
 DRAG_PX = 4                                                 # the mouse must move this far for a press to be a drag
+ROTATE_GAP_PX, ROTATE_RADIUS_PX = 12, 7                     # the selection's rotation handle, in screen pixels
 PAGE_BG, PAGE_SHADOW = QColor('#C8CCD1'), QColor(0, 0, 0, 40)
 HINTS = {
     'lasso': 'Drag around what to select, free-hand (Shift adds); drag the selection to move it. Right-click: object menu.',
@@ -94,7 +95,8 @@ HINTS = {
     'tlc': 'Drag a TLC plate (its width sets the lanes) or click; drag a spot to change its Rf (Shift: resize, '
            'Ctrl: copy to another lane); right-click for lanes and spots, double-click to type the Rf values.',
     'bio': 'Click for the default size, or drag (membranes, DNA, helices and mRNA grow more subunits as they get longer).',
-    'text': 'Click empty space to type a caption, click an atom to type its label (N, OH, OMe, Boc, CO2H ...).',
+    'text': 'Click empty space to type a caption, click an atom - or just point at it and type - for its label (N, OH, SO3K, CO2H ...). '
+            'With any tool, t over an atom types its label.',
 }
 
 
@@ -236,12 +238,50 @@ class Canvas(QWidget):
     def edited(self, record=True):
         """Call after the drawing changed (snapshot() first)."""
         self._renderer = None
+        self.doc.prune_groups()
+        self.doc.update_attached_arrows()
+        self.refresh_live_captions()
         self.sel = {(k, i) for k, i in self.sel if i in self.doc.table(k)}
         if self.hover and self.hover[1] not in self.doc.table(self.hover[0]):
             self.hover = None
         self.update()
         self.changed.emit()
         self.selection_changed.emit()
+
+    def refresh_live_captions(self):
+        """Pasted analysis captions (Text.live) follow the structure in their group: a changed atom, bond or label
+        rewrites them, as ChemDraw's analysis labels do."""
+        doc = self.doc
+        live = [i for i, t in doc.texts.items() if t.live]
+        if not live:
+            return
+        import chem
+        from dataclasses import asdict
+        cache = self.__dict__.setdefault('_live_cache', {})
+        for i in live:
+            g = doc.group_of(('text', i))
+            if g is None:
+                continue
+            atoms = sorted(a for k, a in doc.group_items(g) if k == 'atom')
+            if not atoms:
+                continue
+            aset = set(atoms)
+            sig = (tuple(doc.texts[i].live),
+                   tuple((a, tuple((k, v) for k, v in asdict(doc.atoms[a]).items() if k not in ('x', 'y')))
+                         for a in atoms),
+                   tuple(sorted((b, bd.a, bd.b, bd.order, bd.stereo) for b, bd in doc.bonds.items()
+                                if bd.a in aset or bd.b in aset)))
+            if sig not in cache:
+                if len(cache) > 200:
+                    cache.clear()
+                try:
+                    cache[sig] = chem.live_caption(doc, aset, doc.texts[i].live)
+                except Exception:
+                    cache[sig] = None
+            text = cache[sig]
+            if text is not None and text != doc.texts[i].text:
+                doc.texts[i].text = text
+                self._renderer = None
 
     def undo(self):
         self.commit_editor()
@@ -292,8 +332,48 @@ class Canvas(QWidget):
             if atom in comp:
                 atoms = set(comp)
                 items = [('atom', a) for a in atoms] + [('bond', i) for i, b in self.doc.bonds.items() if b.a in atoms]
-                self.set_selection(items)
+                self.set_selection(self.doc.with_groups(items))
                 return
+
+    # ------------------------------------------------------------------------------------------- groups
+    def group_selection(self):
+        """Object > Group: the selected objects select, move, turn and analyse as one."""
+        if not self.sel:
+            self.message.emit('Select the objects to group first.')
+            return
+        self.snapshot()
+        g = self.doc.make_group(self.sel)
+        if g is None:
+            self.undo_stack.pop()
+            self.message.emit('Select two or more objects (structures, captions, arrows, shapes) to group.')
+            return
+        self.sel = set(self.doc.group_items(g))
+        self.edited()
+        self.message.emit('Grouped: they now select, move and are analysed together. Object > Ungroup separates them.')
+
+    def ungroup_selection(self):
+        self.snapshot()
+        n = self.doc.ungroup(self.sel)
+        if not n:
+            self.undo_stack.pop()
+            self.message.emit('Nothing selected is in a group.')
+            return
+        self.edited()
+        self.message.emit(f'Ungrouped ({n} group{"s" if n > 1 else ""}).')
+
+    def analysis_units(self, atoms):
+        """The structures holding these atoms, as atom sets; grouped structures count as one (a salt, a mixture)."""
+        units, seen = [], set()
+        for comp in self.doc.fragments():
+            comp = set(comp)
+            if not (atoms & comp) or comp & seen:
+                continue
+            g = self.doc.group_of(('atom', min(comp)))
+            if g is not None:
+                comp = {i for k, i in self.doc.groups[g].members if k == 'atom' and i in self.doc.atoms}
+            seen |= comp
+            units.append(comp)
+        return units
 
     def delete_selection(self):
         if not self.sel:
@@ -304,6 +384,26 @@ class Canvas(QWidget):
                 self.doc.remove(kind, i)
         self.sel.clear()
         self.edited()
+
+    def insert_image(self, img, at=None):
+        """A picture (QImage) on the drawing at its own size (at most LARGEST_PT): at (x, y) in bond lengths - its
+        centre - or right of what is there; selected. Returns the shape id."""
+        import pictures
+        BL = render.style_of(self.doc)['bond_length']
+        w, h = pictures.natural_size(img, BL)
+        if at is None:
+            r = render.Renderer(self.doc).bounds()
+            x = (r.right() / BL + 2) if not r.isNull() else 108 / BL
+            y = (r.center().y() / BL - h / 2) if not r.isNull() else 144 / BL
+        else:
+            x, y = at[0] - w / 2, at[1] - h / 2
+        self.snapshot()
+        i = pictures.add(self.doc, img, x, y, BL)
+        self.sel = {('shape', i)}
+        self.edited()
+        self.selection_changed.emit()
+        self.ensure_visible()
+        return i
 
     def insert_items(self, items_dict=None, mols=()):
         """Paste: a to_dict() result and / or RDKit molecules, placed right of what is there (on an empty page: near
@@ -332,6 +432,7 @@ class Canvas(QWidget):
             new += items
         self.sel = set(new)
         self.edited()
+        self.selection_changed.emit()
         self.ensure_visible()
 
     # ------------------------------------------------------------------------------------------- biopolymers
@@ -634,23 +735,141 @@ class Canvas(QWidget):
         molecular weight and elemental analysis - like a property label."""
         import chem
         atoms = self.selected_atoms() or set(self.doc.atoms)
-        frags = [c for c in self.doc.fragments() if atoms & set(c)]
+        frags = self.analysis_units(atoms)
         if not frags:
             self.message.emit('Draw a structure first.')
             return
         self.snapshot()
         for comp in frags:
-            info = chem.analyse(self.doc, comp)
-            peaks = chem.isotope_pattern(info.counts, 0)[:3]
-            mz = ', '.join(f'{m:.2f} ({p:.1f}%)' for m, p in peaks)
-            text = (f'Chemical Formula: {info.formula}{chem.charge_text(info.charge)}\nExact Mass: {info.exact:.2f}\n'
-                    f'm/z: {mz}\nMolecular Weight: {info.average:.2f}\nElemental Analysis: {info.analysis}')
-            self._caption_under(comp, text, True)
+            keys = list(chem.ANALYSIS_KEYS)
+            self._caption_under(comp, chem.live_caption(self.doc, set(comp), keys) or '', True, attach=True,
+                                live=keys)
         self.edited()
 
-    def add_caption_below(self, atoms, text, formula=False):
+    def cleave_bond(self, b, k):
+        """Breaks bond b the k-th way of ms.options (A+ + B•, A• + B•, inductive ...): the two fragments are drawn
+        under the structure, after an arrow, each with its formula and m/z (live captions). Returns the new items."""
+        import ms
+        doc = self.doc
+        opts = ms.options(doc, b)
+        if not (0 <= k < len(opts)):
+            self.message.emit('A bond in a ring: breaking it leaves one piece.')
+            return []
+        spec = opts[k][0]
+        parts = ms.pieces(doc, b, spec)
+        parent = ms.sides(doc, b)
+        parent = parent[0] | parent[1]
+        rend = self.renderer()
+        BL = rend.BL
+        box = QRectF()
+        for a in parent:
+            r = rend.item_rect('atom', a)
+            box = r if box.isNull() else box.united(r)
+        for kind in ('text', 'shape'):                      # below its own captions too
+            for i in doc.table(kind):
+                r = rend.item_rect(kind, i)
+                if r.intersects(box.adjusted(0, 0, 0, 4 * BL)) and r.top() >= box.top():
+                    box = box.united(r)
+        cx, bottom = box.center().x() / BL, box.bottom() / BL
+        self.snapshot()
+        new = []
+        j = doc.add_arrow(cx, bottom + 0.5, cx, bottom + 2.0, 'forward')
+        new.append(('arrow', j))
+        top = bottom + 3.0
+        blocks = []                                         # each piece with its caption, placed apart first
+        for k, (p, _cut) in enumerate(parts):
+            xs = [at.x for at in p.atoms.values()]
+            y0 = min(at.y for at in p.atoms.values())
+            items = doc.insert_dict(p.to_dict(), cx + 60 * (k + 1) - min(xs), top - y0)
+            atoms = {i for kk, i in items if kk == 'atom'}
+            self._renderer = None
+            cap = self._caption_under(atoms, ms.describe(doc, atoms, chr(10)), True, attach=True, live=['ms'])
+            blocks.append(items + [('text', cap)])
+        self._renderer = None
+        rend = self.renderer()
+
+        def rect(items):
+            r = QRectF()
+            for it in items:
+                if it[0] != 'bond':
+                    ir = rend.item_rect(*it)
+                    r = ir if r.isNull() else r.united(ir)
+            return r
+        rects = [rect(b) for b in blocks]
+        gap = 1.6 * BL
+        total = sum(r.width() for r in rects) + gap
+        x = cx * BL - total / 2
+        for items, r in zip(blocks, rects):                 # side by side, the row centred under the arrow
+            dx = (x - r.left()) / BL
+            doc.transform(items, lambda px, py: (px + dx, py))
+            x += r.width() + gap
+            new += items
+        self._renderer = None
+        rend = self.renderer()
+        atom_rects = [rect([it for it in b if it[0] == 'atom']) for b in blocks]
+        plus_x = (atom_rects[0].right() + atom_rects[1].left()) / 2 / BL
+        mid_y = sum(r.center().y() for r in atom_rects) / 2 / BL
+        size = render.style_of(doc)['font_size'] * 1.3
+        t = doc.add_text(plus_x, mid_y - size * 0.62 / BL, '+', align='center', size=size)
+        new.append(('text', t))
+        self._renderer = None
+        row = [it for it in new if it != ('arrow', j)]
+        if self.push_clear(row):                            # below earlier pieces: the arrow reaches down to the row
+            rend = self.renderer()
+            top = min(rend.item_rect(*it).top() for it in row if it[0] != 'bond') / BL
+            doc.arrows[j].y2 = max(doc.arrows[j].y1 + 1.0, top - 0.4)
+            self._renderer = None
+        self.sel = set(new)
+        self.edited()
+        return new
+
+    def push_clear(self, items, step=0.5, most=80):
+        """Moves items (one block) down until they cover nothing else drawn: other captions, structures, arrows, shapes,
+        grids. Returns how far (bond lengths)."""
+        doc = self.doc
+        mine = set(items)
+        moved = 0.0
+        for _k in range(most):
+            rend = self.renderer()
+            box = QRectF()
+            for it in items:
+                if it[0] != 'bond' and it[1] in doc.table(it[0]):
+                    r = rend.item_rect(*it)
+                    box = r if box.isNull() else box.united(r)
+            if box.isNull():
+                return moved
+            box = box.adjusted(-1, -1, 1, 1)
+            hit = False
+            for kind in ('atom', 'text', 'arrow', 'shape', 'grid'):
+                for i in doc.table(kind):
+                    if (kind, i) in mine:
+                        continue
+                    if box.intersects(rend.item_rect(kind, i)):
+                        hit = True
+                        break
+                if hit:
+                    break
+            if not hit:
+                for key, region, brect in rend.bond_regions():   # a bond crossing it, both its atoms clear
+                    if key[0] != 'bond':
+                        continue
+                    bd = doc.bonds[key[1]]
+                    if ('atom', bd.a) in mine or ('atom', bd.b) in mine:
+                        continue
+                    if brect.intersects(box) and region.intersects(box):
+                        hit = True
+                        break
+            if not hit:
+                return moved
+            doc.transform(items, lambda x, y: (x, y + step))
+            moved += step
+            self._renderer = None
+        return moved
+
+    def add_caption_below(self, atoms, text, formula=False, live=None):
         """A centred caption under the structure(s) holding these atoms, or under a sequence when atoms is
-        ('seq', id) (the analysis window's Paste)."""
+        ('seq', id) (the analysis window's Paste). live: the property keys of a pasted analysis, kept up to date
+        with the structure (chem.live_caption)."""
         if isinstance(atoms, tuple):
             if atoms[1] not in self.doc.seqs:
                 return
@@ -659,12 +878,15 @@ class Canvas(QWidget):
             if not atoms:
                 return
         self.snapshot()
-        self._caption_under(atoms, text, formula)
+        self._caption_under(atoms, text, formula, attach=True, live=live)
         self.edited()
 
-    def _caption_under(self, atoms, text, formula):
+    def _caption_under(self, atoms, text, formula, attach=False, live=None):
         """Add text centred under atoms (or under the sequence ('seq', id)), below any caption or shape already
-        under them."""
+        under them; returns its id. attach: the caption joins the structure's group (a new group of the two when it
+        has none), so it moves with it, as ChemDraw's analysis labels do - when the atoms are one structure or one
+        group."""
+        under = atoms
         rend = self.renderer()
         BL = rend.BL
         rect = QRectF()
@@ -678,10 +900,18 @@ class Canvas(QWidget):
         for kind in ('text', 'shape', 'arrow'):
             for i in self.doc.table(kind):
                 r = rend.item_rect(kind, i)
-                if r.right() > rect.left() and r.left() < rect.right() and rect.top() < r.top() < below + 3 * BL:
+                if r.right() > rect.left() and r.left() < rect.right() and (
+                        rect.top() < r.top() < below + 3 * BL or (kind == 'shape' and r.intersects(rect))):
                     below = max(below, r.bottom())
-        self.doc.add_text(rect.center().x() / BL, (below + 6) / BL, text, align='center', formula=formula)
+        t = self.doc.add_text(rect.center().x() / BL, (below + 6) / BL, text, align='center', formula=formula)
         self._renderer = None
+        self.push_clear([('text', t)])                      # not over a neighbour's caption or structure
+        if attach and not isinstance(under, tuple) and len(self.analysis_units(set(under))) == 1:
+            self.doc.join_group(('text', t), under)
+            if live:                                        # only a caption tied to one structure can follow it
+                self.doc.texts[t].live = list(live)
+        self._renderer = None
+        return t
 
     def analyze_stoichiometry(self):
         """Structure > Analyze stoichiometry: a grid under the reaction (the selected arrow's, else the first
@@ -720,7 +950,234 @@ class Canvas(QWidget):
         unknown = {self.doc.atoms[a].label for a in atoms if self.doc.atoms[a].label
                    and self.doc.atoms[a].label not in model.NICKNAMES}
         problems += [f'Label "{u}" is not a known nickname: it counts as {"C"}.' for u in sorted(unknown)]
+        import reactions
+        for comp in self.doc.fragments(atoms):
+            formula = chem.analyse(self.doc, comp).formula or '?'
+            problems += [f'{formula}: {p}' for p in reactions.stereo_problems(self.doc, set(comp))]
         return problems
+
+    # ------------------------------------------------------------------------------------------- forms, maps, find
+    def add_forms(self, which):
+        """Structure > Tautomers / Resonance forms: the other forms of the selected structure (the first one, or the
+        only one drawn) in a row to its right, joined by equilibrium (tautomers) or resonance arrows."""
+        import reactions
+        atoms = self.selected_atoms() or set(self.doc.atoms)
+        frags = [set(f) for f in self.doc.fragments() if atoms & set(f)]
+        if not frags:
+            self.message.emit('Draw or select a structure first.')
+            return []
+        frag = frags[0]
+        forms = (reactions.tautomers if which == 'tautomers' else reactions.resonance_forms)(self.doc, frag)
+        if not forms:
+            self.message.emit('No other ' + ('tautomers' if which == 'tautomers' else 'resonance forms') +
+                              ' found for this structure.')
+            return []
+        rend = self.renderer()
+        BL = rend.BL
+        box = QRectF()
+        for a in frag:
+            r = rend.item_rect('atom', a)
+            box = r if box.isNull() else box.united(r)
+        w = box.width() / BL
+        cy = box.center().y() / BL
+        x = box.right() / BL
+        kind = 'equilibrium' if which == 'tautomers' else 'resonance'
+        self.snapshot()
+        new = []
+        def drawn_box(items):                               # with its labels (CH+, H2N ...), in bond lengths
+            self._renderer = None
+            rend_ = self.renderer()
+            r = QRectF()
+            for it in items:
+                if it[0] == 'atom':
+                    ir = rend_.item_rect(*it)
+                    r = ir if r.isNull() else r.united(ir)
+            return r.left() / BL, r.right() / BL
+        for mol in forms:
+            j = self.doc.add_arrow(x + 0.5, cy, x + 2.3, cy, kind)
+            new.append(('arrow', j))
+            items = self.doc.insert_rdkit(mol, (x + 3.0 + w / 2, cy))
+            if items:                                       # its letters start just after the arrow
+                left, _right = drawn_box(items)
+                dx = x + 2.8 - left
+                self.doc.transform(items, lambda px, py: (px + dx, py))
+                x = drawn_box(items)[1]
+            new += items
+        self.sel = set(new)
+        self.edited()
+        self.message.emit(f'{len(forms)} {"tautomer" if which == "tautomers" else "resonance form"}'
+                          f'{"s" if len(forms) > 1 else ""} added.')
+        return new
+
+    # ------------------------------------------------------------------------------------------- reaction schemes
+    def conditions_of(self, arrow):
+        """{'above': text id or None, 'below': ...} of a reaction arrow's condition captions."""
+        out = {'above': None, 'below': None}
+        for i, t in self.doc.texts.items():
+            if t.on_arrow and t.on_arrow[0] == arrow:
+                out[t.on_arrow[1]] = i
+        return out
+
+    def set_conditions(self, arrow, above, below):
+        """Reagents / conditions centred over and under a reaction arrow (one undo step); they move with it, and
+        the arrow grows to fit them."""
+        if arrow not in self.doc.arrows:
+            return
+        self.snapshot()
+        have = self.conditions_of(arrow)
+        for where, text in (('above', above), ('below', below)):
+            i = have[where]
+            if text.strip():
+                if i is None:
+                    i = self.doc.add_text(0, 0, text.strip(), align='center', on_arrow=[arrow, where], formula=True)
+                else:
+                    self.doc.texts[i].text = text.strip()
+                    self.doc.texts[i].live = []
+            elif i is not None:
+                del self.doc.texts[i]
+        self._renderer = None
+        self._fit_arrow(arrow)
+        self.place_conditions(arrow)
+        self._group_conditions(arrow)
+        self.edited()
+
+    def _group_conditions(self, arrow):
+        items = [('arrow', arrow)] + [('text', i) for i in self.conditions_of(arrow).values() if i is not None]
+        if len(items) > 1:
+            g = self.doc.group_of(('arrow', arrow))
+            if g is None:
+                self.doc.make_group(items)
+            else:
+                for it in items[1:]:
+                    if list(it) not in self.doc.groups[g].members:
+                        self.doc.groups[g].members.append(list(it))
+
+    def _fit_arrow(self, arrow, least=2.5):
+        """A straight arrow at least as long as its widest condition text (and least bond lengths), keeping its tail."""
+        ar = self.doc.arrows[arrow]
+        rend = self.renderer()
+        need = least
+        for i in self.conditions_of(arrow).values():
+            if i is not None:
+                need = max(need, rend.text_rect(i).width() / rend.BL + 0.8)
+        L = math.hypot(ar.x2 - ar.x1, ar.y2 - ar.y1) or 1.0
+        if L < need:
+            ux, uy = (ar.x2 - ar.x1) / L, (ar.y2 - ar.y1) / L
+            ar.x2, ar.y2 = ar.x1 + ux * need, ar.y1 + uy * need
+        self._renderer = None
+
+    def place_conditions(self, arrow):
+        """Centres an arrow's condition texts just over and under its middle."""
+        ar = self.doc.arrows[arrow]
+        rend = self.renderer()
+        BL = rend.BL
+        mx, my = (ar.x1 + ar.x2) / 2, (ar.y1 + ar.y2) / 2
+        for where, i in self.conditions_of(arrow).items():
+            if i is None:
+                continue
+            t = self.doc.texts[i]
+            t.align = 'center'
+            t.x = mx
+            h = rend.text_rect(i).height() / BL
+            t.y = my - 0.35 - h if where == 'above' else my + 0.35
+            self._renderer = None
+            rend = self.renderer()
+
+    def arrange_scheme(self):
+        """Object > Arrange as reaction scheme: the selected structures and straight arrows (all, when nothing is
+        selected) in one row, left to right as they are now, centred on one line with even gaps; arrows sized to
+        their conditions."""
+        doc = self.doc
+        chosen = set(self.sel) if self.sel else set(doc.all_items())
+        atoms = doc.atoms_of(chosen)
+        blocks = []
+        for frag in doc.fragments():
+            if set(frag) & atoms:
+                blocks.append(('mol', doc.with_groups({('atom', a) for a in frag})))
+        for i, ar in doc.arrows.items():
+            if ('arrow', i) in chosen and not ar.kind.startswith('curved'):
+                blocks.append(('arrow', i))
+        if len(blocks) < 2:
+            self.message.emit('Select the structures and arrows of the scheme (or draw them first).')
+            return
+        self.snapshot()
+        rend = self.renderer()
+        BL = rend.BL
+
+        def box(block):
+            kind, what = block
+            items = what if kind == 'mol' else [('arrow', what)]
+            r = QRectF()
+            for it in items:
+                if it[0] in ('atom', 'bond') or (kind == 'mol' and it[0] in ('text', 'shape')):
+                    if it[1] in doc.table(it[0]):
+                        ir = rend.item_rect(*it)
+                        r = ir if r.isNull() else r.united(ir)
+                elif it[0] == 'arrow':
+                    r = rend.item_rect(*it) if r.isNull() else r.united(rend.item_rect(*it))
+            return r
+        blocks.sort(key=lambda b: box(b).center().x())
+        mols = [box(b) for b in blocks if b[0] == 'mol']
+        line = sum(r.center().y() for r in mols) / len(mols) / BL if mols else box(blocks[0]).center().y() / BL
+        gap = 0.9
+        cursor = box(blocks[0]).left() / BL
+        for kind, what in blocks:
+            if kind == 'arrow':
+                ar = doc.arrows[what]
+                ar.x1, ar.y1, ar.x2, ar.y2 = cursor, line, cursor + 1.0, line
+                self._renderer = None
+                self._fit_arrow(what, least=3.0)
+                ar.y1 = ar.y2 = line
+                self.place_conditions(what)
+                cursor = ar.x2 + gap
+            else:
+                rend = self.renderer()
+                r = box((kind, what))
+                atom_box = QRectF()                          # line up on the structure itself, not its captions
+                for it in what:
+                    if it[0] == 'atom' and it[1] in doc.atoms:
+                        ar_ = rend.item_rect(*it)
+                        atom_box = ar_ if atom_box.isNull() else atom_box.united(ar_)
+                dx = cursor - r.left() / BL
+                dy = line - atom_box.center().y() / BL
+                doc.transform(list(what), lambda px, py: (px + dx, py + dy))
+                cursor += r.width() / BL + gap
+            self._renderer = None
+        self.edited()
+
+    def map_reaction(self):
+        """Structure > Reaction > Map atoms: matching atoms on both sides get the same number (:1, :2 ...)."""
+        import reactions
+        arrows = [i for k, i in self.sel if k == 'arrow' and not self.doc.arrows[i].kind.startswith('curved')]
+        self.snapshot()
+        n = reactions.map_atoms(self.doc, arrows[0] if arrows else None)
+        if not n:
+            self.undo_stack.pop()
+            self.message.emit('Nothing to map: draw a reaction (structures left and right of an arrow).')
+            return 0
+        self.edited()
+        self.message.emit(f'{n} atoms mapped from reactants to products.')
+        return n
+
+    def clear_map(self):
+        if not any(at.map for at in self.doc.atoms.values()):
+            return
+        self.snapshot()
+        for at in self.doc.atoms.values():
+            at.map = 0
+        self.edited()
+
+    def find(self, text):
+        """Selects what matches text (a caption's words, a label or element, a SMILES / SMARTS substructure);
+        returns how many objects."""
+        import reactions
+        hits = reactions.find(self.doc, text)
+        self.set_selection(hits)
+        if hits:
+            self.ensure_visible()
+        n = len({i for k, i in hits if k != 'bond'})
+        self.message.emit(f'Find "{text}": ' + (f'{n} found.' if n else 'nothing found.'))
+        return n
 
     def clean_up(self):
         """Lay out the selected structures (all, when nothing is selected) again with RDKit, keeping their place."""
@@ -871,8 +1328,12 @@ class Canvas(QWidget):
             if not r.isNull():
                 p.setPen(QPen(accent, 0.6 / max(self.zoom, 0.3), Qt.PenStyle.DashLine)); p.setBrush(Qt.BrushStyle.NoBrush)
                 p.drawRect(r)
+                if self.tool in ('select', 'lasso'):
+                    self._paint_rotate_handle(p, rend, accent)
         if self.preview:
             self._paint_preview(p, BL, accent)
+        if self.press and self.press.get('move'):
+            self._paint_guides(p, accent)
         if self.press and self.press.get('lasso'):
             p.resetTransform()
             p.setPen(QPen(accent, 1, Qt.PenStyle.DashLine))
@@ -1037,14 +1498,20 @@ class Canvas(QWidget):
         f.setBold(bold); f.setItalic(italic)
         return f
 
-    def edit_label(self, a):
-        """Type an atom's label in place (an element, a charge, OH / NH2, or a nickname such as OMe, Boc, CO2H)."""
+    def edit_label(self, a, start=None):
+        """Type an atom's label in place (an element, a charge, OH / NH2, or a nickname such as OMe, Boc, CO2H).
+        start: the first character already typed (it replaces the label)."""
         self.commit_editor()
         at = self.doc.atoms[a]
         w = _LabelEdit(self)
         w.setFont(self._editor_font(render.style_of(self.doc)['font_size']))
-        w.setText(at.label or (at.el + (render.Renderer._charge_text(at.charge).replace('−', '-') if at.charge else '')))
-        w.selectAll()
+        if start is None:
+            hs = '' if at.hcount is None else 'H' + (str(at.hcount) if at.hcount != 1 else '')   # H0: none
+            w.setText(at.label or (at.el + hs + '•' * at.radical +
+                                   (render.Renderer._charge_text(at.charge).replace('−', '-') if at.charge else '')))
+            w.selectAll()
+        else:
+            w.setText(start)
         width = max(70, w.fontMetrics().horizontalAdvance('MMMMM'))
         c = self.to_px(at.x, at.y)
         w.setGeometry(round(c.x() - width / 2), round(c.y() - w.sizeHint().height() / 2), width, w.sizeHint().height())
@@ -1086,14 +1553,20 @@ class Canvas(QWidget):
                 return
             what = model.parse_label(text)
             if what is None:
-                self.message.emit(f'"{text}" is not an element or a known nickname (OMe, Boc, CO2H, Ph ...).')
+                self.message.emit(f'"{text}" is not an element, a nickname (OMe, Boc, Ph ...) or a condensed formula '
+                                  '(SO3K, CH2CH3, N(CH3)2, COCH3 ...): check the capital letters.')
                 return
             self.snapshot()
             at = self.doc.atoms[i]
             if what[0] == 'nickname':
                 self.doc.set_nickname(i, what[1])
+                at.radical, at.hcount = 0, None
             else:
                 at.label, at.el, at.charge = '', what[1], what[2]
+                hs, at.radical = model.label_extras(text)   # CH2, CH3•, O•+: typed H and unpaired electrons
+                at.hcount = None
+                if hs is not None and hs != self.doc.implicit_h(i):
+                    at.hcount = hs                          # fewer (or more) H than usual: keep what was typed
             self.edited()
             return
         if i is None:
@@ -1105,6 +1578,7 @@ class Canvas(QWidget):
             self.snapshot()
             if text.strip():
                 self.doc.texts[i].text = text
+                self.doc.texts[i].live = []                 # typed over: the caption is the user's text now
             else:
                 del self.doc.texts[i]
             self.edited()
@@ -1125,6 +1599,13 @@ class Canvas(QWidget):
         pos = e.position()
         item = self.item_at(pos)
         self.press = dict(pos=pos, item=item, moved=False, shift=bool(e.modifiers() & Qt.KeyboardModifier.ShiftModifier))
+        if self._on_rotate_handle(pos):                     # turn the selection freely about its centre
+            items = list(self.sel)
+            c = self._center(items)
+            if c is not None:
+                x, y = self.to_model(pos)
+                self.press['rotate'] = dict(items=items, centre=c, start=math.atan2(y - c[1], x - c[0]), applied=0.0)
+                return
         if self.tool in ('select', 'lasso'):
             grabbed = self._charge_at(pos)
             if grabbed is not None:                         # the charge sign itself, not its atom
@@ -1151,7 +1632,7 @@ class Canvas(QWidget):
             elif item:
                 if not self.press['shift']:
                     self.sel = set()
-                self.sel.add(item)
+                self.sel |= self.doc.with_groups([item])     # one member of a group picks up the whole group
                 self.press['move'] = list(self.sel)
                 self.selection_changed.emit()
             else:
@@ -1169,6 +1650,94 @@ class Canvas(QWidget):
             self.press['erased'] = False
             self._erase(item)
 
+    SNAP_PX = 6                                             # snap guides: this close (screen pixels) lines up
+
+    def _snap_targets(self, items):
+        """For snap guides while dragging items: their box at the start and the lines (pt) the other objects offer -
+        the left / centre / right x and top / middle / bottom y of each structure, caption, arrow and shape."""
+        rend = self.renderer()
+        moving = set(items)
+        atoms = self.doc.atoms_of(moving)
+        if len(atoms) == 1 and all(k in ('atom', 'bond') for k, _i in moving):
+            return None                                     # one atom: free, so it can be dropped onto another
+        box = QRectF()
+        for it in moving:
+            if it[1] in self.doc.table(it[0]):
+                r = rend.item_rect(*it)
+                box = r if box.isNull() else box.united(r)
+        rects = []
+        for frag in self.doc.fragments():
+            if set(frag) & atoms:
+                continue
+            r = QRectF()
+            for a in frag:
+                ar = rend.item_rect('atom', a)
+                r = ar if r.isNull() else r.united(ar)
+            rects.append(r)
+        for kind in ('text', 'arrow', 'shape', 'grid'):
+            for i in self.doc.table(kind):
+                if (kind, i) not in moving:
+                    rects.append(rend.item_rect(kind, i))
+        xs = sorted({v for r in rects for v in (r.left(), r.center().x(), r.right())})
+        ys = sorted({v for r in rects for v in (r.top(), r.center().y(), r.bottom())})
+        return None if box.isNull() or not rects else dict(box=box, xs=xs, ys=ys, BL=rend.BL)
+
+    def _snap(self, targets, want):
+        """(the move (model units) after snapping its box's edges or centre onto another object's, [guide lines])."""
+        if not targets:
+            return want, []
+        BL, box = targets['BL'], targets['box']
+        thr = self.SNAP_PX / max(self.px_per_pt(), 1e-6)
+        out, guides = list(want), []
+        for axis, lines in ((0, targets['xs']), (1, targets['ys'])):
+            shift = want[axis] * BL
+            mine = ((box.left(), box.center().x(), box.right()) if axis == 0 else
+                    (box.top(), box.center().y(), box.bottom()))
+            best = None
+            for v in mine:
+                for t in lines:
+                    d = t - (v + shift)
+                    if abs(d) <= thr and (best is None or abs(d) < abs(best[0])):
+                        best = (d, t)
+            if best is not None:
+                out[axis] = (shift + best[0]) / BL
+                guides.append(('v' if axis == 0 else 'h', best[1]))
+        return tuple(out), guides
+
+    def _paint_guides(self, p, accent):
+        if not getattr(self, 'guides', None):
+            return
+        pen = QPen(QColor('#E0457B'), 0.5 / max(self.zoom, 0.3), Qt.PenStyle.DashLine)
+        p.setPen(pen)
+        big = 1e5
+        for axis, v in self.guides:
+            if axis == 'v':
+                p.drawLine(QPointF(v, -big), QPointF(v, big))
+            else:
+                p.drawLine(QPointF(-big, v), QPointF(big, v))
+
+    def _follow_arrows(self, moved):
+        """After moving items: an attached arrow moved without its atom takes its new place as its offset; then
+        every attached end follows its atom / bond."""
+        moved = set(moved)
+        atoms = self.doc.atoms_of(moved)
+        for kind, i in moved:
+            if kind != 'arrow' or i not in self.doc.arrows:
+                continue
+            ar = self.doc.arrows[i]
+            for end in ('tail', 'head'):
+                on = getattr(ar, end + '_on')
+                if not on:
+                    continue
+                if on[0] == 'atom':
+                    still = on[1] not in atoms
+                else:
+                    bd = self.doc.bonds.get(on[1])
+                    still = bd is not None and not (bd.a in atoms and bd.b in atoms)
+                if still:
+                    self.doc.attach_arrow_end(ar, end, (on[0], on[1]))
+        self.doc.update_attached_arrows()
+
     def _sel_box(self, rend):
         """The dashed frame around the selection, in pt (null when nothing is selected)."""
         r = QRectF()
@@ -1177,6 +1746,48 @@ class Canvas(QWidget):
                 ir = rend.item_rect(*it)
                 r = ir if r.isNull() else r.united(ir)
         return r if r.isNull() else r.adjusted(-3, -3, 3, 3)
+
+    def _rotate_handle(self, rend):
+        """(centre, radius) in pt of the round handle above the selection's top right corner that turns it, or None."""
+        r = self._sel_box(rend)
+        if r.isNull():
+            return None
+        k = self.px_per_pt()
+        gap, radius = ROTATE_GAP_PX / k, ROTATE_RADIUS_PX / k
+        return QPointF(r.right() + gap, r.top() - gap), radius
+
+    def _on_rotate_handle(self, pos):
+        if not self.sel or self.tool not in ('select', 'lasso'):
+            return False
+        rend = self.renderer()
+        handle = self._rotate_handle(rend)
+        if handle is None:
+            return False
+        c, radius = handle
+        x, y = self.to_model(pos)
+        return math.hypot(x * rend.BL - c.x(), y * rend.BL - c.y()) <= radius * 1.5
+
+    def _paint_rotate_handle(self, p, rend, accent):
+        """A small disc with a curved arrow round it: drag it to turn the selection."""
+        handle = self._rotate_handle(rend)
+        if handle is None:
+            return
+        c, radius = handle
+        p.save()
+        p.setPen(QPen(accent, radius * 0.18))
+        p.setBrush(QColor('#FFFFFF'))
+        p.drawEllipse(c, radius, radius)
+        a = radius * 0.55
+        arc = QRectF(c.x() - a, c.y() - a, 2 * a, 2 * a)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawArc(arc, 90 * 16, 270 * 16)                   # from the top, anticlockwise round to the right side
+        tip = QPointF(c.x() + a, c.y())
+        head = radius * 0.32
+        path = QPainterPath(tip + QPointF(-head, -head * 0.2))
+        path.lineTo(tip + QPointF(0, -head))
+        path.lineTo(tip + QPointF(head, -head * 0.2))
+        p.drawPath(path)
+        p.restore()
 
     def _in_sel_box(self, pos):
         rend = self.renderer()
@@ -1189,7 +1800,7 @@ class Canvas(QWidget):
         rend = self.renderer()
         pt = QPointF(x * rend.BL, y * rend.BL)
         for a, at in self.doc.atoms.items():
-            if at.charge:
+            if at.charge or at.radical:
                 r = rend.charge_rect(a)
                 if r is not None and r.adjusted(-1.2, -1.2, 1.2, 1.2).contains(pt):
                     return a
@@ -1273,8 +1884,9 @@ class Canvas(QWidget):
                 self._explain(item, e)
             elif item and item[0] == 'seq':                 # residue by residue along a sequence
                 self._explain(item, e)
-            if self.tool in ('select', 'lasso'):            # a charge sign can be dragged
-                self.setCursor(Qt.CursorShape.SizeAllCursor if self._charge_at(pos) is not None
+            if self.tool in ('select', 'lasso'):            # a charge sign can be dragged, the handle turns
+                self.setCursor(Qt.CursorShape.PointingHandCursor if self._on_rotate_handle(pos) else
+                               Qt.CursorShape.SizeAllCursor if self._charge_at(pos) is not None
                                else Qt.CursorShape.ArrowCursor)
             return
         if not pr['moved'] and (pos - pr['pos']).manhattanLength() < DRAG_PX:
@@ -1282,6 +1894,9 @@ class Canvas(QWidget):
         pr['moved'] = True
         x, y = self.to_model(pos)
         t = self.tool
+        if 'rotate' in pr:
+            self._drag_rotate(pr, x, y, bool(e.modifiers() & Qt.KeyboardModifier.ShiftModifier))
+            return
         if 'spot' in pr:                                    # a TLC spot: Rf, size (Shift) or a copy (Ctrl)
             import tlc
             i, k, j, orig = pr['spot']
@@ -1318,10 +1933,16 @@ class Canvas(QWidget):
                 if not pr.get('snapped'):
                     pr['snapped'] = True
                     self.snapshot()
-                sx, sy = pr['start']
-                dx, dy = x - sx, y - sy
+                    pr['origin'], pr['applied'] = pr['start'], (0.0, 0.0)
+                    pr['guide_targets'] = self._snap_targets(pr['move'])
+                ox, oy = pr['origin']
+                want = (x - ox, y - oy)
+                alt = bool(e.modifiers() & Qt.KeyboardModifier.AltModifier)
+                total, self.guides = (want, []) if alt else self._snap(pr['guide_targets'], want)
+                dx, dy = total[0] - pr['applied'][0], total[1] - pr['applied'][1]
+                pr['applied'] = total
                 self.doc.transform(pr['move'], lambda px, py: (px + dx, py + dy))
-                pr['start'] = (x, y)
+                self._follow_arrows(pr['move'])
                 self._renderer = None
                 moved_atoms = self.doc.atoms_of(pr['move'])
                 self.hover = None
@@ -1434,6 +2055,7 @@ class Canvas(QWidget):
         for i in self.doc.grids:
             if inside(self.rect_px(rend.grid_rect(i)).center()):
                 items.add(('grid', i))
+        items = self.doc.with_groups(items)
         self.sel = (self.sel | items) if add else items
         self.update()
         self.selection_changed.emit()
@@ -1459,12 +2081,34 @@ class Canvas(QWidget):
         for i in self.doc.grids:
             if r.contains(self.rect_px(self.renderer().grid_rect(i))):
                 items.add(('grid', i))
+        items = self.doc.with_groups(items)
         self.sel = (self.sel | items) if add else items
         self.update()
         self.selection_changed.emit()
 
+    def _drag_rotate(self, pr, x, y, snap):
+        """Turns the selection to follow the mouse round its centre; Shift: in 15 degree steps."""
+        rot = pr['rotate']
+        if not pr.get('snapped'):
+            pr['snapped'] = True
+            self.snapshot()
+        cx, cy = rot['centre']
+        turn = math.degrees(math.atan2(y - cy, x - cx) - rot['start'])
+        turn = (turn + 180) % 360 - 180
+        if snap:
+            turn = 15 * round(turn / 15)
+        a = math.radians(turn - rot['applied'])
+        rot['applied'] = turn
+        co, si = math.cos(a), math.sin(a)
+        self.doc.transform(rot['items'], lambda px, py: (cx + (px - cx) * co - (py - cy) * si,
+                                                          cy + (px - cx) * si + (py - cy) * co))
+        self._renderer = None
+        self.message.emit(f'Rotated {turn:+.0f}°' + ('' if snap else ' (Shift: 15° steps)'))
+        self.update()
+
     def mouseReleaseEvent(self, e):
         pr, self.press = self.press, None
+        self.guides = []
         if pr is None:
             return
         if pr.get('pan'):
@@ -1479,7 +2123,7 @@ class Canvas(QWidget):
         x, y = self.to_model(pos)
         t, item = self.tool, pr['item']
         preview, self.preview = self.preview, None
-        if 'charge' in pr:                                  # a charge sign was dragged (or just clicked)
+        if 'charge' in pr or 'rotate' in pr:                # a charge sign dragged, or the selection turned
             if pr.get('snapped'):
                 self.edited()
             return
@@ -1531,7 +2175,13 @@ class Canvas(QWidget):
             elif kind in model.ARROW_KINDS:
                 (x1, y1), (x2, y2) = pts
                 if math.hypot(x2 - x1, y2 - y1) > 0.3:
-                    self.doc.add_arrow(x1, y1, x2, y2, kind, CURVE if kind.startswith('curved') else 0.0)
+                    j = self.doc.add_arrow(x1, y1, x2, y2, kind, CURVE if kind.startswith('curved') else 0.0)
+                    if kind.startswith('curved'):           # electron pushing: the ends stay on their atoms / bonds
+                        ar = self.doc.arrows[j]
+                        head = self.item_at(pos)
+                        for end, it in (('tail', item), ('head', head)):
+                            if it and it[0] in ('atom', 'bond'):
+                                self.doc.attach_arrow_end(ar, end, it)
             elif kind in SHAPE_TOOLS:
                 (x1, y1), (x2, y2) = pts
                 if math.hypot(x2 - x1, y2 - y1) > 0.2:
@@ -1745,7 +2395,11 @@ class Canvas(QWidget):
             return
         if mods & ~Qt.KeyboardModifier.ShiftModifier:
             return super().keyPressEvent(e)
-        if self.hotkey(e.text(), h):
+        ch = e.text()
+        if h and h[0] == 'atom' and self.tool == 'text' and ch.isprintable() and ch.strip():
+            self.edit_label(h[1], ch)                       # text tool over an atom: what you type is its label
+            return
+        if self.hotkey(ch, h):
             return
         super().keyPressEvent(e)
 
@@ -1756,6 +2410,12 @@ class Canvas(QWidget):
             return False
         if h and h[0] == 'atom':
             a = h[1]
+            if ch == 't':                                   # t over an atom: type its label
+                self.edit_label(a)
+                return True
+            if ch == '.':                                   # radical: • -> •• -> none
+                self.snapshot(); doc.atoms[a].radical = (doc.atoms[a].radical + 1) % 3; self.edited()
+                return True
             if ch in ('+', '=', '-', '_'):
                 self.snapshot(); doc.atoms[a].charge += 1 if ch in ('+', '=') else -1; self.edited()
                 return True

@@ -189,7 +189,12 @@ class Renderer:
         self.BL = self.s['bond_length']
         self.m = Metrics(self.s['font'], bold=bool(self.s['label_bold']))     # atom labels
         self.mc = Metrics(self.s['caption_font'])                          # captions
+        self._first = True
         self.labels = {a: self._label(a) for a in doc.atoms}
+        self._first = False
+        for a, lab in list(self.labels.items()):            # again, now that the other labels are known: the H, the
+            if lab and len(lab['pieces']) > 1:              # sign and a nickname's reading way go where they are clear
+                self.labels[a] = self._label(a)
         self._cip = None
 
     def pt(self, x, y):
@@ -216,27 +221,38 @@ class Renderer:
         dxs = [doc.atoms[n].x - at.x for n, _b in nb]
         from_right = any(d > 0.3 for d in dxs) and not any(d < -0.3 for d in dxs)
         if at.label:                                        # nickname: the attaching token sits on the atom
-            toks, anchor = model.label_order(at.label, from_right)
-            widths = []
-            for t in toks:
-                letters = t.rstrip('0123456789')
-                widths.append((m.width(letters, fs), m.width(t[len(letters):], small) if t != letters else 0.0, letters))
-            aw = widths[anchor][0]
-            x = cx - aw / 2 - sum(w + wd for w, wd, _l in widths[:anchor])
-            base = cy + ch / 2
-            pieces = []
-            x0 = x
-            for t, (w, wd, letters) in zip(toks, widths):
-                pieces.append((letters, x, base, fs))
-                if wd:
-                    pieces.append((t[len(letters):], x + w, base + 0.28 * fs, small))
-                x += w + wd
-            if at.charge:
-                pieces.append((self._charge_text(at.charge), x + 0.3, base - ch + 0.15 * fs, small))
-            rect = QRectF(x0, base - ch, x - x0, ch + 0.2 * small)
-            return dict(pieces=pieces, clip=(aw / 2 + s['margin'], ch / 2 + s['margin']), rect=rect)
-        if at.el == 'C' and nb and not at.charge and not (s['show_terminal_carbons'] and len(nb) == 1):
-            return None                                     # a plain vertex (a charged carbon shows C, its H and charge)
+            def build(toks, anchor):
+                widths = []
+                for t in toks:
+                    letters = t.rstrip('0123456789')
+                    widths.append((m.width(letters, fs), m.width(t[len(letters):], small) if t != letters else 0.0,
+                                   letters))
+                aw = widths[anchor][0]
+                x = cx - aw / 2 - sum(w + wd for w, wd, _l in widths[:anchor])
+                base = cy + ch / 2
+                pieces = []
+                x0 = x
+                for t, (w, wd, letters) in zip(toks, widths):
+                    pieces.append((letters, x, base, fs))
+                    if wd:
+                        pieces.append((t[len(letters):], x + w, base + 0.28 * fs, small))
+                    x += w + wd
+                if at.charge or at.radical:
+                    pieces.append((self._sign_text(at), x + 0.3, base - ch + 0.15 * fs, small))
+                rect = QRectF(x0, base - ch, x - x0, ch + 0.2 * small)
+                return dict(pieces=pieces, clip=(aw / 2 + s['margin'], ch / 2 + s['margin']), rect=rect)
+            best = build(*model.label_order(at.label, from_right))
+            if not self._first and self._collisions(a, best['pieces']):
+                other = model.label_order(at.label, not from_right)    # read the other way if that is clear
+                if other[0] != model.label_order(at.label, from_right)[0]:
+                    alt = build(*other)
+                    if self._collisions(a, alt['pieces']) < self._collisions(a, best['pieces']):
+                        best = alt
+            return best
+        if (at.el == 'C' and nb and not at.charge and not at.radical and at.hcount is None
+                and not (s['show_terminal_carbons'] and len(nb) == 1)):
+            return None                                     # a plain vertex (a charged carbon or radical shows C, its
+                                                            # H and its charge / dot: CH2•, CH3+)
         sym = at.el
         hs = doc.implicit_h(a)
         ws = m.width(sym, fs)
@@ -257,23 +273,39 @@ class Renderer:
                 side = 'left'
             else:
                 side = 'down' if doc.free_direction(a)[1] > 0 else 'up'
+            side = self._h_side(a, side, right, left)
+
+            def h_pieces(side):
+                if side == 'right':
+                    out = [('H', right_end, base, fs)]
+                    if hcount:
+                        out.append((hcount, right_end + wh, base + 0.28 * fs, small))
+                elif side == 'left':
+                    hx = x0 - wh - wc
+                    out = [('H', hx, base, fs)]
+                    if hcount:
+                        out.append((hcount, hx + wh, base + 0.28 * fs, small))
+                else:
+                    hy = base + (ch + 1.4 * s['margin'] + 0.5) if side == 'down' else base - (ch + 1.4 * s['margin'] + 0.5)
+                    out = [('H', cx - wh / 2, hy, fs)]
+                    if hcount:
+                        out.append((hcount, cx + wh / 2, hy + 0.28 * fs, small))
+                return out
+            chosen = h_pieces(side)
+            if not self._first and self._collisions(a, chosen):   # the usual side is taken: the clearest open one
+                ups = [doc.atoms[n].y - at.y for n, _b in nb]
+                open_ = [x for x, ok in (('right', not right), ('left', not left),
+                                         ('down', not any(d > 0.5 for d in ups)), ('up', not any(d < -0.5 for d in ups)))
+                         if ok and x != side]
+                for alt in open_:
+                    cand = h_pieces(alt)
+                    if self._collisions(a, cand) < self._collisions(a, chosen):
+                        chosen, side = cand, alt
+            pieces += chosen
             if side == 'right':
-                pieces.append(('H', right_end, base, fs))
-                if hcount:
-                    pieces.append((hcount, right_end + wh, base + 0.28 * fs, small))
                 right_end += wh + wc
-            elif side == 'left':
-                hx = x0 - wh - wc
-                pieces.append(('H', hx, base, fs))
-                if hcount:
-                    pieces.append((hcount, hx + wh, base + 0.28 * fs, small))
-            else:
-                hy = base + (ch + 1.4 * s['margin'] + 0.5) if side == 'down' else base - (ch + 1.4 * s['margin'] + 0.5)
-                pieces.append(('H', cx - wh / 2, hy, fs))
-                if hcount:
-                    pieces.append((hcount, cx + wh / 2, hy + 0.28 * fs, small))
         charge_rect = None
-        if at.charge:
+        if at.charge or at.radical:
             piece = self._place_charge(a, at.charge, pieces, x0, ws, base, ch, fs, small, right_end)
             pieces.append(piece)
             charge_rect = QRectF(piece[1], piece[2] - m.cap(small), m.width(piece[0], small), m.cap(small))
@@ -283,6 +315,70 @@ class Renderer:
             rect = r if rect.isNull() else rect.united(r)
         return dict(pieces=pieces, clip=(ws / 2 + s['margin'], ch / 2 + s['margin']), rect=rect,
                     charge_rect=charge_rect)
+
+    def _collisions(self, a, pieces):
+        """How badly label pieces of atom a sit on other atoms' letters or on bonds (its own bonds near it excepted)."""
+        doc, m, BL = self.doc, self.m, self.BL
+        at = doc.atoms[a]
+        rects = [QRectF(x, y - m.cap(size), m.width(t, size), m.cap(size)).adjusted(0.3, 0.3, -0.3, -0.3)
+                 for t, x, y, size in pieces if t.strip()]
+        n = 0
+        for o, lab in self.labels.items():
+            if o == a or not lab:
+                continue
+            ot = doc.atoms[o]
+            if abs(ot.x - at.x) > 4 or abs(ot.y - at.y) > 3:
+                continue
+            for t, x, y, size in lab['pieces']:
+                if t.strip():
+                    r2 = QRectF(x, y - m.cap(size), m.width(t, size), m.cap(size))
+                    n += sum(1 for r in rects if r.intersects(r2))
+        for b, bd in doc.bonds.items():
+            p, q = doc.atoms[bd.a], doc.atoms[bd.b]
+            if min(abs(p.x - at.x) + abs(p.y - at.y), abs(q.x - at.x) + abs(q.y - at.y)) > 5:
+                continue
+            own = a in (bd.a, bd.b)
+            for k in range(1, 20):
+                px, py = p.x + (q.x - p.x) * k / 20, p.y + (q.y - p.y) * k / 20
+                if own and (px - at.x) ** 2 + (py - at.y) ** 2 < 0.45 ** 2:
+                    continue                                # the bond leaves from under its own letters
+                pt = QPointF(px * BL, py * BL)
+                if any(r.contains(pt) for r in rects):
+                    n += 1
+                    break
+        return n
+
+    def _h_side(self, a, side, right, left):
+        """The side for an atom's H: the usual one, unless another atom sits there (OH beside HO in a diphosphate) -
+        then the other side, below or above, whichever has room and no bond of its own."""
+        doc = self.doc
+        at = doc.atoms[a]
+        mine = {n for n, _b in doc.neighbors(a)}
+        others = [(o.x - at.x, o.y - at.y) for i, o in doc.atoms.items() if i != a and i not in mine
+                  and abs(o.x - at.x) < 1.6 and abs(o.y - at.y) < 1.4]
+        if not others:
+            return side
+        ups = [doc.atoms[n].y - at.y for n in mine]
+        open_ = {'right': not right, 'left': not left,
+                 'down': not any(d > 0.5 for d in ups), 'up': not any(d < -0.5 for d in ups)}
+
+        def crowded(s):
+            for dx, dy in others:
+                if s == 'right' and 0.2 < dx < 1.5 and abs(dy) < 0.6:
+                    return True
+                if s == 'left' and -1.5 < dx < -0.2 and abs(dy) < 0.6:
+                    return True
+                if s == 'down' and 0.2 < dy < 1.2 and abs(dx) < 0.6:
+                    return True
+                if s == 'up' and -1.2 < dy < -0.2 and abs(dx) < 0.6:
+                    return True
+            return False
+        if not crowded(side):
+            return side
+        for s in ('right', 'left', 'down', 'up'):
+            if s != side and open_[s] and not crowded(s):
+                return s
+        return side
 
     def charge_rect(self, a):
         """QRectF (pt) of the atom's charge sign, or None (what the mouse grabs to move it)."""
@@ -295,7 +391,7 @@ class Renderer:
         doc, m, BL = self.doc, self.m, self.BL
         at = doc.atoms[a]
         cx, cy = at.x * BL, at.y * BL
-        t = self._charge_text(z)
+        t = self._sign_text(at)
         w, hgt = m.width(t, small), m.cap(small)
         if at.charge_pos:                                   # dragged by hand: centred where it was dropped
             dx, dy = at.charge_pos
@@ -322,6 +418,20 @@ class Renderer:
                 segments.append([(cx + nx * off + dx * (start + (L - start) * k / 40) / L,
                                   cy + ny * off + dy * (start + (L - start) * k / 40) / L) for k in range(41)])
 
+        mine = {n for n, _b in doc.neighbors(a)}
+        for b, bd in doc.bonds.items():                     # other bonds nearby (a ring closing past the atom ...)
+            if a in (bd.a, bd.b):
+                continue
+            p, q = doc.atoms[bd.a], doc.atoms[bd.b]
+            if min(math.hypot(p.x - at.x, p.y - at.y), math.hypot(q.x - at.x, q.y - at.y)) > 2.2:
+                continue
+            segments.append([(p.x * BL + (q.x - p.x) * BL * k / 40, p.y * BL + (q.y - p.y) * BL * k / 40)
+                             for k in range(41)])
+        for o, lab in getattr(self, 'labels', {}).items():  # other atoms' letters (known on the second pass)
+            if o != a and lab and abs(doc.atoms[o].x - at.x) < 2.5 and abs(doc.atoms[o].y - at.y) < 2.5:
+                others += [QRectF(px, py - m.cap(size), m.width(txt, size), m.cap(size))
+                           for txt, px, py, size in lab['pieces'] if txt.strip()]
+
         def clear(x, y):
             r = QRectF(x, y - hgt, w, hgt)
             if any(r.adjusted(0.1, 0.1, -0.1, -0.1).intersects(o) for o in others):   # not on the label's letters
@@ -332,7 +442,6 @@ class Renderer:
             if clear(x, y):
                 return (t, x, y, small)
         # crowded (four bonds, a ring and an H ...): the middle of the widest gap between the bonds and the H
-        import math
         angles = [math.atan2(doc.atoms[n].y - at.y, doc.atoms[n].x - at.x) for n, _b in doc.neighbors(a)]
         for txt, px_, py_, _size in pieces[1:]:
             if txt == 'H':
@@ -345,6 +454,11 @@ class Renderer:
         dist = max(hw, hh) + max(w, hgt) * 0.4
         mx, my = cx + math.cos(ang) * dist, cy + math.sin(ang) * dist
         return (t, mx - w / 2, my + hgt / 2, small)
+
+    @classmethod
+    def _sign_text(cls, at):
+        """What goes beside the atom: its radical dots and its charge (•, ••, +, •+, 2−)."""
+        return '•' * at.radical + (cls._charge_text(at.charge) if at.charge else '')
 
     @staticmethod
     def _charge_text(z):
@@ -574,7 +688,7 @@ class Renderer:
         w, h = x2 - x1, y2 - y1
         if sh.kind == 'line':
             p.moveTo(sh.x1 * BL, sh.y1 * BL); p.lineTo(sh.x2 * BL, sh.y2 * BL)
-        elif sh.kind == 'rect':
+        elif sh.kind in ('rect', 'image'):
             p.addRect(QRectF(x1, y1, w, h))
         elif sh.kind == 'roundrect':
             r = min(w, h) * 0.15
@@ -598,6 +712,17 @@ class Renderer:
                 p.cubicTo(x, y1, x + bw * s, ym, x - 0.0, ym)
                 p.cubicTo(x + bw * s, ym, x, y2, x + bw * s, y2)
         return p
+
+    def repeat_path(self, i):
+        """The repeat count of polymer brackets (n, 3 ...), small at the foot of the right bracket; None without."""
+        sh = self.doc.shapes[i]
+        text = str(sh.params.get('repeat', '')).strip() if sh.kind in model.BRACKET_KINDS else ''
+        if not text:
+            return None
+        size = self.s['font_size'] * 0.85
+        x = max(sh.x1, sh.x2) * self.BL + 1.2
+        y = max(sh.y1, sh.y2) * self.BL + self.m.cap(size) * 0.45
+        return text_path(text, self.s['font'], size, x, y, italic=not text.isdigit())
 
     # ------------------------------------------------------------------------------------------- stoichiometry grid
     def grid_layout(self, i):
@@ -723,7 +848,13 @@ class Renderer:
         def pen(color):
             return QPen(color, s['line_width'], Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
         self.paint_fills_and_highlights(p)
+        for i, sh in doc.shapes.items():                    # pictures first: everything else goes over them
+            if sh.kind == 'image':
+                import pictures
+                pictures.paint(self, p, i)
         for i, sh in doc.shapes.items():
+            if sh.kind == 'image':
+                continue
             if sh.kind in model.BIO_KINDS:
                 import biodraw
                 biodraw.paint_bio(self, p, i)
@@ -734,6 +865,10 @@ class Renderer:
                 continue
             p.setPen(pen(self.color(sh))); p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawPath(self.shape_paths(i))
+            rep = self.repeat_path(i)
+            if rep is not None:
+                p.setPen(Qt.PenStyle.NoPen); p.setBrush(QBrush(self.color(sh)))
+                p.drawPath(rep)
         if doc.seqs:
             import biodraw
             for i in doc.seqs:
@@ -769,7 +904,8 @@ class Renderer:
             for txt, x, y, size in self.text_layout(i)[0]:
                 if txt.strip():
                     p.drawPath(text_path(txt, s['caption_font'], size, x, y, t.bold, t.italic))
-        if s['show_stereo'] or s['show_atom_numbers']:
+        self.paint_lone_pairs(p)
+        if s['show_stereo'] or s['show_atom_numbers'] or any(at.map for at in doc.atoms.values()):
             self.paint_overlays(p)
         if errors:
             p.setBrush(Qt.BrushStyle.NoBrush)
@@ -801,11 +937,91 @@ class Renderer:
                 p.setBrush(QBrush(QColor(a.highlight)))
                 p.drawEllipse(QPointF(a.x * BL, a.y * BL), width / 2 * 1.15, width / 2 * 1.15)
 
+    def lone_pair_dots(self, a):
+        """[(x, y)] in pt of the dots of atom a's lone pairs, two per pair, in the widest gaps between its bonds
+        and its H."""
+        doc, BL = self.doc, self.BL
+        at = doc.atoms[a]
+        n = doc.lone_pair_count(a) if at.lone_pairs < 0 else min(at.lone_pairs, 4)
+        if n <= 0:
+            return []
+        cx, cy = at.x * BL, at.y * BL
+        taken = [math.atan2(doc.atoms[o].y - at.y, doc.atoms[o].x - at.x) for o, _b in doc.neighbors(a)]
+        lab = self.labels.get(a)
+        if lab and lab['clip']:                             # just round the ink of the letters themselves (Cl: the l)
+            sym, sx, sy, size = lab['pieces'][0]
+            ink = text_path(sym, self.s['font'], size, sx, sy, bool(self.s['label_bold'])).boundingRect()
+        else:
+            ink = QRectF(cx - 0.12 * BL, cy - 0.12 * BL, 0.24 * BL, 0.24 * BL)
+        gap = max(self.s['line_width'] * 1.6, 1.4)
+        dot = max(self.s['line_width'] * 0.75, 0.55)
+        letters = []                                        # what the dots must keep off: other letters, own H ...
+        for o, ol in self.labels.items():
+            if ol and abs(doc.atoms[o].x - at.x) < 2.5 and abs(doc.atoms[o].y - at.y) < 2.5:
+                for k, (txt, x, y, size) in enumerate(ol['pieces']):
+                    if txt.strip() and not (o == a and k == 0):
+                        letters.append(QRectF(x, y - self.m.cap(size), self.m.width(txt, size), self.m.cap(size)))
+
+        def spot(ang):
+            ux, uy = math.cos(ang), math.sin(ang)
+            kx = ((ink.right() if ux > 0 else ink.left()) - cx) / ux if abs(ux) > 1e-6 else 1e9
+            ky = ((ink.bottom() if uy > 0 else ink.top()) - cy) / uy if abs(uy) > 1e-6 else 1e9
+            k = max(0.0, min(kx, ky))
+            px, py = cx + ux * (k + 1.8), cy + uy * (k + 1.8)
+            return [(px - uy * gap, py + ux * gap), (px + uy * gap, py - ux * gap)]
+
+        def clear(pts):
+            return all(self.is_free(QRectF(x - dot - 0.3, y - dot - 0.3, 2 * dot + 0.6, 2 * dot + 0.6), letters)
+                       for x, y in pts)
+        if lab:
+            for txt, x, y, size in lab['pieces'][1:]:          # its H, charge and dots take room too
+                if txt.strip():
+                    tx, ty = x + self.m.width(txt, size) / 2 - cx, y - self.m.cap(size) / 2 - cy
+                    if abs(tx) > 0.5 or abs(ty) > 0.5:
+                        taken.append(math.atan2(ty, tx))
+        chosen = []
+        for _k in range(n):                                 # the free direction farthest from bonds, H and others:
+            best, best_d = 0.0, -1.0                        # up / down / left / right first, then the diagonals
+            for step, ang in enumerate((-math.pi / 2, math.pi / 2, 0.0, math.pi, -math.pi / 4, -3 * math.pi / 4,
+                                        math.pi / 4, 3 * math.pi / 4)):
+                d = min((abs((ang - t + math.pi) % (2 * math.pi) - math.pi) for t in taken + chosen), default=math.pi)
+                d += 0.15 if step < 4 else 0.0
+                if not clear(spot(ang)):                    # on a bond or on letters: only if nothing else is left
+                    d -= 10
+                if d > best_d + 1e-9:
+                    best, best_d = ang, d
+            chosen.append(best)
+        out = []
+        for ang in chosen:
+            out += spot(ang)
+        return out
+
+    def paint_lone_pairs(self, p):
+        r = max(self.s['line_width'] * 0.75, 0.55)
+        p.setPen(Qt.PenStyle.NoPen)
+        for a, at in self.doc.atoms.items():
+            if at.lone_pairs:
+                p.setBrush(QBrush(self.color(at, a)))
+                for x, y in self.lone_pair_dots(a):
+                    p.drawEllipse(QPointF(x, y), r, r)
+
     def paint_overlays(self, p):
-        """(R) / (S) and (E) / (Z) labels and atom numbers, small and blue, beside their atoms and bonds."""
+        """(R) / (S) and (E) / (Z) labels, atom numbers and atom-map numbers, small and blue."""
+        s = self.s
+        p.setPen(Qt.PenStyle.NoPen); p.setBrush(QBrush(QColor(OVERLAY)))
+        for text, x, y, size in self.overlay_layout():
+            p.drawPath(text_path(text, s['font'], size, x, y))
+
+    def overlay_layout(self):
+        """[(text, x, baseline, size)] of the overlays (cached): beside their atoms and bonds."""
+        if getattr(self, '_overlays', None) is None:
+            self._overlays = self._overlay_layout()
+        return self._overlays
+
+    def _overlay_layout(self):
         s, doc, BL = self.s, self.doc, self.BL
         size = s['font_size'] * 0.7
-        p.setPen(Qt.PenStyle.NoPen); p.setBrush(QBrush(QColor(OVERLAY)))
+        out = []
         notes = {}
         if s['show_stereo']:
             atoms, bonds = self.cip()
@@ -816,21 +1032,112 @@ class Renderer:
         if s['show_atom_numbers']:
             for k, a in enumerate(doc.atoms, 1):
                 notes.setdefault(('atom', a), []).insert(0, str(k))
-        for (kind, i), parts in notes.items():
+        for a, at in doc.atoms.items():                     # reaction atom map: :3
+            if at.map:
+                notes.setdefault(('atom', a), []).append(f':{at.map}')
+        if not notes:
+            return out
+        taken = self.obstacles()                            # letters, dots, captions: rects; lines: bond_regions()
+        cap = self.m.cap(size)
+        for (kind, i), parts in sorted(notes.items(), key=lambda kv: kv[0][0] == 'bond'):
             text = ' '.join(parts)
             w = self.m.width(text, size)
-            if kind == 'atom':
+            ink = text_path(text, s['font'], size, 0.0, 0.0).boundingRect()   # brackets reach below the line
+
+            def box_at(x, y):
+                return ink.translated(x - w / 2, y + cap / 2)
+            spots = []
+            if kind == 'atom':                              # around the atom, nearest and most open first
                 at = doc.atoms[i]
                 fx, fy = doc.free_direction(i)
-                x, y = at.x * BL + fx * 0.45 * BL, at.y * BL + fy * 0.45 * BL
-            else:
+                lab = self.labels.get(i)
+                clip = max(lab['clip']) if lab and lab['clip'] else 0.0
+                base = math.atan2(fy, fx)
+                for reach in (0.42, 0.6, 0.8, 1.0, 1.25):
+                    for k in range(24):
+                        ang = base + math.radians(15 * ((k + 1) // 2) * (1 if k % 2 else -1))
+                        r = reach * BL + clip + max(w, cap) * 0.25 * abs(math.cos(ang))
+                        spots.append((at.x * BL + math.cos(ang) * r, at.y * BL + math.sin(ang) * r))
+            else:                                           # beside the bond's middle, the open side first
                 bd = doc.bonds[i]
                 pa, pb = doc.atoms[bd.a], doc.atoms[bd.b]
                 L = math.hypot(pb.x - pa.x, pb.y - pa.y) or 1.0
+                ux, uy = (pb.x - pa.x) / L, (pb.y - pa.y) / L
                 side = -(doc.double_side(i) or 1)
-                x = (pa.x + pb.x) / 2 * BL - (pb.y - pa.y) / L * 0.45 * BL * side
-                y = (pa.y + pb.y) / 2 * BL + (pb.x - pa.x) / L * 0.45 * BL * side
-            p.drawPath(text_path(text, s['font'], size, x - w / 2, y + self.m.cap(size) / 2))
+                mx, my = (pa.x + pb.x) / 2 * BL, (pa.y + pb.y) / 2 * BL
+                for dist in (0.42, 0.62, 0.85):
+                    for sgn in (side, -side):
+                        for t in (0.0, 0.22, -0.22):
+                            spots.append((mx - uy * dist * BL * sgn + ux * t * BL, my + ux * dist * BL * sgn + uy * t * BL))
+            place, least, found = spots[0], None, False
+            for gx, gy in ((1.0, 0.8), (0.4, 0.4)):         # a visible gap if there is room, else just clear
+                for x, y in spots:
+                    box = box_at(x, y).adjusted(-gx, -gy, gx, gy)
+                    if self.is_free(box, taken):
+                        place, found = (x, y), True
+                        break
+                    hits = self.hits(box, taken)            # nowhere clear: the least crowded spot
+                    if least is None or hits < least:
+                        place, least = (x, y), hits
+                if found:
+                    break
+            x, y = place
+            taken.append(box_at(x, y))
+            out.append((text, x - w / 2, y + cap / 2, size))
+        return out
+
+    def bond_regions(self):
+        """[(('bond' | 'arrow', id), QPainterPath of its drawn lines widened by their width, its bounding rect)]."""
+        if getattr(self, '_regions', None) is None:
+            from PyQt6.QtGui import QPainterPathStroker
+            st = QPainterPathStroker()
+            st.setWidth(max(self.s['line_width'], 0.5))
+            out = []
+            for kind, table, paths in (('bond', self.doc.bonds, self.bond_paths), ('arrow', self.doc.arrows, self.arrow_paths)):
+                for i in table:
+                    stroke, fill = paths(i)
+                    region = st.createStroke(stroke)
+                    region.addPath(fill)
+                    out.append(((kind, i), region, region.boundingRect()))
+            self._regions = out
+        return self._regions
+
+    def obstacles(self):
+        """Rects (pt) of what is written or dotted: label letters, lone pairs, captions, repeat counts."""
+        s = self.s
+        out = []
+        for a, lab in self.labels.items():
+            if lab:
+                for text, x, y, size in lab['pieces']:
+                    if text.strip():
+                        out.append(text_path(text, s['font'], size, x, y, bool(s['label_bold'])).boundingRect())
+        r = max(s['line_width'] * 0.75, 0.55)
+        for a, at in self.doc.atoms.items():
+            if at.lone_pairs:
+                for x, y in self.lone_pair_dots(a):
+                    out.append(QRectF(x - r, y - r, 2 * r, 2 * r))
+        for i in self.doc.texts:
+            out.append(self.text_rect(i))
+        for i in self.doc.shapes:
+            p = self.repeat_path(i)
+            if p is not None:
+                out.append(p.boundingRect())
+        return out
+
+    def hits(self, box, rects):
+        """How many of rects, bonds and arrows box touches."""
+        n = sum(1 for r in rects if box.intersects(r))
+        return n + sum(1 for _k, region, brect in self.bond_regions() if brect.intersects(box) and region.intersects(box))
+
+    def is_free(self, box, rects, lines=True):
+        """True when box touches none of rects nor (lines) any bond or arrow."""
+        if any(box.intersects(r) for r in rects):
+            return False
+        if lines:
+            for _key, region, brect in self.bond_regions():
+                if brect.intersects(box) and region.intersects(box):
+                    return False
+        return True
 
     def bounds(self):
         """QRectF (pt) around everything drawn (null when the drawing is empty)."""
@@ -853,6 +1160,9 @@ class Renderer:
             add(self.text_rect(i))
         for i in self.doc.shapes:
             add(self.shape_paths(i).boundingRect().adjusted(-1, -1, 1, 1))
+            rep = self.repeat_path(i)
+            if rep is not None:
+                add(rep.boundingRect().adjusted(-1, -1, 1, 1))
         for i in self.doc.grids:
             add(self.grid_rect(i).adjusted(-1, -1, 1, 1))
         for i in self.doc.seqs:
@@ -887,7 +1197,9 @@ class Renderer:
         if kind == 'tlc':
             import tlc
             return tlc.layout(self, i)['rect']
-        return self.shape_paths(i).boundingRect()
+        r = self.shape_paths(i).boundingRect()
+        rep = self.repeat_path(i)
+        return r.united(rep.boundingRect()) if rep is not None else r
 
 
 # ------------------------------------------------------------------------------------------------ export

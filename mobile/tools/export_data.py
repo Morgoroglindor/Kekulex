@@ -52,7 +52,25 @@ for s in SMILES:
                      ions=[[i.label, i.z, i.mz] for i in info.ions], sed=d.to_dict()))
 PUB = 'C1[C@H](N=C(C=C1/C=C/N2[C@@H](CC3=CC(=C(C=C32)O)O[C@H]4[C@@H]([C@H]([C@@H]([C@H](O4)CO)O)O)O)C(=O)O)C(=O)O)C(=O)O'
 usual = [dict(smiles=s, usual=layout2d.usual_form(s)) for s in (PUB, 'CCO', 'c1ccncc1')]
+import condensed  # noqa: E402
+CONDENSED = ['SO3K', 'SO3Na', 'CO2Na', 'CH2CH3', 'OC2H5', 'COCH3', 'C(O)CH3', 'OCOCH3', 'NHCOCH3', 'CONH2', 'CH2CO2H',
+             'N(CH3)2', 'CH(CH3)2', '(CH2)3CH3', 'B(OH)2', 'P(O)(OH)2', 'PO(OEt)2', 'SO2NH2', 'SO2Cl', 'SO3Me', 'PO3H2',
+             'OCF3', 'CN', 'NCO', 'SCN', 'CH=CH2', 'C6H5', 'SO3-', 'CO2-', 'NMe3+', 'N(CH3)3+', 'CH2Ph', 'CONHMe',
+             'CO2tBu', 'OTBS', 'CCl3', 'CH2OMe']
+condensed_rows = [[t, Chem.MolToSmiles(Chem.MolFromSmiles(condensed.smiles(t)))] for t in CONDENSED]
+LABELS = ['N', 'OH', 'NH2', 'Na+', 'O-', 'OMe', 'Boc', 'cl', 'Xx', 'ome', 'so3k', 'ch2cl', 'nh2', 'cf3', 'no2', 'boc',
+          'CH2', 'CH3•', 'C••', 'O•+', 'ch2.', 'N•', 'CH3+', 'SO3K', 'N(CH3)2']
+labels = [[t, list(model.parse_label(t) or []), list(model.label_extras(t))] for t in LABELS]
+radical_rows = []
+for s, tweak in (('[CH3]', None), ('[CH2]', None), ('C[CH2]', None), ('CC(C)=O', 'O+.'), ('CC#[O+]', None)):
+    d = Doc()
+    d.insert_rdkit(Chem.MolFromSmiles(s))
+    if tweak:
+        o = next(a for a, at in d.atoms.items() if at.el == 'O')
+        d.atoms[o].charge, d.atoms[o].radical = 1, 1
+    info = chem.analyse(d)
+    radical_rows.append(dict(sed=d.to_dict(), formula=info.formula, ions=[[i.label, i.mz] for i in info.ions[:3]]))
 with open(os.path.join(MOBILE, 'tests', 'reference.json'), 'w', encoding='utf-8') as f:
-    json.dump(dict(rows=rows, usual=usual,
+    json.dump(dict(rows=rows, usual=usual, condensed=condensed_rows, labels=labels, radicals=radical_rows,
                    parse=[[t, list(model.parse_label(t) or [])] for t in ('N', 'OH', 'NH2', 'Na+', 'O-', 'OMe', 'Boc', 'cl', 'Xx', 'ome')]), f)
 print(len(rows), 'reference molecules')
