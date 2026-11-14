@@ -1911,6 +1911,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 ('Ctrl+E', 'export picture'), ('Ctrl+I', 'insert SMILES / MOL'),
                 ('Ctrl+= / Ctrl+- / Ctrl+0', 'zoom in / out / fit'), ('+ / -', 'charge (over an atom)'),
                 ('.', 'radical over an atom: •, then •• (carbene), then none'),
+                ('c n o s … again', 'the same element key over its atom: one H fewer each time (NH2, NH, N, NH2 …)'),
                 ('t', 'type the label of the atom under the mouse (CH2, CH3•, O•+ ...)'),
                 ('Enter', 'type the label of the atom under the mouse'),
                 ('Ctrl+Shift+E', 'expand label'), ('Ctrl+Shift+A', 'show analysis'),

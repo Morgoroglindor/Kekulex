@@ -16,7 +16,10 @@ Drawing (Help > How to draw in the program says the same)
                    an atom - c n o s p f h i l(Cl) b(Br), Shift+C Cl, Shift+S Si, Shift+O OMe, Shift+N NO2,
                      Shift+P Ph, y Boc, e Et, m Me ... (groups are drawn out in full); 1 bond, 2 C=O, 4 / 5 wedge /
                      hash, 6 / 7 / v / u rings, a phenyl, z ethynyl, Shift+K tBu, 9 two methyls; + / - charge;
-                     t (or Enter) types its label; with the Text tool, just point at it and type
+                     t (or Enter) types its label; with the Text tool, just point at it and type;
+                     the element's key again takes one H away each time, as in ChemDraw (NH2 -> NH -> N -> NH2,
+                     OH -> O -> OH, c on a vertex: CH3 -> CH2 -> CH -> C -> CH3); an atom left short of H gets the
+                     red box
                    a bond - 1 2 3 order, l / r / c double-bond side, w wedge, h hash, 4-8 / v fused ring,
                      a fused benzene, z fused cyclopentadiene
                    nothing - j benzene tool, x bond, Shift+X chain, e arrow, t text, Space select

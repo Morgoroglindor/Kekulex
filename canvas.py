@@ -2422,10 +2422,14 @@ class Canvas(QWidget):
             if ch in ATOM_KEYS:
                 name = ATOM_KEYS[ch]
                 self.snapshot()
+                at = doc.atoms[a]
                 if name in model.NICKNAMES:
                     doc.set_nickname(a, name)
+                    at.hcount, at.radical = None, 0
+                elif at.el == name and not at.label:
+                    doc.cycle_hydrogens(a)                  # the same key again: one H fewer (NH2, NH, N, NH2 ...)
                 else:
-                    doc.atoms[a].el, doc.atoms[a].label = name, ''
+                    at.el, at.label, at.hcount = name, '', None   # another element: with all its H
                 self.edited()
                 return True
             if ch in SPROUT_KEYS:

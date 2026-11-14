@@ -669,9 +669,13 @@ class Doc:
                 return f'{at.label} attaches by one bond, but has {bonds}.'
             return ''
         vals = self._valences(a)
-        if at.hcount is not None:                           # the user said how many H: only too many is wrong
+        if at.hcount is not None:                           # the user said how many H
             if vals and at.el in ('C', 'N', 'O', 'F', 'B') and bonds + at.hcount > 4:
                 return f'{at.el} with {at.hcount} H has room for {max(0, 4 - at.hcount)} bonds, but has {bonds}.'
+            usual = self.usual_h(a)
+            if vals and not at.radical and at.hcount < usual:   # NH, CH2 on a chain end: ChemDraw's red box
+                return (f'{at.el} with {at.hcount} H has an open valence: it usually has {usual} H here '
+                        '(press its key again, or add a bond or a radical).')
             return ''
         if vals and bonds > max(vals):
             charge = f' {"+" if at.charge > 0 else "−"}{abs(at.charge)}' if at.charge else ''
@@ -1019,6 +1023,29 @@ class Doc:
                     ar.x1, ar.y1 = x, y
                 else:
                     ar.x2, ar.y2 = x, y
+
+    def usual_h(self, a):
+        """The hydrogens an atom has from its valence alone (what implicit_h gives without a typed H count)."""
+        at = self.atoms[a]
+        keep, at.hcount = at.hcount, None
+        try:
+            return self.implicit_h(a)
+        finally:
+            at.hcount = keep
+
+    def cycle_hydrogens(self, a):
+        """The element's key pressed again over its atom, as in ChemDraw: one H fewer each time (CH3 -> CH2 -> CH -> C,
+        NH2 -> NH -> N, OH -> O), then all of them again. A plain carbon first shows its label (CH3)."""
+        at = self.atoms[a]
+        full = self.usual_h(a)
+        if at.el == 'C' and at.hcount is None:
+            at.hcount = full                                # the vertex becomes a labelled CH3 / CH2 ...
+            return
+        now = full if at.hcount is None else at.hcount
+        if now <= 0:
+            at.hcount = full if at.el == 'C' else None      # round again: carbon keeps showing its label
+        else:
+            at.hcount = now - 1
 
     def lone_pair_count(self, a):
         """Lone pairs an atom has: (valence electrons - charge - bonds - H - unpaired) / 2 (O in water: 2)."""
