@@ -1028,6 +1028,8 @@ class MainWindow(QtWidgets.QMainWindow):
                               tip='A picture on the drawing; Ctrl+V also pastes a copied picture'))
         m.addAction(self._act('Export &picture (PNG, SVG, PDF)…', self.export_picture, 'Ctrl+E'))
         m.addAction(self._act('Export &MOL…', self.export_mol))
+        m.addAction(self._act('Send the drawing to the lab &notebook…', self.send_to_notebook,
+                              tip='Put this drawing into an entry of the lab notebook (its reaction and molecules)'))
         m.addAction(self._act('&Batch export (SDF / SMILES list to pictures)…', self.batch_export))
         m.addSeparator()
         m.addAction(self._act('&Document settings (page size, style)…', self.style_dialog))
@@ -1672,6 +1674,15 @@ class MainWindow(QtWidgets.QMainWindow):
         from batch_dialog import BatchDialog
         BatchDialog(self).exec()
 
+    def send_to_notebook(self):
+        import notebook_client
+        doc = self.canvas.doc
+        if not doc.atoms:
+            QtWidgets.QMessageBox.information(self, APP_NAME, 'Draw something first.')
+            return
+        mols = _notebook_molecules(doc)
+        notebook_client.send_drawing(self, doc.to_dict(), mols, '.'.join(m['smiles'] for m in mols), program=APP_NAME)
+
     def export_mol(self):
         doc = self._subset()
         if not doc.atoms:
@@ -2010,6 +2021,27 @@ class MainWindow(QtWidgets.QMainWindow):
         QtWidgets.QMessageBox.about(self, APP_NAME, f'<b>{APP_NAME}</b> {__version__}<br>Chemical structures for figures, '
                                     f'with formula, exact mass and adduct m/z.<br><br>Chemistry: RDKit {rdBase.rdkitVersion}; '
                                     f'interface: Qt {QtCore.QT_VERSION_STR}.<br>Log: {applog.LOG_FILE}')
+
+
+def _notebook_molecules(doc):
+    """The drawing's molecules for the lab notebook: SMILES, InChIKey, formula, MW and reactant / product around
+    the reaction arrow (stoich.reaction_columns), left to right."""
+    import chem
+    import stoich
+    roles = {}
+    cols = stoich.reaction_columns(doc)
+    if cols:
+        for frag in cols[0]:
+            roles[tuple(sorted(frag))] = 'reactant'
+        for frag in cols[1]:
+            roles[tuple(sorted(frag))] = 'product'
+    out = []
+    for frag in sorted(doc.fragments(), key=lambda f: sum(doc.atoms[a].x for a in f) / len(f)):
+        info = chem.analyse(doc, frag)
+        if info.smiles:
+            out.append(dict(smiles=info.smiles, inchikey=info.inchikey, formula=info.formula, mw=round(info.average, 4),
+                            role=roles.get(tuple(sorted(frag)))))
+    return out
 
 
 def main(argv=None):
