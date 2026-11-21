@@ -118,12 +118,12 @@ def _file_bytes(path):
 class SetupDialog(QtWidgets.QDialog):
     """The notebook's address and the access key (once per Windows user, for all three programs)."""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, suggested=''):
         super().__init__(parent)
         self.setWindowTitle('Lab notebook: connection')
         server, key = config()
         lay = QtWidgets.QFormLayout(self)
-        self.server = QtWidgets.QLineEdit(server or 'https://')
+        self.server = QtWidgets.QLineEdit(server or suggested or 'https://')
         self.key = QtWidgets.QLineEdit(key)
         self.key.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
         lay.addRow('Notebook address', self.server)
@@ -143,7 +143,10 @@ class SetupDialog(QtWidgets.QDialog):
         self.resize(520, self.sizeHint().height())
 
     def _try(self):
-        me = request('GET', 'auth/me/', server=self.server.text().strip().rstrip('/'), key=self.key.text().strip())
+        server = self.server.text().strip().rstrip('/')
+        if not safe_server(server):
+            raise NotebookError('Use the notebook\'s https:// address (http:// only for this PC itself).')
+        me = request('GET', 'auth/me/', server=server, key=self.key.text().strip())
         if not me or not me.get('user'):
             raise NotebookError('The key was not accepted.')
         return me['user']
@@ -165,11 +168,17 @@ class SetupDialog(QtWidgets.QDialog):
         self.accept()
 
 
-def ensure_config(parent):
+def safe_server(server):
+    """An address the key may be sent to: https://, or http:// to this PC only (a test notebook)."""
+    u = urllib.parse.urlparse(server)
+    return bool(u.hostname) and (u.scheme == 'https' or (u.scheme == 'http' and u.hostname in ('localhost', '127.0.0.1', '::1')))
+
+
+def ensure_config(parent, suggested=''):
     server, key = config()
     if server and key:
         return True
-    return SetupDialog(parent).exec() == QtWidgets.QDialog.DialogCode.Accepted
+    return SetupDialog(parent, suggested).exec() == QtWidgets.QDialog.DialogCode.Accepted
 
 
 class SendDialog(QtWidgets.QDialog):
@@ -284,14 +293,18 @@ def open_link(url, parent=None):
     """lcviewer://open?server=…&dataset=… → download the raw file (with the access key) and return its local path."""
     q = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
     server, dataset = (q.get('server') or [''])[0].rstrip('/'), (q.get('dataset') or [''])[0]
-    saved_server, _key = config()
+    saved_server, saved_key = config()
     if not dataset.isdigit():
         QtWidgets.QMessageBox.warning(parent, 'Lab notebook', f'Not a notebook link: {url}')
         return None
-    if server and saved_server != server:
-        s = _settings()
-        s.setValue('server', server)                    # the link says which notebook; the key may still need setting
-    if not ensure_config(parent):
+    # The access key goes only to the notebook this computer is connected to: a link (from any web page or e-mail)
+    # naming another server is refused, never followed, so it cannot collect the key or re-point "Send to notebook".
+    if server and saved_server and saved_key and server != saved_server:
+        QtWidgets.QMessageBox.warning(parent, 'Lab notebook', f'This link is for another notebook:\n{server}\n\nThis computer is connected to\n'
+                                      f'{saved_server}\n\nThe link was not opened, and your access key was not sent. If you really use '
+                                      'that other notebook, change the connection in the program\'s notebook settings first.')
+        return None
+    if not ensure_config(parent, server if server and safe_server(server) else ''):
         return None
     try:
         content, headers = request('GET', f'datasets/{dataset}/download/', raw=True)
