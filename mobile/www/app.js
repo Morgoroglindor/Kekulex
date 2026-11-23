@@ -662,7 +662,14 @@ function textDialog(id, x, y) {
   const t = id !== null ? doc.texts.get(id) : null;
   ask(t ? 'Edit caption' : 'Add caption', { value: t ? t.text : '', ok: t ? 'Save' : 'Add' }, text => {
     snapshot();
-    if (t) t.text = text; else doc.addText(x, y, text);
+    if (t) t.text = text;
+    else {
+      const id2 = doc.addText(x, y, text);
+      // a caption over or under a reaction arrow is its conditions: formulas there get subscripts (H2SO4), as on the desktop
+      const onArrow = [...doc.arrows.values()].some(a => !String(a.kind || '').startsWith('curved')
+        && x >= Math.min(a.x1, a.x2) - 0.5 && x <= Math.max(a.x1, a.x2) + 0.5 && Math.abs(y - (a.y1 + a.y2) / 2) < 1.6);
+      if (onArrow) doc.texts.get(id2).formula = true;
+    }
     edited();
   });
 }

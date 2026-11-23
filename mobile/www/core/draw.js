@@ -213,12 +213,36 @@ function paintArrow(ctx, ar, BL, color) {
   }
 }
 
+const TEXT_SUB = 0.72;                                     // a text's subscript size, as the desktop's render.SUB
+
+/** [[text, isSubscript]] of a text line, as the desktop's render.runs: with formula on, digits right after a letter,
+ *  ')' or ']' are subscripts (H2SO4, Pd(PPh3)4); "12 h", "1H", "100 °C" stay on the line. */
+export function runs(line, formula) {
+  if (!formula) return [[line, false]];
+  return [...line.matchAll(/(?<=[A-Za-z)\]])\d+|[^\d]+|\d+/g)].map(m =>
+    [m[0], m.index > 0 && /[A-Za-z)\]]/.test(line[m.index - 1]) && /^\d+$/.test(m[0])]);
+}
+
 function paintText(ctx, t, BL, color) {
-  const size = (t.size || 10) * BL / 14.4, lines = String(t.text).split('\n');
-  ctx.fillStyle = color; ctx.textAlign = t.align || 'left'; ctx.textBaseline = 'top';
-  ctx.font = `${t.italic ? 'italic ' : ''}${t.bold ? 'bold ' : ''}${size}px ${FONT}`;
-  lines.forEach((l, k) => ctx.fillText(l, t.x * BL, t.y * BL + k * size * 1.2));
-  ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+  const size = (t.size || 10) * BL / 14.4, small = size * TEXT_SUB, lines = String(t.text).split('\n');
+  const font = s => `${t.italic ? 'italic ' : ''}${t.bold ? 'bold ' : ''}${s}px ${FONT}`;
+  ctx.fillStyle = color; ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+  ctx.font = font(size);
+  const ascent = ctx.measureText('H').fontBoundingBoxAscent || size * 0.9;
+  lines.forEach((l, k) => {
+    const parts = runs(l, t.formula).map(([txt, sub]) => {
+      ctx.font = font(sub ? small : size);
+      return [txt, sub, ctx.measureText(txt).width];
+    });
+    const w = parts.reduce((s, p) => s + p[2], 0);
+    let x = t.x * BL - (t.align === 'center' ? w / 2 : t.align === 'right' ? w : 0);
+    const base = t.y * BL + ascent + k * size * 1.2;
+    for (const [txt, sub, wd] of parts) {
+      ctx.font = font(sub ? small : size);
+      ctx.fillText(txt, x, base + (sub ? 0.28 * size : 0));
+      x += wd;
+    }
+  });
 }
 
 function paintShape(ctx, s, BL, color) {

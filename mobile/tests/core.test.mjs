@@ -221,3 +221,13 @@ test('tapping an element again cycles its hydrogens, as ChemDraw does', () => {
   for (let k = 0; k < 5; k++) { d.cycleHydrogens(b); c.push(d.implicitH(b)); }
   assert.deepEqual(c, [3, 2, 1, 0, 3]);
 });
+
+test('a formula text: digits after a letter or bracket are subscripts, as the desktop render.runs', async () => {
+  const { runs } = await import('../www/core/draw.js');
+  const subs = (line) => runs(line, true).filter(([, s]) => s).map(([t]) => t);
+  assert.deepEqual(subs('Pd(PPh3)4'), ['3', '4']);
+  assert.deepEqual(subs('K2CO3, toluene/H2O'), ['2', '3', '2']);
+  assert.deepEqual(subs('100 °C, 12 h, 1H'), []);
+  assert.deepEqual(runs('H2O', false), [['H2O', false]]);
+  assert.equal(runs('SnCl2·2H2O', true).map(([t]) => t).join(''), 'SnCl2·2H2O');
+});
