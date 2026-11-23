@@ -25,6 +25,14 @@ data = dict(GROUPS=model.GROUPS, NICKNAMES=model.NICKNAMES, VALENCE=model.VALENC
             ELEMENTS=elements, ELECTRON=chem.ELECTRON, ADDUCTS=chem.ADDUCTS_POS + chem.ADDUCTS_NEG,
             TEMPLATES=dict(templates.TEMPLATES),
             LAYOUT=[[n, s, c] for n, s, c in layout2d.TEMPLATES], SAME_SHAPE=layout2d.SAME_SHAPE)
+import canvas  # noqa: E402  (the desktop's ChemDraw-style hotkeys: the web version uses the same tables)
+import render  # noqa: E402
+data['KEYS'] = dict(ATOM=canvas.ATOM_KEYS, SPROUT={k: list(v) for k, v in canvas.SPROUT_KEYS.items()},
+                    FUSE={k: list(v) for k, v in canvas.FUSE_KEYS.items()}, BOND_STYLE=canvas.BOND_STYLE_KEYS,
+                    TOOL=canvas.TOOL_KEYS)
+data['STYLE_SHEETS'] = {name: {k: v for k, v in s.items() if isinstance(v, (int, float, str, bool))}
+                        for name, s in render.STYLE_SHEETS.items()}
+data['DEFAULT_STYLE'] = {k: v for k, v in render.DEFAULT_STYLE.items() if isinstance(v, (int, float, str, bool))}
 with open(os.path.join(MOBILE, 'www', 'core', 'data.js'), 'w', encoding='utf-8') as f:
     f.write('// Made by tools/export_data.py from the desktop program: do not edit.\n')
     for k, v in data.items():

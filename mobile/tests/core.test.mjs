@@ -231,3 +231,76 @@ test('a formula text: digits after a letter or bracket are subscripts, as the de
   assert.deepEqual(runs('H2O', false), [['H2O', false]]);
   assert.equal(runs('SnCl2·2H2O', true).map(([t]) => t).join(''), 'SnCl2·2H2O');
 });
+
+// ------------------------------------------------------------------------------------------ the desktop's keys (keys.js)
+const smilesOf = d => { const [block] = d.toMolblock(); const m = RD.get_mol(block); const s = m.get_smiles(); m.delete(); return s; };
+
+test('hotkeys over an atom, as the desktop: elements, nicknames, the same key again, bonds sprouted', async () => {
+  const { hotkey } = await import('../www/core/keys.js');
+  const d = new Doc();
+  insertSmiles(RD, d, 'CC');
+  const [a, b] = [...d.atoms.keys()];
+  assert.equal(hotkey(RD, d, 'o', ['atom', a]), 'edited');
+  assert.equal(canon(smilesOf(d)), canon('CO'));                     // o: oxygen
+  hotkey(RD, d, 'o', ['atom', a]);                                    // again: one H fewer (O with no H: a radical-free O-)
+  assert.equal(d.atoms.get(a).hcount, 0);
+  assert.equal(hotkey(RD, d, 'C', ['atom', b]), 'edited');           // Shift+C: chlorine
+  assert.equal(d.atoms.get(b).el, 'Cl');
+  const e = new Doc(); insertSmiles(RD, e, 'CC');
+  const c = [...e.atoms.keys()][0];
+  hotkey(RD, e, '2', ['atom', c]);                                    // 2: C=O sprouted
+  assert.equal(canon(smilesOf(e)), canon('CC=O'));
+  hotkey(RD, e, 'O', ['atom', [...e.atoms.keys()][1]]);              // Shift+O: OMe, a nickname
+  assert.equal(e.atoms.get([...e.atoms.keys()][1]).label, 'OMe');
+  hotkey(RD, e, '+', ['atom', c]);
+  assert.equal(e.atoms.get(c).charge, 1);
+  assert.equal(hotkey(RD, e, 't', ['atom', c]), 'label');
+});
+
+test('hotkeys over a bond: order, wedge and its turn, a fused ring; tool keys elsewhere', async () => {
+  const { hotkey } = await import('../www/core/keys.js');
+  const d = new Doc();
+  insertSmiles(RD, d, 'CCC');
+  const bond = [...d.bonds.keys()][0];
+  hotkey(RD, d, '2', ['bond', bond]);
+  assert.equal(d.bonds.get(bond).order, 2);
+  hotkey(RD, d, 'w', ['bond', bond]);
+  const bd = d.bonds.get(bond), first = bd.a;
+  assert.deepEqual([bd.order, bd.stereo], [1, 'wedge']);
+  hotkey(RD, d, 'w', ['bond', bond]);                                 // again: the other way round
+  assert.notEqual(d.bonds.get(bond).a, first);
+  const atoms = d.atoms.size;
+  hotkey(RD, d, '6', ['bond', bond]);                                 // a six-membered ring fused on it
+  assert.equal(d.atoms.size, atoms + 4);
+  assert.deepEqual(hotkey(RD, d, ' ', null), ['select']);
+  assert.deepEqual(hotkey(RD, d, 'j', null), ['ring', 'benzene']);
+  assert.equal(hotkey(RD, d, 'q', null), null);                       // nothing there
+});
+
+test('missing charges, as the desktop: N with four bonds is N+, O typed with no H on one bond is O−', async () => {
+  const { checkStructure, fixCharges, neededCharge } = await import('../www/core/keys.js');
+  const d = new Doc();
+  insertSmiles(RD, d, 'C[N+](C)(C)C');
+  const n = [...d.atoms.entries()].find(([, a]) => a.el === 'N')[0];
+  d.atoms.get(n).charge = 0;                                          // drawn without its charge
+  assert.equal(neededCharge(d, n), 1);
+  assert.ok(checkStructure(d).some(p => p.includes('needs a charge')));
+  assert.deepEqual(fixCharges(d), { [n]: 1 });
+  assert.equal(neededCharge(d, [...d.atoms.keys()][0]), null);         // carbon: the chemist's call
+});
+
+test('align and arrange as a reaction scheme', async () => {
+  const { align, arrangeScheme, objects } = await import('../www/core/keys.js');
+  const d = new Doc();
+  insertSmiles(RD, d, 'CCO', 0, 0);
+  insertSmiles(RD, d, 'CC(=O)O', 10, 3);
+  d.addArrow(4, -2, 6, -2, 'forward');
+  assert.ok(align(d, null, 'vcenter'));
+  const mids = objects(d).map(o => (o.box[1] + o.box[3]) / 2);
+  assert.ok(Math.max(...mids) - Math.min(...mids) < 1e-9);
+  assert.ok(arrangeScheme(d, null));
+  const objs = objects(d).sort((p, q) => p.box[0] - q.box[0]);
+  assert.deepEqual(objs.map(o => o.kind), ['mol', 'arrow', 'mol']);
+  for (let k = 1; k < objs.length; k++) assert.ok(objs[k].box[0] > objs[k - 1].box[2]);   // one row, in order, apart
+  assert.ok(Math.abs(d.arrows.values().next().value.x2 - d.arrows.values().next().value.x1) >= 3);
+});

@@ -60,3 +60,11 @@ input { -webkit-user-select: text; user-select: text; }
 .grid button:active { background: var(--line); }
 .hint { color: var(--muted); font-size: 13px; margin-top: 8px; }
 #splash { position: fixed; inset: 0; background: var(--bg); z-index: 9; display: flex; align-items: center; justify-content: center; font-size: 22px; font-weight: 700; }
+
+/* a mouse and keyboard (the web version on a PC): the right-click menu */
+#ctxMenu { position: fixed; z-index: 8; min-width: 190px; max-height: 80vh; overflow-y: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 4px; box-shadow: 0 6px 18px #0004; display: flex; flex-direction: column; }
+#ctxMenu button { text-align: left; padding: 6px 10px; border-radius: 5px; font-size: 13.5px; background: none; color: var(--ink); }
+#ctxMenu button:hover:not(:disabled) { background: var(--line); }
+#ctxMenu button:disabled { opacity: .4; }
+#ctxMenu hr { border: 0; border-top: 1px solid var(--line); margin: 3px 2px; }
+#sheet .item.on { outline: 2px solid var(--accent); }

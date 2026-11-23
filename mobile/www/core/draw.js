@@ -1,7 +1,16 @@
 // draw.js - paints the drawing on a canvas, as the desktop's render.py does: labels with their H and charge, bonds cut back
 // at labels, double bonds on the ring's side, wedges and hashes, arrows, captions and simple shapes. Proportions are ACS 1996
 // (bond 14.4 pt), so a bond of BL px scales everything.
-const K = { font: 10 / 14.4, line: 0.6 / 14.4, bold: 2 / 14.4, hash: 2.5 / 14.4, gap: 0.18, margin: 1.6 / 14.4 };
+const K = { font: 10 / 14.4, line: 0.6 / 14.4, bold: 2 / 14.4, hash: 2.5 / 14.4, gap: 0.18, margin: 1.6 / 14.4, bondPt: 14.4, captionPt: 10 };
+
+/** The drawing's style sheet (File > Document settings on the desktop: ACS, RSC, Wiley …) as proportions of its bond
+ * length, which BL px stands for: a drawing looks the same here as there. */
+export function useStyle(style = {}) {
+  const st = style || {}, L = Number(st.bond_length) || 14.4;
+  const v = (k, d) => (Number.isFinite(Number(st[k])) && Number(st[k]) > 0 ? Number(st[k]) : d);
+  Object.assign(K, { bondPt: L, font: v('font_size', 10) / L, line: v('line_width', 0.6) / L, bold: v('bold_width', 2) / L,
+    hash: v('hash_spacing', 2.5) / L, gap: v('bond_spacing', 0.18), margin: v('margin', 1.6) / L, captionPt: v('caption_size', 10) });
+}
 export const FONT = 'Arial, Roboto, "Noto Sans", sans-serif';
 const SUB = 0.75;
 
@@ -186,7 +195,7 @@ function head(ctx, x, y, dx, dy, s, half = 0) {
 }
 
 function paintArrow(ctx, ar, BL, color) {
-  const s = BL / 14.4, x1 = ar.x1 * BL, y1 = ar.y1 * BL, x2 = ar.x2 * BL, y2 = ar.y2 * BL, dx = x2 - x1, dy = y2 - y1;
+  const s = BL / K.bondPt, x1 = ar.x1 * BL, y1 = ar.y1 * BL, x2 = ar.x2 * BL, y2 = ar.y2 * BL, dx = x2 - x1, dy = y2 - y1;
   const L = Math.hypot(dx, dy) || 1, ux = dx / L, uy = dy / L, nx = -uy, ny = ux;
   ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = K.line * BL; ctx.lineCap = 'butt';
   if (ar.kind === 'curved' || ar.kind === 'curved_half') {
@@ -224,7 +233,7 @@ export function runs(line, formula) {
 }
 
 function paintText(ctx, t, BL, color) {
-  const size = (t.size || 10) * BL / 14.4, small = size * TEXT_SUB, lines = String(t.text).split('\n');
+  const size = (t.size || K.captionPt) * BL / K.bondPt, small = size * TEXT_SUB, lines = String(t.text).split('\n');
   const font = s => `${t.italic ? 'italic ' : ''}${t.bold ? 'bold ' : ''}${s}px ${FONT}`;
   ctx.fillStyle = color; ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
   ctx.font = font(size);
@@ -263,6 +272,7 @@ export const DRAWN_SHAPES = ['line', 'rect', 'roundrect', 'oval', 'brackets'];
 
 /** Paints the drawing; ctx is already scaled and moved so that one model unit is BL px. */
 export function paint(ctx, doc, BL, opts = {}) {
+  useStyle(doc.style);
   const color = opts.color || '#000000';
   const labels = new Map();
   for (const a of doc.atoms.keys()) { const l = labelOf(ctx, doc, a, BL); if (l) labels.set(a, l); }
@@ -286,6 +296,13 @@ export function paint(ctx, doc, BL, opts = {}) {
   }
   for (const ar of doc.arrows.values()) paintArrow(ctx, ar, BL, ar.color || color);
   for (const t of doc.texts.values()) paintText(ctx, t, BL, t.color || color);
+  if (doc.style && doc.style.show_atom_numbers) {          // View > Show atom numbers: 1, 2, 3 … in the drawing's order
+    ctx.fillStyle = '#1B6CA8'; ctx.font = `${0.5 * K.font * BL}px ${FONT}`; ctx.textBaseline = 'alphabetic';
+    let k = 0;
+    ctx.textAlign = 'right';                               // lower left: charges and H go up and to the right
+    for (const at of doc.atoms.values()) ctx.fillText(String(++k), at.x * BL - 0.16 * BL, at.y * BL + 0.42 * BL);
+    ctx.textAlign = 'left';
+  }
 }
 
 /** [x0, y0, x1, y1] of what is drawn in bond lengths, or null. */

@@ -23,6 +23,17 @@ On the phone
   Top: the menu; the formula (tap it: masses, adducts, SMILES, InChIKey; it covers the selection, if any); undo, redo.
   Menu: structure from a name (PubChem, only the name is sent), paste SMILES / MOL, templates, clean up, open and send files.
   The drawing is kept between sessions.
+
+On a PC (a mouse and keyboard: the web version in the lab notebook, or opened in a browser)
+  As on the desktop: what the mouse points at is highlighted, and the desktop's ChemDraw-style hotkeys act on it (the
+  same tables as canvas.py, exported to data.js by tools/export_data.py: o, n, Shift+C ... over an atom; 1, 2, 3, w, h,
+  a fused ring over a bond; Space, x, j, e, t for tools). Ctrl+Z / Y, Ctrl+C / X / V (copies as SMILES too; pastes a
+  SMILES or MOL from anywhere), Ctrl+Shift+C (a picture), Ctrl+A, Ctrl+D, Ctrl+K, arrow keys, Delete, Escape; ? lists
+  them. Right-click: the menu of what is under the mouse. Double-click an atom: its label. Pointing at the drawing gives
+  it the keyboard, unless one is typing on the page around it.
+  Menu, as on the desktop: Check structure, Add missing charges, Rotate…, Scale…, Align…, Arrange as reaction scheme,
+  Show atom numbers, Document style (ACS, RSC, Wiley, Nature, slides …: line widths and label sizes follow it).
+  The logic is in www/core/keys.js (hotkeys, needed charges, align, reaction scheme), tested in tests/core.test.mjs.
   Labels: elements, nicknames and condensed formulas (SO3K, CH2CH3, N(CH3)2, PO3H2 ...), also in lower case (so3k);
   CH2 keeps two H, CH2• / C•• / O•+ make radicals, carbenes and radical cations, as on the desktop. Groups made on the
   desktop select and move as one here, and captions pasted there (formula, masses, MS fragments) follow edits made here
