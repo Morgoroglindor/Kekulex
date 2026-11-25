@@ -123,6 +123,34 @@ class _LabelEdit(QLineEdit):
         self.canvas.commit_editor()
 
 
+class _GridEdit(QLineEdit):
+    """Typing into one cell of a stoichiometry grid on the drawing: the grid follows each keystroke; Enter keeps
+    it, Esc puts the old value back, Tab / Shift+Tab move to the next / previous cell that takes a value."""
+
+    def __init__(self, canvas):
+        super().__init__(canvas)
+        self.canvas = canvas
+        self.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.returnPressed.connect(lambda: canvas.commit_editor())
+        self.textEdited.connect(canvas.grid_live)
+
+    def event(self, e):
+        if e.type() == e.Type.KeyPress and e.key() in (Qt.Key.Key_Tab, Qt.Key.Key_Backtab):
+            self.canvas.grid_step(-1 if e.key() == Qt.Key.Key_Backtab else 1)
+            return True
+        return super().event(e)
+
+    def keyPressEvent(self, e):
+        if e.key() == Qt.Key.Key_Escape:
+            self.canvas.commit_editor(cancel=True)
+            return
+        super().keyPressEvent(e)
+
+    def focusOutEvent(self, e):
+        super().focusOutEvent(e)
+        self.canvas.commit_editor()
+
+
 class _TextEdit(QPlainTextEdit):
     def __init__(self, canvas):
         super().__init__(canvas)
@@ -181,6 +209,7 @@ class Canvas(QWidget):
         self.show_reaction = False                          # View > Show reaction interpretation
         self.show_partial = False                           # View > Show partial charges
         self._partial = (None, {})                          # (structure it was computed for, {atom: charge})
+        self.fragment_view = None                           # Fragments tab: (atoms kept, atoms lost, bonds broken)
         self.show_rulers = False
         self.show_warnings = True                           # red boxes on atoms over their valence
         self._renderer = None
@@ -945,6 +974,113 @@ class Canvas(QWidget):
         from stoich_dialog import GridDialog
         GridDialog(self, gid, self.window()).exec()
 
+    def _grid_columns(self, gid, side):
+        """The grid's columns on one side that still have a structure (as the grid shows them)."""
+        return [c for c in getattr(self.doc.grids[gid], side) if any(a in self.doc.atoms for a in c.get('atoms', []))]
+
+    def grid_click(self, gid, pos):
+        """A double-click on a stoichiometry grid: a cell that takes a value is typed into in place, a reactant's
+        formula makes it the limiting reactant, a calculated cell says how it is worked out, the titles and row names
+        open the grid's window."""
+        import stoich
+        rend = self.renderer()
+        mx, my = self.to_model(pos)
+        pt = QPointF(mx * rend.BL, my * rend.BL)
+        _ops, _b, cells = rend.grid_layout(gid)
+        hit = next((key for key, r in cells.items() if r.contains(pt)), None)
+        if hit is None or hit[0] == 'title':
+            self.edit_grid(gid)
+            return
+        side, k, key = hit
+        if key == 'header':
+            if side == 'reactants':
+                self.snapshot()
+                for j, col in enumerate(self._grid_columns(gid, side)):
+                    col['limiting'] = j == k
+                self.edited()
+                self.message.emit('Limiting reactant changed: the other amounts follow from it.')
+            return
+        inputs = stoich.REACTANT_INPUTS if side == 'reactants' else stoich.PRODUCT_INPUTS
+        if key not in inputs:
+            self.message.emit('That value is calculated from the others: type an amount, equivalents, volume ... '
+                              'instead.')
+            return
+        self.edit_grid_cell(gid, side, k, key)
+
+    def edit_grid_cell(self, gid, side, k, key):
+        """Type a value into one grid cell in place ('250 mg', '1.5 mmol', '2 mL', '0.5 M', '95 %')."""
+        import stoich
+        self.commit_editor()
+        cols = self._grid_columns(gid, side)
+        if not (0 <= k < len(cols)):
+            return
+        col = cols[k]
+        rend = self.renderer()
+        rect = rend.grid_layout(gid)[2].get((side, k, key))
+        if rect is None:
+            return
+        self.snapshot()
+        old = col.get(key)
+        w = _GridEdit(self)
+        w.setFont(self._editor_font(render.style_of(self.doc)['font_size']))
+        if old is not None:
+            from PyQt6.QtCore import QLocale
+            num, unit = stoich.display(key, stoich.Cell(old, True), QLocale.system().decimalPoint() or ',')
+            w.setText((num + ' ' + unit).strip())
+            w.selectAll()
+        w.setPlaceholderText({'mass': 'g', 'moles': 'mol', 'volume': 'mL', 'molarity': 'M', 'density': 'g/mL',
+                              'percent': '%'}.get(stoich.KIND.get(key, ''), ''))
+        r = self.rect_px(rect)
+        h = max(round(r.height()), w.sizeHint().height())
+        w.setGeometry(round(r.left()), round(r.center().y() - h / 2), max(round(r.width()), 80), h)
+        w.setToolTip('Enter keeps it, Esc puts the old value back, Tab goes to the next cell')
+        self.editor = (w, 'grid', gid, (side, k, key, old), None)
+        w.show(); w.setFocus()
+
+    def grid_live(self, text):
+        """The grid follows what is being typed (a value it cannot read leaves the grid as it was)."""
+        import stoich
+        if not self.editor or self.editor[1] != 'grid':
+            return
+        w, _kind, gid, (side, k, key, _old), _y = self.editor
+        cols = self._grid_columns(gid, side) if gid in self.doc.grids else []
+        if not (0 <= k < len(cols)):
+            return
+        try:
+            value = stoich.parse(text, stoich.KIND.get(key, 'number'))
+        except ValueError as e:                             # half typed ('2 m'): marked, the grid waits
+            w.setStyleSheet('QLineEdit { border: 1px solid #D32F2F; }')
+            w.setToolTip(str(e))
+            return
+        w.setStyleSheet('')
+        if value is None:
+            cols[k].pop(key, None)
+        else:
+            cols[k][key] = value
+        self._renderer = None
+        self.update()
+
+    def grid_step(self, d):
+        """Tab in a grid cell: keep it and type into the next (d = 1) or previous (d = -1) cell that takes a value,
+        down the column, then on to the next compound."""
+        import stoich
+        if not self.editor or self.editor[1] != 'grid':
+            return
+        gid, (side, k, key, _old) = self.editor[2], self.editor[3]
+        self.commit_editor()
+        if gid not in self.doc.grids:
+            return
+        g = self.doc.grids[gid]
+        order = []
+        for sd, inputs in (('reactants', stoich.REACTANT_INPUTS), ('products', stoich.PRODUCT_INPUTS)):
+            keys = [kk for kk in inputs if kk not in g.hidden]
+            for j in range(len(self._grid_columns(gid, sd))):
+                order += [(sd, j, kk) for kk in keys]
+        if (side, k, key) not in order:
+            return
+        nxt = order[(order.index((side, k, key)) + d) % len(order)]
+        self.edit_grid_cell(gid, *nxt)
+
     def check_structure(self):
         """Structure > Check structure: the problems in the selected structures (all, when nothing is selected)."""
         import chem
@@ -1396,6 +1532,8 @@ class Canvas(QWidget):
             self._paint_reaction(p, rend, BL)
         if self.show_partial:
             self._paint_partial(p, BL)
+        if self.fragment_view:
+            self._paint_fragment(p, rend, BL)
         rend.paint(p, errors=self.show_warnings)
         if self.sel:                                        # the selection's frame, as a dashed box
             r = self._sel_box(rend)
@@ -1553,6 +1691,84 @@ class Canvas(QWidget):
             p.setBrush(QBrush(g))
             p.drawEllipse(QPointF(at.x * BL, at.y * BL), r, r)
 
+    def show_fragment(self, view):
+        """The Fragments tab's picked row on the drawing: (atom ids kept, atom ids lost, bond ids broken) or None."""
+        if view == self.fragment_view:
+            return
+        self.fragment_view = view
+        self.update()
+
+    def _paint_fragment(self, p, rend, BL):
+        keep, lost, cut = self.fragment_view
+        green, red = QColor('#2E9D4F'), QColor('#E0463A')
+        green.setAlpha(70); red.setAlpha(60)
+        for i, b in self.doc.bonds.items():                 # a soft band along the bonds of each part
+            if i in cut:
+                continue
+            for group, col in ((keep, green), (lost, red)):
+                if b.a in group and b.b in group:
+                    self._mark(p, rend, 'bond', i, col, BL)
+        for group, col in ((keep, green), (lost, red)):
+            for a in group:
+                self._mark(p, rend, 'atom', a, col, BL)
+        bar = QColor('#D32F2F')
+        p.setPen(QPen(bar, 0.09 * BL, cap=Qt.PenCapStyle.RoundCap))
+        for i in cut:                                       # a bar across each bond that breaks
+            b = self.doc.bonds.get(i)
+            if b is None:
+                continue
+            pa, pb = self.doc.atoms[b.a], self.doc.atoms[b.b]
+            mx, my = (pa.x + pb.x) / 2 * BL, (pa.y + pb.y) / 2 * BL
+            dx, dy = pb.x - pa.x, pb.y - pa.y
+            n = max((dx * dx + dy * dy) ** 0.5, 1e-6)
+            ux, uy = -dy / n * 0.32 * BL, dx / n * 0.32 * BL
+            p.drawLine(QPointF(mx - ux, my - uy), QPointF(mx + ux, my + uy))
+
+    def draw_fragment(self, piece, parent, loss=''):
+        """Fragments tab > Draw: the fragment ion (a Doc with the drawing's coordinates) under its structure (atom
+        ids parent), after an arrow labelled with the loss, with its formula and m/z as a caption. Returns the new
+        items."""
+        import ms
+        doc = self.doc
+        rend = self.renderer()
+        BL = rend.BL
+        box = QRectF()
+        for a in parent:
+            r = rend.item_rect('atom', a)
+            box = r if box.isNull() else box.united(r)
+        if box.isNull():
+            return []
+        for kind in ('text', 'shape'):                      # below its own captions too
+            for i in doc.table(kind):
+                r = rend.item_rect(kind, i)
+                if r.intersects(box.adjusted(0, 0, 0, 4 * BL)) and r.top() >= box.top():
+                    box = box.united(r)
+        cx, bottom = box.center().x() / BL, box.bottom() / BL
+        self.snapshot()
+        j = doc.add_arrow(cx, bottom + 0.5, cx, bottom + 2.0, 'forward')
+        new = [('arrow', j)]
+        if loss:
+            size = render.style_of(doc)['font_size']
+            t = doc.add_text(cx + 0.35, bottom + 1.25 - size * 0.62 / BL, loss, align='left', size=size,
+                             formula=True)
+            new.append(('text', t))
+        xs = [at.x for at in piece.atoms.values()]
+        ys = [at.y for at in piece.atoms.values()]
+        items = doc.insert_dict(piece.to_dict(), cx - (min(xs) + max(xs)) / 2, bottom + 3.0 - min(ys))
+        atoms = {i for k, i in items if k == 'atom'}
+        self._renderer = None
+        cap = self._caption_under(atoms, ms.describe(doc, atoms, chr(10)), True, attach=True, live=['ms'])
+        block = items + [('text', cap)]
+        self._renderer = None
+        if self.push_clear(block):                          # below earlier drawings: the arrow reaches down to it
+            rend = self.renderer()
+            top = min(rend.item_rect(*it).top() for it in block if it[0] != 'bond') / BL
+            doc.arrows[j].y2 = max(doc.arrows[j].y1 + 1.0, top - 0.4)
+            self._renderer = None
+        self.sel = set(new + block)
+        self.edited()
+        return new + block
+
     def _paint_preview(self, p, BL, accent):
         kind, pts = self.preview
         pen = QPen(accent, 1.2, cap=Qt.PenCapStyle.RoundCap, join=Qt.PenJoinStyle.RoundJoin)
@@ -1645,9 +1861,12 @@ class Canvas(QWidget):
             return
         w, kind, i, x, y = self.editor
         self.editor = None
-        text = w.text() if kind == 'label' else w.toPlainText()
+        text = w.text() if kind in ('label', 'grid') else w.toPlainText()
         w.hide(); w.deleteLater()
         self.setFocus()
+        if kind == 'grid':
+            self._commit_grid(i, x, text, cancel)
+            return
         if cancel:
             return
         if kind == 'label':
@@ -1687,6 +1906,30 @@ class Canvas(QWidget):
             else:
                 del self.doc.texts[i]
             self.edited()
+
+    def _commit_grid(self, gid, where, text, cancel):
+        import stoich
+        side, k, key, old = where
+        cols = self._grid_columns(gid, side) if gid in self.doc.grids else []
+        if not (0 <= k < len(cols)):
+            return
+        col = cols[k]
+        value = old
+        if not cancel:
+            try:
+                value = stoich.parse(text, stoich.KIND.get(key, 'number'))
+            except ValueError as e:
+                self.message.emit(f'{e} - the old value is kept.')
+        if value is None:
+            col.pop(key, None)
+        else:
+            col[key] = value
+        if value == old and self.undo_stack:                # nothing changed: no undo step
+            self.undo_stack.pop()
+            self._renderer = None
+            self.update()
+            return
+        self.edited()
 
     # ------------------------------------------------------------------------------------------- mouse
     def mousePressEvent(self, e):
@@ -2458,7 +2701,7 @@ class Canvas(QWidget):
         elif item and item[0] == 'text':
             self.edit_text(item[1])
         elif item and item[0] == 'grid':
-            self.edit_grid(item[1])
+            self.grid_click(item[1], e.position())
         elif item and item[0] == 'seq':
             self.edit_object.emit('seq', item[1])
         elif item and item[0] == 'tlc':

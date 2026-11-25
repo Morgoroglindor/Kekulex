@@ -1,7 +1,8 @@
 """
 spectrum_dialog.py - Structure > Annotate mass spectrum: a measured spectrum (CSV / TXT / JCAMP-DX / MSP / MGF / mzML,
-or pasted) as a stick plot, its peaks matched to the ions of the structures drawn (their adducts, M•+, and the pieces of
-breaking one bond), labelled on the plot and listed. Insert puts the annotated spectrum on the drawing as a picture.
+or pasted) as a stick plot, its peaks matched to the ions of the structures drawn (their adducts, M•+, the rule-based
+fragments of fragments.py and the pieces of breaking one bond), labelled on the plot and listed. Insert puts the
+annotated spectrum on the drawing as a picture.
 """
 import io
 import re

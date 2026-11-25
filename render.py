@@ -754,19 +754,29 @@ class Renderer:
         return text_path(text, self.s['font'], size, x, y, italic=not text.isdigit())
 
     # ------------------------------------------------------------------------------------------- stoichiometry grid
+    GRID_COLORS = {'border': '#C5CED8', 'head': '#EEF2F7', 'alt': '#F6F8FA', 'rule': '#E3E8EE', 'label': '#5B6673',
+                   'value': '#1F2933', 'typed': '#1659C7', 'unit': '#7B8794', 'limit_fill': '#FFF4D6',
+                   'limit': '#B7791F', 'reactants': ('#E6EEF9', '#1F4E99'), 'products': ('#E5F4EA', '#1E7A45')}
+
     def grid_layout(self, i):
-        """What a stoichiometry grid draws: ([('text', text, x, baseline, size, bold, italic) | ('line', x1, y1, x2,
-        y2) | ('rect', QRectF)], QRectF, {('reactants' | 'products', column index, row key): QRectF of the cell})."""
+        """What a stoichiometry grid draws: ([('text', text, x, baseline, size, bold, italic, colour) |
+        ('fill', QRectF, colour, radius) | ('frame', QRectF, colour, radius) | ('line', x1, y1, x2, y2, colour)],
+        QRectF, {(side, column index, row key | 'header'): QRectF of the cell, ('title', side): QRectF}).
+        A card per side: a coloured title, a header row with each compound's formula (the limiting reactant
+        marked), then one row per quantity - typed values in blue, calculated ones in ink, units in grey."""
         import stoich
         from PyQt6.QtCore import QLocale
         g = self.doc.grids[i]
+        C = self.GRID_COLORS
+        own = g.color or ''
         table = stoich.compute(self.doc, g)
         dec = QLocale.system().decimalPoint() or ','
         fs = self.s['font_size']
-        small = fs * 0.75
+        small = fs * 0.72
         m = self.m
-        row_h = fs * 1.5
-        pad = fs * 0.6
+        row_h = fs * 1.55
+        head_h = fs * 2.3
+        pad = fs * 0.55
         ops, cells = [], {}
         x = g.x * self.BL
         top = g.y * self.BL
@@ -775,88 +785,118 @@ class Renderer:
         def text_w(t, size, bold=False, italic=False, formula=False):
             return sum(m.width(txt, size * (SUB if sub else 1), bold, italic) for txt, sub in runs(t, formula))
 
-        def put_text(t, x0, base, size, bold=False, italic=False, formula=False):
+        def put_text(t, x0, base, size, color, bold=False, italic=False, formula=False):
             for txt, sub in runs(t, formula):
                 sz = size * (SUB if sub else 1)
-                ops.append(('text', txt, x0, base + (0.28 * size if sub else 0), sz, bold, italic))
+                ops.append(('text', txt, x0, base + (0.28 * size if sub else 0), sz, bold, italic, color))
                 x0 += m.width(txt, sz, bold, italic)
             return x0
         for side, rows in (('reactants', stoich.REACTANT_ROWS), ('products', stoich.PRODUCT_ROWS)):
             cols = table[side]
-            rows = [(k, label) for k, label in rows if k not in g.hidden]
             if not cols:
                 continue
-            texts = []                                      # per column, per row: (number, unit, bold, italic)
+            rows = [(k, label) for k, label in rows if k not in g.hidden and k not in ('formula', 'limiting')]
+            inputs = stoich.REACTANT_INPUTS if side == 'reactants' else stoich.PRODUCT_INPUTS
+            texts = []                                      # per column, per row: (number, unit, typed)
             for col in cols:
                 col_texts = {}
                 for key, _label in rows:
                     cell = col.cells.get(key)
-                    if cell is None:
-                        col_texts[key] = ('', '', False, False)
-                        continue
-                    num, unit = stoich.display(key, cell, dec)
-                    bold = cell.typed or key == 'formula' or (key == 'limiting' and cell.value)
-                    italic = key == 'limiting' and bool(cell.value)
-                    col_texts[key] = (num, unit, bold, italic)
+                    num, unit = stoich.display(key, cell, dec) if cell is not None else ('', '')
+                    col_texts[key] = (num, unit, bool(cell and cell.typed))
                 texts.append(col_texts)
-            label_w = max(m.width(label, fs) for _k, label in rows) + 2 * pad
+            label_w = max(m.width(label, small) for _k, label in rows) + 2 * pad if rows else fs * 4
             col_ws = []
-            for col_texts in texts:
-                w = max([text_w(n, fs, b, it, formula=True) + (m.width(u, small) if u else 0)
-                         for n, u, b, it in col_texts.values()] + [fs * 3.5])
+            for col, col_texts in zip(cols, texts):
+                w = max([m.width(n, fs, t) + (m.width(u, small) + fs * 0.2 if u else 0)
+                         for n, u, t in col_texts.values()] + [text_w(col.formula, fs, True, formula=True),
+                                                               m.width('limiting', small), fs * 3.6])
                 col_ws.append(w + 2 * pad)
-            title = 'Reactants' if side == 'reactants' else 'Products'
-            tx = x + pad
-            for ch in title:                                # letter-spaced italic title above the table
-                ops.append(('text', ch, tx, top - fs * 0.45, fs, False, True))
-                tx += m.width(ch, fs, False, True) + fs * 0.32
             w_total = label_w + sum(col_ws)
-            h_total = row_h * len(rows) + pad * 0.6
-            rect = QRectF(x, top, w_total, h_total)
-            ops.append(('rect', rect))
+            h_total = head_h + row_h * len(rows)
+            fill, ink = C[side]
+            title = 'Reactants' if side == 'reactants' else 'Products'
+            tw = m.width(title, small, True) + 2 * pad
+            chip = QRectF(x, top - fs * 1.55, tw, fs * 1.2)
+            ops.append(('fill', chip, fill, fs * 0.6))
+            put_text(title, x + pad, chip.bottom() - fs * 0.33, small, own or ink, bold=True)
+            cells[('title', side)] = chip
+            card = QRectF(x, top, w_total, h_total)
+            ops.append(('fill', card, '#FFFFFF', fs * 0.45))
+            ops.append(('fill', QRectF(x, top, w_total, head_h), C['head'], fs * 0.45))
+            ops.append(('fill', QRectF(x, top + head_h - fs * 0.5, w_total, fs * 0.5), C['head'], 0))
+            for r in range(len(rows)):                      # zebra rows
+                if r % 2:
+                    ops.append(('fill', QRectF(x, top + head_h + r * row_h, w_total, row_h), C['alt'],
+                                fs * 0.45 if r == len(rows) - 1 else 0))
             cx = x + label_w
-            for k, cw in enumerate(col_ws):                 # column separators
-                ops.append(('line', cx, top, cx, top + h_total))
+            for k, (col, cw) in enumerate(zip(cols, col_ws)):
+                limiting = side == 'reactants' and col.cells.get('limiting') and col.cells['limiting'].value
+                if limiting:
+                    ops.append(('fill', QRectF(cx, top, cw, head_h), C['limit_fill'], 0))
+                fw = text_w(col.formula, fs, True, formula=True)
+                put_text(col.formula, cx + (cw - fw) / 2, top + head_h * (0.5 if limiting else 0.62), fs,
+                         own or C['value'], bold=True, formula=True)
+                if limiting:
+                    lw = m.width('limiting', small, False, True)
+                    put_text('limiting', cx + (cw - lw) / 2, top + head_h * 0.86, small, C['limit'], italic=True)
+                cells[(side, k, 'header')] = QRectF(cx, top, cw, head_h)
                 for r, (key, _label) in enumerate(rows):
-                    cells[(side, k, key)] = QRectF(cx, top + pad * 0.3 + r * row_h, cw, row_h)
+                    cells[(side, k, key)] = QRectF(cx, top + head_h + r * row_h, cw, row_h)
                 cx += cw
+            ops.append(('line', x, top + head_h, x + w_total, top + head_h, C['border']))
+            for r in range(1, len(rows)):
+                y = top + head_h + r * row_h
+                ops.append(('line', x, y, x + w_total, y, C['rule']))
+            cx = x + label_w
+            for cw in col_ws:
+                ops.append(('line', cx, top, cx, top + h_total, C['rule']))
+                cx += cw
+            ops.append(('frame', card, C['border'], fs * 0.45))
             for r, (key, label) in enumerate(rows):
-                base = top + pad * 0.3 + r * row_h + row_h * 0.72
-                put_text(label, x + pad, base, fs)
+                base = top + head_h + r * row_h + row_h * 0.66
+                put_text(label, x + pad, base, small, C['label'])
                 cx = x + label_w
                 for k, cw in enumerate(col_ws):
-                    num, unit, bold, italic = texts[k][key]
+                    num, unit, typed = texts[k][key]
                     if num:
-                        end = put_text(num, cx + pad, base, fs, bold, italic, formula=(key == 'formula'))
+                        color = own or (C['typed'] if typed else C['value'])
+                        w = m.width(num, fs, typed) + (m.width(unit, small) + fs * 0.2 if unit else 0)
+                        end = put_text(num, cx + cw - pad - w, base, fs, color, bold=typed)
                         if unit:
-                            put_text(unit, end + 0.5, base, small, bold)
+                            put_text(unit, end + fs * 0.2, base, small, C['unit'])
+                    elif key in inputs:                     # an empty cell that takes a value
+                        put_text('·', cx + cw - pad - m.width('·', fs), base, fs, C['rule'])
                     cx += cw
-            r_all = rect.adjusted(0, -fs * 1.6, 0, 0)
+            r_all = card.united(chip)
             bounds = r_all if bounds.isNull() else bounds.united(r_all)
-            x += w_total + fs * 0.6
+            x += w_total + fs * 1.2
         if bounds.isNull():                                 # every compound of the grid was deleted
             bounds = QRectF(g.x * self.BL, g.y * self.BL, fs * 10, fs * 2)
-            ops.append(('text', 'Stoichiometry: no reaction', g.x * self.BL + pad, g.y * self.BL + fs * 1.3, fs, False, True))
+            ops.append(('text', 'Stoichiometry: no reaction', g.x * self.BL + pad, g.y * self.BL + fs * 1.3, fs,
+                        False, True, C['label']))
         return ops, bounds, cells
 
     def grid_rect(self, i):
         return self.grid_layout(i)[1]
 
     def paint_grid(self, p, i):
-        g = self.doc.grids[i]
-        color = self.color(g)
         ops, _bounds, _cells = self.grid_layout(i)
-        pen = QPen(color, self.s['line_width'])
+        width = max(0.5, self.s['line_width'] * 0.6)
         for op in ops:
             if op[0] == 'text':
-                _t, txt, x, y, size, bold, italic = op
+                _t, txt, x, y, size, bold, italic, color = op
                 if txt.strip():
-                    p.setPen(Qt.PenStyle.NoPen); p.setBrush(QBrush(color))
+                    p.setPen(Qt.PenStyle.NoPen); p.setBrush(QBrush(QColor(color)))
                     p.drawPath(text_path(txt, self.s['font'], size, x, y, bold, italic))
             elif op[0] == 'line':
-                p.setPen(pen); p.drawLine(QPointF(op[1], op[2]), QPointF(op[3], op[4]))
+                p.setPen(QPen(QColor(op[5]), width)); p.drawLine(QPointF(op[1], op[2]), QPointF(op[3], op[4]))
+            elif op[0] == 'fill':
+                p.setPen(Qt.PenStyle.NoPen); p.setBrush(QBrush(QColor(op[2])))
+                p.drawRoundedRect(op[1], op[3], op[3])
             else:
-                p.setPen(pen); p.setBrush(Qt.BrushStyle.NoBrush); p.drawRect(op[1])
+                p.setPen(QPen(QColor(op[2]), width)); p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawRoundedRect(op[1], op[3], op[3])
 
     # ------------------------------------------------------------------------------------------- painting
     def cip(self):

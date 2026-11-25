@@ -87,7 +87,20 @@ ChemDraw-like features (0.3.0)
                        cleavage A+ + B (neutral), a neutral molecule A• + B• or A+ + B−. The pieces are drawn under an
                        arrow with live captions (formula, m/z or neutral mass); break them again for a fragmentation
                        tree. Ring bonds are not offered (one piece). ms.py.
-  Match m/z            Structure > Match m/z (Ctrl+M): a measured m/z within so many ppm against every drawn structure's
+  Fragments tab        Structure > MS fragments, or the Fragments tab of the formula panel: the fragments the structure
+                       can logically give, from the textbook rules, for ESI+ ([M+H]+), ESI− ([M−H]−) or EI (M•+) -
+                       EI: alpha cleavage next to N, O, S and C=O (iminium, oxonium, acylium ions), benzylic / allylic
+                       cleavage (C7H7+ 91), inductive cleavage at C-halogen, McLafferty rearrangement, retro-Diels-
+                       Alder; ESI: C-O / C-N / C-S heterolysis (acylium and b-type ions, glycoside Y ions, y-type
+                       amines, carboxylates, quinate ...), retro-Diels-Alder of flavonoids (1,3A ions); both: neutral
+                       losses (H2O, NH3, CO, CO2, CH3OH, HCOOH, CH3•, ketene, C4H8, SO3, H3PO4, NO2, HX, C-glycoside
+                       90 / 120). Steps 2 or 3: the fragments lose small molecules again. Each row: m/z, ion, what is
+                       lost, the rule and a likelihood (likely / possible / minor - a plausibility, not an intensity).
+                       Picking a row shows the atoms kept (green), lost (red) and the bonds that break; Draw (or
+                       double-click) puts the ion under the structure after an arrow with the loss and a live caption;
+                       Copy gives the list as text. A structure drawn as an ion is used as it is. The same fragments
+                       label the peaks in Annotate spectrum. fragments.py, fragments_tab.py.
+  Match m/z           Structure > Match m/z (Ctrl+M): a measured m/z within so many ppm against every drawn structure's
                        ions and adducts (charged fragments as themselves; double-click selects it) and against
                        elemental compositions of the ion (elements C H N O S by default, any of P F Cl Br I Si B Na K
                        and caps such as N4 can be added), with ppm, RDBE and even / odd electron; the usual ratio rules
@@ -96,7 +109,7 @@ ChemDraw-like features (0.3.0)
                        NIST MSP, MGF, mzML - its scan with the most ions first, any scan from the list) or paste one;
                        profile data is reduced to its peak tops. Each peak gets the best of the drawn structures' ions
                        within the tolerance (ppm, or Da for unit-mass EI spectra): adducts, M•+, a drawn fragment ion
-                       as itself and, with Bond cleavages, each piece of breaking one bond ([PH+H]+, [PH]•+, P+;
+                       as itself, the rule-based fragments of the Fragments tab and, with Bond cleavages, each piece of breaking one bond ([PH+H]+, [PH]•+, P+;
                        negative [PH−H]−). Stick plot with the matched peaks labelled (C2H3O+), table to copy
                        (double-click selects the structure or piece), Insert into drawing puts the annotated spectrum
                        on the page as a picture. msfile.py, spectrum_dialog.py.
@@ -170,12 +183,18 @@ ChemDraw-like features (0.3.0)
                        only when asked: sends the typed name or the structure's InChIKey), R/S and E/Z labels,
                        atom numbers, reaction interpretation.
   Stoichiometry grid   Structure > Analyze stoichiometry puts a Reactants / Products grid under the reaction
-                       (structures left of the arrow and above / below it are reactants, right of it products).
-                       Double-click it to type values, with or without units (250 mg, 1.5 mmol, 2 mL, 0.5 M,
-                       1.2 g/mL, 95 %): limiting reactant, equivalents, sample mass, %weight, molarity, density,
-                       volume, moles; for products equivalents, %completion, measured mass, purity. Moles, masses,
-                       volumes, expected mass and %yield follow and are redrawn whenever the reaction changes.
-                       Typed values are bold, calculated ones normal; rows can be hidden (right-click a row name).
+                       (structures left of the arrow and above / below it are reactants, right of it products;
+                       grouped structures - a salt, a reagent with its acid - are one compound, also when grouped
+                       after the grid was made). A card per side: the formulas on top (the limiting reactant
+                       marked), one row per quantity, typed values in blue, calculated ones in ink, units in grey.
+                       Double-click a white cell to type into it on the drawing, with or without units (250 mg,
+                       1.5 mmol, 2 mL, 0.5 M, 1.2 g/mL, 95 %; a bare number is g, mol, mL ...): the grid follows each
+                       keystroke, Enter keeps it, Esc puts the old value back, Tab goes to the next cell, an emptied
+                       cell is calculated again. Double-click a reactant's formula to make it the limiting one;
+                       double-click a title or row name (or right-click > Table > Edit values) for the grid's window,
+                       where rows can be hidden. Values: equivalents, sample mass, %weight, molarity, density, volume,
+                       moles; for products equivalents, %completion, measured mass, purity. Moles, masses, volumes,
+                       expected mass and %yield follow and are redrawn whenever the reaction changes.
   View menu            show reaction interpretation (reactants red, products magenta, above / below the arrow
                        cyan / blue), rulers in cm, whole page.
   Templates            rings and ring systems, heterocycles, functional groups, reagents, solvents.

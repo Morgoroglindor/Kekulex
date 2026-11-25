@@ -1135,6 +1135,9 @@ class MainWindow(QtWidgets.QMainWindow):
         m.addAction(self._act('Annotate mass s&pectrum…', self.annotate_spectrum,
                               tip='Open a measured spectrum (CSV, JCAMP-DX, MSP, MGF, mzML) and label its peaks '
                                   'with the ions of the structures drawn'))
+        m.addAction(self._act('MS f&ragments', self.show_fragments,
+                              tip='The fragments the structure can logically give in EI, ESI+ or ESI− (the '
+                                  'Fragments tab of the formula panel)'))
         if self.panel3d:
             m.addAction(self.a_send3d)
         m.addSeparator()
@@ -1262,6 +1265,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if problems:
             QtWidgets.QMessageBox.warning(self, 'Curved arrows', 'These arrows cannot be run:\n\n• ' +
                                           '\n• '.join(problems))
+
+    def show_fragments(self):
+        """Structure > MS fragments: the formula panel, on its Fragments tab."""
+        self.info_dock.show()
+        self.info_dock.raise_()
+        self.info.tabs.setCurrentWidget(self.info.frag_tab)
 
     def _show_partial(self, on):
         self.canvas.show_partial = on

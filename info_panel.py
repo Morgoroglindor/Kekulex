@@ -1,6 +1,7 @@
 """
 info_panel.py - the panel beside the drawing: formula, exact and average mass, the m/z of the usual adducts, SMILES
-and InChIKey of the selected structure (or of one picked from the list), updated as the drawing changes.
+and InChIKey of the selected structure (or of one picked from the list), updated as the drawing changes; its
+Properties tab (RDKit descriptors) and Fragments tab (the MS fragments the structure can give, fragments_tab.py).
 """
 from PyQt6 import QtCore, QtGui, QtWidgets
 
@@ -118,6 +119,10 @@ class InfoPanel(QtWidgets.QWidget):
         prow.addWidget(self.paste_props)
         play.addLayout(prow)
         self.tabs.addTab(ppage, 'Properties')
+        import fragments_tab
+        self.frag_tab = fragments_tab.FragmentsTab(canvas)
+        self.tabs.addTab(self.frag_tab, 'Fragments')
+        self.tabs.setTabToolTip(2, 'The mass-spectrum fragments the structure can logically give (EI, ESI+, ESI−)')
         self.tabs.currentChanged.connect(lambda _i: self.refresh(keep_choice=True))
         self.timer = QtCore.QTimer(self, singleShot=True, interval=120)
         self.timer.timeout.connect(self.refresh)
@@ -279,11 +284,17 @@ class InfoPanel(QtWidgets.QWidget):
             self.iupac = ''
             self.name.setText(biopolymer.three_letter(q) if len(q.residues) <= 30 else biopolymer.summary(q))
             self.props.setRowCount(0)
+            if self.tabs.currentIndex() == 2:
+                self.frag_tab.message('Fragments are worked out for drawn structures, not for sequences.')
             return
         info = chem.analyse(self.canvas.doc, ids)
         self.show_info(info)
         self.iupac = chem.iupac_name(self.canvas.doc, ids) if info.atoms and not info.errors else ''
         self.name.setText(self.iupac or ('–' if not info.atoms else '(no name found)'))
+        if self.tabs.currentIndex() == 2:                   # fragments only while their tab is shown
+            self.frag_tab.refresh(ids, info)
+        else:
+            self.canvas.show_fragment(None)
         if self.tabs.currentIndex() == 1:                   # properties only while their tab is shown
             rows = chem.properties(self.canvas.doc, ids) if info.atoms else []
             self.props.setRowCount(len(rows))

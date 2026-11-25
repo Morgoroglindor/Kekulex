@@ -58,7 +58,7 @@ class Column:
 
 def parse(text, kind):
     """A typed value in the row's base unit (g, mol, mL, M, g/mL, %), or None. Accepts '250 mg', '1,5mmol', '2 mL',
-    '0.5 M', '95%'. Raises ValueError for text that is not a number with a known unit."""
+    '0.5 M', '95%'; a bare number is in the base unit. Raises ValueError for text that is not a number with a known unit."""
     text = (text or '').strip()
     if not text:
         return None
@@ -72,6 +72,8 @@ def parse(text, kind):
         key = {'M': 'm', 'mM': 'mm', 'µM': 'µm', 'μM': 'µm', 'uM': 'um', 'nM': 'nm', 'pM': 'pm'}.get(unit, unit.lower())
     else:
         key = unit.lower().replace('μ', 'µ')
+    if not key:                                             # a bare number: the row's base unit (g, mol, mL ...)
+        return number
     if key not in units:
         raise ValueError(f'unknown unit "{unit}" (use {", ".join(u for u in units if u)})')
     return number * units[key]
@@ -80,7 +82,8 @@ def parse(text, kind):
 def reaction_columns(doc, arrow=None):
     """The reaction around an arrow (the given one, else the first straight arrow): ([reactant atom lists],
     [product atom lists]) ordered left to right. Structures above and below the arrow (reagents, catalysts) count
-    as reactants, structures right of the head as products."""
+    as reactants, structures right of the head as products. Grouped structures (a salt, a reagent mixture) are one
+    compound."""
     arrows = [i for i, a in doc.arrows.items() if not a.kind.startswith('curved')]
     if arrow is None:
         if not arrows:
@@ -90,7 +93,7 @@ def reaction_columns(doc, arrow=None):
     lo, hi = sorted((ar.x1, ar.x2))
     forward = ar.x2 >= ar.x1
     reactants, products = [], []
-    for frag in doc.fragments():
+    for frag in compounds(doc):
         cx = sum(doc.atoms[a].x for a in frag) / len(frag)
         before = cx < lo if forward else cx > hi
         after = cx > hi if forward else cx < lo
@@ -102,6 +105,51 @@ def reaction_columns(doc, arrow=None):
     return [f for _x, f in reactants], [f for _x, f in products]
 
 
+def _group(doc, a):
+    """The group making atom a's structure part of one compound: not a group holding an arrow (the whole reaction
+    grouped)."""
+    g = doc.group_of(('atom', a))
+    if g is None or any(k in ('arrow', 'grid') for k, _i in doc.groups[g].members):
+        return None
+    return g
+
+
+def compounds(doc):
+    """The drawing's compounds as sorted atom lists: each structure, grouped structures together."""
+    out, seen = [], set()
+    for frag in doc.fragments():
+        if frag[0] in seen:
+            continue
+        g = _group(doc, frag[0])
+        if g is not None:
+            frag = sorted(set(frag) | {i for k, i in doc.groups[g].members if k == 'atom' and i in doc.atoms})
+        seen.update(frag)
+        out.append(frag)
+    return out
+
+
+def merge_groups(doc, grid):
+    """Columns whose structures were grouped since the grid was made become one column (the first one's typed
+    values kept). Returns True when something changed."""
+    changed = False
+    for side in ('reactants', 'products'):
+        cols = getattr(grid, side)
+        merged = []
+        for c in cols:
+            here = [a for a in c.get('atoms', []) if a in doc.atoms]
+            g = _group(doc, here[0]) if here else None
+            into = next((m for m in merged if g is not None and m[0] == g), None)
+            if into is not None:
+                into[1]['atoms'] = sorted(set(into[1]['atoms']) | set(c['atoms']))
+                into[1]['limiting'] = into[1].get('limiting') or c.get('limiting')
+                changed = True
+            else:
+                merged.append((g, c))
+        if changed:
+            setattr(grid, side, [c for _g, c in merged])
+    return changed
+
+
 def _num(col, key):
     v = col.get(key)
     return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
@@ -110,6 +158,7 @@ def _num(col, key):
 def compute(doc, grid):
     """{'reactants': [Column], 'products': [Column], 'limiting_moles': float or None} for a Grid."""
     out = {'reactants': [], 'products': [], 'limiting_moles': None}
+    merge_groups(doc, grid)
     reac = [c for c in grid.reactants if any(a in doc.atoms for a in c.get('atoms', []))]
     prod = [c for c in grid.products if any(a in doc.atoms for a in c.get('atoms', []))]
 

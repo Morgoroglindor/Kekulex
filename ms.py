@@ -213,11 +213,12 @@ def rdbe_of(counts):
 
 
 # ------------------------------------------------------------------------------------------- annotating a spectrum
-def candidate_ions(doc, units, positive=True, cleave=True):
+def candidate_ions(doc, units, positive=True, cleave=True, rules=True):
     """[(where, ion label, formula, calculated m/z, atom ids)] the drawn structures could give: their own ions and
-    adducts (a drawn fragment ion as itself), and, with cleave, each piece of breaking one bond outside a ring, as
-    the piece capped with H (PH) protonated [PH+H]+, as a radical cation [PH]•+ and as the even-electron cation
-    [PH−H]+ (P+); in negative mode [PH−H]−."""
+    adducts (a drawn fragment ion as itself); with rules, the fragments of fragments.predict (ESI+ and EI, or ESI−,
+    two steps, all likelihoods: where is '<name>, fragment: <rule>'); and, with cleave, each piece of breaking one
+    bond outside a ring, as the piece capped with H (PH) protonated [PH+H]+, as a radical cation [PH]•+ and as the
+    even-electron cation [PH−H]+ (P+); in negative mode [PH−H]−."""
     out, seen = [], set()
 
     def add(where, label, counts, mz, ids):
@@ -234,6 +235,14 @@ def candidate_ions(doc, units, positive=True, cleave=True):
                 add(name, ion.label, ion.counts, ion.mz, ids)
         if positive and not info.charge and not info.radicals:  # EI: the molecular ion M•+
             add(name, '[M]•+', info.counts, info.exact - chem.ELECTRON, ids)
+        if rules and info.fragments == 1 and not info.errors:
+            import fragments
+            for mode in (('ESI+', 'EI') if positive else ('ESI-',)):
+                _pre, frs = fragments.predict(doc, set(ids), mode, 2)
+                if _pre is None or (_pre.z > 0) != positive:
+                    continue
+                for f in frs:
+                    add(f'{name}, fragment: {f.how}', f.ion, f.counts, f.mz, set(f.atoms))
         if not cleave or info.charge:
             continue
         for b, bd in doc.bonds.items():
@@ -267,16 +276,18 @@ def candidate_ions(doc, units, positive=True, cleave=True):
 
 def annotate(peaks, candidates, tol, unit='ppm'):
     """For each peak (m/z, intensity): the best candidate within tol (ppm or Da) or None:
-    [(m/z, intensity, (where, label, formula, m/z calc., ids) or None, error)]. A drawn structure's own ion wins over
-    a cleavage piece at the same error."""
+    [(m/z, intensity, (where, label, formula, m/z calc., ids) or None, error)]. At the same error a drawn
+    structure's own ion wins over a rule-based fragment, and that over a plain cleavage piece."""
+    def rank(c):
+        return 2 if ', piece' in c[0] else 1 if ', fragment' in c[0] else 0
     out = []
     for mz, y in peaks:
         best, err = None, None
         for c in candidates:
             e = ppm(mz, c[3]) if unit == 'ppm' else mz - c[3]
             if abs(e) <= tol:
-                score = (abs(e), ', piece' in c[0])
-                if best is None or score < (abs(err), ', piece' in best[0]):
+                score = (round(abs(e), 6), rank(c))
+                if best is None or score < (round(abs(err), 6), rank(best)):
                     best, err = c, e
         out.append((mz, y, best, err))
     return out
