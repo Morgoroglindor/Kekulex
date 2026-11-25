@@ -467,13 +467,16 @@ class _Engine:
                     if y in S and y not in seen:
                         seen.add(y); todo.append(y)
                         ry = room(y)
-                        if ry:
+                        if ry and not m.aro[y]:             # never an H off a benzene ring (no arynes)
                             take = min(ry, need, 1)
                             marks.setdefault(y, [0, 0, 0])[2] -= take
                             need -= take
                             if not need:
                                 break
             if need:
+                return None
+        for k, v in marks.items():                          # a ring carbon losing an H with nothing to show for it
+            if m.aro[k] and v[2] < 0 and not v[0] and not v[1]:     # would make an aryne
                 return None
         return {k: tuple(v) for k, v in marks.items() if any(v)}
 
@@ -908,8 +911,8 @@ class _Engine:
                                     marks = self.place(piece, marks, e, 0, 0, -1) if marks else None
                             else:
                                 marks = None            # nothing to deprotonate: no [M−H]− ion of this piece
-                        if sign > 0:
-                            pre = self.proton(self.base_site(piece) if piece is D else self.base_site(E))
+                        if sign > 0:                    # the proton on the most basic atom of the molecule
+                            pre = self.proton(self.base_site(frozenset(range(m.n))))
                         else:
                             pre = self.proton(None)
                         self.add(self.make(piece, marks, False, f'retro-Diels–Alder ({part})', s, mech=(
@@ -1438,10 +1441,229 @@ def draw_doc(doc, frag):
     for a, t in target.items():
         if natural(a) != t:
             d.atoms[a].hcount = max(0, t)
-    if any(d.valence_problem(a) for a in d.atoms):
+    if not lewis(d, frag.z, frag.odd):
         return None, ('Drawing this fragment needs bonds moved round (a quinoid or rearranged structure); it is '
                       'listed, but not drawn automatically.')
     return d, ''
+
+
+# ------------------------------------------------------------------------------------------- Lewis structures
+def _h(d, a):
+    return d.implicit_h(a)
+
+
+def _set_h(d, a, h):
+    """Atom a keeps h hydrogens, written out only when its bonds and charge would give another number."""
+    at = d.atoms[a]
+    at.hcount = None
+    if d.implicit_h(a) != h:
+        at.hcount = max(0, h)
+
+
+def _valid(d):
+    """Every atom within its valence, and RDKit reads the structure."""
+    import chem
+    if any(d.valence_problem(a) for a in d.atoms):
+        return False
+    mol, _order, _err = chem.to_mol(d)
+    return mol is not None
+
+
+def _lone_pair(d, x):
+    at = d.atoms[x]
+    if at.label or at.charge or at.radical or at.el not in ('N', 'O', 'S'):
+        return False
+    return d.bond_sum(x) + d.implicit_h(x) <= {'N': 3, 'O': 2, 'S': 2}[at.el]
+
+
+def lewis(d, z, odd):
+    """Redraws a fragment ion as chemists write it, keeping each atom's H: a structure that is not valid is solved
+    again by RDKit (bond orders and charges, the unpaired electron put back afterwards); then a carbocation next to
+    N, O or S becomes the onium C=X+ (an acylium C≡O+), a protonated OH of an acid or ester moves to its C=O
+    oxygen, a carbanion gives its charge to an acidic OH (carboxylate, phenolate), and a radical next to a charge
+    becomes a C=C with •+ (•−) written beside it. False when no valid structure is found."""
+    if not d.atoms:
+        return False
+    if not _valid(d) and not _solve(d, z, odd):
+        return False
+    for _round in range(len(d.atoms)):
+        if not (_onium(d) or _proton_to_carbonyl(d) or _carbanion_to_acid(d) or _radical_pairs(d)):
+            break
+    return _valid(d)
+
+
+def _solve(d, z, odd):
+    """Bond orders and formal charges from the atoms, their bonds and H (RDKit DetermineBondOrders); an odd-electron
+    ion gets a temporary H on its radical atom first."""
+    from rdkit import Chem
+    try:
+        from rdkit.Chem import rdDetermineBonds
+    except ImportError:
+        return False
+    ids = [a for a in d.atoms if not d.atoms[a].label]
+    if len(ids) != len(d.atoms):
+        return False
+    hs = {a: _h(d, a) for a in ids}
+    rad = None
+    if odd:
+        rad = next((a for a in ids if d.atoms[a].radical), None) or next(
+            (a for a in ids if d.atoms[a].el == 'C' and d.atoms[a].charge), None) or next(
+            (a for a in ids if d.atoms[a].el == 'C'), None)
+        if rad is None:
+            return False
+    rw = Chem.RWMol()
+    index = {}
+    for a in ids:
+        atom = Chem.Atom(d.atoms[a].el)
+        atom.SetNoImplicit(True)
+        index[a] = rw.AddAtom(atom)
+    for a in ids:
+        for _k in range(hs[a] + (1 if a == rad else 0)):
+            h = rw.AddAtom(Chem.Atom(1))
+            rw.AddBond(index[a], h, Chem.BondType.SINGLE)
+    for i, b in d.bonds.items():
+        rw.AddBond(index[b.a], index[b.b], Chem.BondType.SINGLE)
+    try:
+        rdDetermineBonds.DetermineBondOrders(rw, charge=z, allowChargedFragments=True, embedChiral=False)
+    except Exception:
+        return False
+    order = {Chem.BondType.SINGLE: 1, Chem.BondType.DOUBLE: 2, Chem.BondType.TRIPLE: 3}
+    for i, b in d.bonds.items():
+        bd = rw.GetBondBetweenAtoms(index[b.a], index[b.b])
+        if bd.GetBondType() == Chem.BondType.AROMATIC:
+            return False
+        b.order = order.get(bd.GetBondType(), 1)
+    for a in ids:
+        at = d.atoms[a]
+        at.charge = rw.GetAtomWithIdx(index[a]).GetFormalCharge()
+        at.radical = 1 if a == rad else 0
+    for a in ids:
+        _set_h(d, a, hs[a])
+    return _valid(d)
+
+
+def _onium(d):
+    """C+ next to a lone pair: C=N+, C=O+, C=S+; an acylium C≡O+."""
+    for a, at in d.atoms.items():
+        if at.label or at.el != 'C' or at.charge != 1 or at.radical:
+            continue
+        o = next(((n, b) for n, b in d.neighbors(a) if d.atoms[n].el == 'O' and d.bonds[b].order == 2
+                  and not d.atoms[n].charge), None)
+        if o is None:
+            ranked = sorted(((n, b) for n, b in d.neighbors(a) if d.bonds[b].order == 1 and _lone_pair(d, n)),
+                            key=lambda nb: 'NSO'.index(d.atoms[nb[0]].el))
+            o = ranked[0] if ranked else None
+        if o is None:
+            continue
+        n, b = o
+        ha, hn = _h(d, a), _h(d, n)
+        d.bonds[b].order += 1
+        at.charge, d.atoms[n].charge = 0, 1
+        _set_h(d, a, ha); _set_h(d, n, hn)
+        if _valid(d):
+            return True
+        d.bonds[b].order -= 1                               # not possible here: as it was
+        at.charge, d.atoms[n].charge = 1, 0
+        _set_h(d, a, ha); _set_h(d, n, hn)
+    return False
+
+
+def _proton_to_carbonyl(d):
+    """R–C(=O)–OH2+ is written R–C(OH)=OH+ (the proton on the carbonyl oxygen)."""
+    for x, at in d.atoms.items():
+        if at.label or at.el != 'O' or at.charge != 1 or _h(d, x) < 1:
+            continue
+        for c, b in d.neighbors(x):
+            if d.bonds[b].order != 1 or d.atoms[c].el != 'C':
+                continue
+            o = next((n for n, bb in d.neighbors(c) if n != x and d.atoms[n].el == 'O' and d.bonds[bb].order == 2
+                      and not d.atoms[n].charge), None)
+            if o is None:
+                continue
+            hx, ho = _h(d, x), _h(d, o)
+            at.charge, d.atoms[o].charge = 0, 1
+            _set_h(d, x, hx - 1); _set_h(d, o, ho + 1)
+            if _valid(d):
+                return True
+            at.charge, d.atoms[o].charge = 1, 0
+            _set_h(d, x, hx); _set_h(d, o, ho)
+    return False
+
+
+def _carbanion_to_acid(d):
+    """A carbanion takes the proton of an acidic OH in the same ion: the charge sits on the carboxylate / phenolate."""
+    for a, at in d.atoms.items():
+        if at.label or at.el != 'C' or at.charge != -1 or at.radical:
+            continue
+        best = None
+        for o, oa in d.atoms.items():
+            if oa.label or oa.el != 'O' or oa.charge or _h(d, o) < 1 or len(d.neighbors(o)) != 1:
+                continue
+            c = d.neighbors(o)[0][0]
+            carboxyl = any(d.atoms[n].el == 'O' and d.bonds[bb].order == 2 for n, bb in d.neighbors(c))
+            aromatic = any(d.bonds[bb].order == 2 for _n, bb in d.neighbors(c))
+            rank = 0 if carboxyl else 1 if aromatic else None
+            if rank is not None and (best is None or rank < best[0]):
+                best = (rank, o)
+        if best is None:
+            continue
+        o = best[1]
+        ha, ho = _h(d, a), _h(d, o)
+        at.charge, d.atoms[o].charge = 0, -1
+        _set_h(d, a, ha + 1); _set_h(d, o, ho - 1)
+        if _valid(d):
+            return True
+        at.charge, d.atoms[o].charge = -1, 0
+        _set_h(d, a, ha); _set_h(d, o, ho)
+    return False
+
+
+def _radical_pairs(d):
+    """An unpaired electron next to a charged carbon: one more bond between them, •+ (or •−) written beside it."""
+    for a, at in d.atoms.items():
+        if at.label or not at.radical:
+            continue
+        for n, b in d.neighbors(a):
+            na = d.atoms[n]
+            if na.label or not na.charge or na.radical or d.bonds[b].order >= 3 or na.el not in ('C', 'N', 'O'):
+                continue
+            ha, hn, q = _h(d, a), _h(d, n), na.charge
+            d.bonds[b].order += 1
+            at.radical, na.charge = 0, 0
+            _set_h(d, a, ha); _set_h(d, n, hn)
+            if _valid(d):
+                mx, my = (at.x + na.x) / 2, (at.y + na.y) / 2
+                d.add_text(mx + 0.3, my - 0.9, '•' + ('+' if q > 0 else '−'), size=0)
+                return True
+            d.bonds[b].order -= 1
+            at.radical, na.charge = 1, q
+            _set_h(d, a, ha); _set_h(d, n, hn)
+        for b1, bb1 in d.neighbors(a):                      # 1,4: a–b=c–n becomes a=b–c=n (a diene radical ion)
+            if d.bonds[bb1].order != 1:
+                continue
+            for c1, bb2 in d.neighbors(b1):
+                if c1 == a or d.bonds[bb2].order != 2:
+                    continue
+                for n, bb3 in d.neighbors(c1):
+                    na = d.atoms[n]
+                    if n in (a, b1) or d.bonds[bb3].order != 1 or na.label or not na.charge or na.radical:
+                        continue
+                    hs = {k: _h(d, k) for k in (a, b1, c1, n)}
+                    q = na.charge
+                    d.bonds[bb1].order, d.bonds[bb2].order, d.bonds[bb3].order = 2, 1, 2
+                    at.radical, na.charge = 0, 0
+                    for k, h in hs.items():
+                        _set_h(d, k, h)
+                    if _valid(d):
+                        xs = [d.atoms[k].x for k in (a, b1, c1, n)]
+                        ys = [d.atoms[k].y for k in (a, b1, c1, n)]
+                        d.add_text(max(xs) + 0.3, min(ys) - 0.9, '•' + ('+' if q > 0 else '−'), size=0)
+                        return True
+                    d.bonds[bb1].order, d.bonds[bb2].order, d.bonds[bb3].order = 1, 2, 1
+                    at.radical, na.charge = 1, q
+                    for k, h in hs.items():
+                        _set_h(d, k, h)
+    return False
 
 
 def _flip_ring(d, bond):
@@ -1526,7 +1748,7 @@ def _mark(d, pre):
         at.hcount = None
         if d.implicit_h(a) != h:
             at.hcount = max(0, h)
-        if d.valence_problem(a):
+        if not _valid(d):
             at.charge, at.radical, at.hcount = keep
             sign = ('•' if dr else '') + ('+' if dq > 0 else '−' if dq < 0 else '')
             if sign:

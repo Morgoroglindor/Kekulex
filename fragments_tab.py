@@ -300,7 +300,7 @@ class FragmentsTab(QtWidgets.QWidget):
             self.canvas.message.emit(why)
             return
         parent = set(self.pre.atoms) & set(self.canvas.doc.atoms)
-        self.canvas.draw_fragment(piece, parent, '−' + f.lost)
+        self.canvas.draw_fragment(piece, parent, '−' + f.lost, f.ion + '\n' + f'm/z {f.mz:.4f}')
 
     def copy(self):
         t = self.table

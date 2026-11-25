@@ -137,7 +137,8 @@ def test_drawn_fragments_have_the_listed_formula(smiles):
                 assert why
                 continue
             info = chem.analyse(piece)
-            assert info.charge == f.z, (smiles, mode, f.how)
+            written = sum((1 if '+' in t.text else -1) for t in piece.texts.values() if t.text in ('•+', '•−', '+', '−'))
+            assert info.charge + written == f.z, (smiles, mode, f.how)
             assert chem.formula_text(info.counts) == f.formula, (smiles, mode, f.how)
             assert not any(piece.valence_problem(a) for a in piece.atoms), (smiles, mode, f.how)
 
@@ -293,3 +294,49 @@ def test_spectrum_labels_every_match_and_lists_alternatives():
     assert spectrum_dialog.ion_text(rows[1][2]) == 'C7H11O6−'
     alt = ms.all_matches(peaks, cands, 5.0)
     assert len(alt[191.0561]) >= 2
+
+
+# ------------------------------------------------------------------------------------------- how ions are drawn
+def _drawn_smiles(smiles, mode, mz):
+    from rdkit import Chem
+    d = doc_of(smiles)
+    _p, frags = fragments.predict(d, None, mode, 2)
+    f = next(f for f in frags if abs(f.mz - mz) < 0.002 and f.S is not None)
+    piece, why = fragments.draw_doc(d, f)
+    assert piece is not None, why
+    mol, _o, _e = chem.to_mol(piece)
+    labels = [t.text for t in piece.texts.values()]
+    return Chem.MolToSmiles(mol), labels
+
+
+@pytest.mark.parametrize('smiles, mode, mz, want', [
+    ('CCCCC(C)=O', 'EI', 43.0178, 'CC#[O+]'),                        # acylium, not C+=O
+    ('CCN(CC)CC', 'EI', 86.0964, 'C=[N+](CC)CC'),                    # iminium, not CH2+–N
+    ('CCN(CC)CC', 'EI', 58.0651, 'C=[NH+]CC'),
+    ('CCOC(C)=O', 'EI', 61.0284, 'CC(O)=[OH+]'),                     # the proton on the carbonyl O
+    ('C1CC=CCC1', 'EI', 54.0464, 'C=CC=C'),                          # butadiene, •+ written beside
+    ('O=c1cc(-c2ccc(O)cc2)oc2cc(O)cc(O)c12', 'ESI+', 153.0182, '[O+]#Cc1c(O)cc(O)cc1O'),
+    ('O=C(/C=C/c1ccc(O)c(O)c1)OC1CC(O)(C(=O)O)CC(O)C1O', 'ESI-', 135.0452, 'C=Cc1ccc([O-])c(O)c1'),
+])
+def test_ions_are_drawn_as_chemists_write_them(smiles, mode, mz, want):
+    from rdkit import Chem
+    got, labels = _drawn_smiles(smiles, mode, mz)
+    assert got == Chem.MolToSmiles(Chem.MolFromSmiles(want))
+    if smiles == 'C1CC=CCC1':
+        assert '•+' in labels
+
+
+def test_no_arynes_or_explicit_h_oddities():
+    for smiles in SMILES + ['CC(=O)Oc1ccccc1C(=O)O', 'CCCc1ccccc1']:
+        d = doc_of(smiles)
+        for mode in ('EI', 'ESI+', 'ESI-'):
+            _p, frags = fragments.predict(d, None, mode, 2)
+            for f in frags or []:
+                piece, _why = fragments.draw_doc(d, f)
+                if piece is None:
+                    continue
+                for b in piece.bonds.values():
+                    if b.order == 3:                         # a triple bond only as C≡O+ or C≡C
+                        els = {piece.atoms[b.a].el, piece.atoms[b.b].el}
+                        assert els in ({'C', 'O'}, {'C'}, {'C', 'N'}), (smiles, mode, f.how)
+                assert all(piece.atoms[a].hcount is None for a in piece.atoms), (smiles, mode, f.how)

@@ -1724,7 +1724,7 @@ class Canvas(QWidget):
             ux, uy = -dy / n * 0.32 * BL, dx / n * 0.32 * BL
             p.drawLine(QPointF(mx - ux, my - uy), QPointF(mx + ux, my + uy))
 
-    def draw_fragment(self, piece, parent, loss=''):
+    def draw_fragment(self, piece, parent, loss='', caption=None):
         """Fragments tab > Draw: the fragment ion (a Doc with the drawing's coordinates) under its structure (atom
         ids parent), after an arrow labelled with the loss, with its formula and m/z as a caption. Returns the new
         items."""
@@ -1757,7 +1757,10 @@ class Canvas(QWidget):
         items = doc.insert_dict(piece.to_dict(), cx - (min(xs) + max(xs)) / 2, bottom + 3.0 - min(ys))
         atoms = {i for k, i in items if k == 'atom'}
         self._renderer = None
-        cap = self._caption_under(atoms, ms.describe(doc, atoms, chr(10)), True, attach=True, live=['ms'])
+        if caption:                                         # the fragment's own formula (its •+ may be written beside)
+            cap = self._caption_under(atoms, caption, True, attach=True)
+        else:
+            cap = self._caption_under(atoms, ms.describe(doc, atoms, chr(10)), True, attach=True, live=['ms'])
         block = items + [('text', cap)]
         self._renderer = None
         if self.push_clear(block):                          # below earlier drawings: the arrow reaches down to it
