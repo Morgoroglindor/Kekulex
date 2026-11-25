@@ -99,7 +99,19 @@ ChemDraw-like features (0.3.0)
                        Picking a row shows the atoms kept (green), lost (red) and the bonds that break; Draw (or
                        double-click) puts the ion under the structure after an arrow with the loss and a live caption;
                        Copy gives the list as text. A structure drawn as an ion is used as it is. The same fragments
-                       label the peaks in Annotate spectrum. fragments.py, fragments_tab.py.
+                       (three steps) label the peaks in Annotate spectrum. More rules from the literature: loss of H•
+                       (amines, aldehydes), alkene loss with H transfer (phenetole -> 94) and McLafferty+1 (ethyl
+                       acetate -> 61), the ortho effect, CH2O / CHO• from anisoles / phenols, TMS ions (73, 147,
+                       M-15) and TBDMS M-57, peptide immonium ions, the radical aglycone [Y0-H]•− of flavonol
+                       glycosides, the acyl ketene anion of chlorogenic acids (161), phosphocholine 184, PE -141,
+                       HexNAc 204. Mechanism: under the list each picked fragment is explained step by step (where
+                       the charge starts, which electrons move, what leaves), with the other rules that give the same
+                       ion and the literature for the rule (McLafferty & Tureček; Demarque et al. 2016; Fabre 2001;
+                       Domon & Costello 1988; Hvattum & Ekeberg 2003 ...). Draw mechanism puts the precursor with
+                       its charge and curved arrows (fish-hooks for one electron, the moving H drawn), each ion on the
+                       way with the arrows of its next step, and the fragment in a row under the structure, joined by
+                       arrows labelled with each loss. Enlarge turns the panel into a large window so every column
+                       and the whole mechanism show. fragments.py, fragments_tab.py.
   Match m/z           Structure > Match m/z (Ctrl+M): a measured m/z within so many ppm against every drawn structure's
                        ions and adducts (charged fragments as themselves; double-click selects it) and against
                        elemental compositions of the ion (elements C H N O S by default, any of P F Cl Br I Si B Na K
@@ -110,7 +122,9 @@ ChemDraw-like features (0.3.0)
                        profile data is reduced to its peak tops. Each peak gets the best of the drawn structures' ions
                        within the tolerance (ppm, or Da for unit-mass EI spectra): adducts, M•+, a drawn fragment ion
                        as itself, the rule-based fragments of the Fragments tab and, with Bond cleavages, each piece of breaking one bond ([PH+H]+, [PH]•+, P+;
-                       negative [PH−H]−). Stick plot with the matched peaks labelled (C2H3O+), table to copy
+                       negative [PH−H]−). Stick plot with every matched peak labelled (labels lifted clear of each
+                       other and of the peaks, the plot growing to hold them; the window opens at nearly full
+                       screen), a table with the best ion, its rule and every other ion within the tolerance, to copy
                        (double-click selects the structure or piece), Insert into drawing puts the annotated spectrum
                        on the page as a picture. msfile.py, spectrum_dialog.py.
   Mechanisms           curved and fish-hook arrows drawn from an atom or bond to an atom or bond stay on them when the

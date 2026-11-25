@@ -1769,6 +1769,82 @@ class Canvas(QWidget):
         self.edited()
         return new + block
 
+    def draw_mechanism(self, states, parent, captions):
+        """Fragments tab > Draw mechanism: the precursor and each ion of the fragmentation (Docs with their curved
+        arrows, from fragments.mechanism) in a row under the structure with atom ids parent - wrapping at the page
+        edge - joined by reaction arrows labelled with what each step loses, each with its formula and m/z under it.
+        Returns the new items."""
+        doc = self.doc
+        rend = self.renderer()
+        BL = rend.BL
+        box = QRectF()
+        for a in parent:
+            r = rend.item_rect('atom', a)
+            box = r if box.isNull() else box.united(r)
+        if box.isNull() or not states:
+            return []
+        for kind in ('text', 'shape', 'arrow', 'grid'):     # below everything already drawn under it
+            for i in doc.table(kind):
+                r = rend.item_rect(kind, i)
+                if r.right() > box.left() and r.top() >= box.top():
+                    box = box.united(r)
+        W = self.page_size()[0] / BL - 1.0
+        left = max(0.8, box.left() / BL)
+        x, y = left, box.bottom() / BL + 2.0
+        row_h = 0.0
+        size = render.style_of(doc)['font_size']
+        self.snapshot()
+        new = []
+        clear = x                                           # nothing of the next state left of this
+        for k, (state, loss) in enumerate(states):
+            if not state.atoms:
+                continue
+            xs = [at.x for at in state.atoms.values()]
+            ys = [at.y for at in state.atoms.values()]
+            w, h = max(xs) - min(xs), max(ys) - min(ys)
+            if k and x + max(w, 7.0) > W:                   # the page edge: on to a new row
+                x, y, row_h = left, y + row_h + 2.6, 0.0
+                clear = x
+            items = doc.insert_dict(state.to_dict(), x - min(xs), y - min(ys))
+            atoms = {i for kk, i in items if kk == 'atom'}
+            self._renderer = None
+            block = list(items)
+            if k < len(captions) and captions[k]:
+                block.append(('text', self._caption_under(atoms, captions[k], True)))
+            self._renderer = None
+            rend = self.renderer()
+            def extent():
+                r = QRectF()
+                for it in block:
+                    if it[0] in ('atom', 'text'):
+                        ir = self.renderer().item_rect(*it)
+                        r = ir if r.isNull() else r.united(ir)
+                return r
+            r = extent()
+            if r.left() / BL < clear:                       # its labels (HO, a caption) reach back: move it on
+                shift = clear - r.left() / BL
+                doc.transform(block, lambda px, py, s=shift: (px + s, py))
+                self._renderer = None
+                r = extent()
+            new += block
+            row_h = max(row_h, r.height() / BL)
+            x = r.right() / BL + 0.7
+            if loss and k + 1 < len(states):
+                mid = y + h / 2
+                t = doc.add_text(x, mid - 0.35 - size * 1.2 / BL, '−' + loss, align='center', size=size * 0.9,
+                                 formula=True)
+                self._renderer = None
+                L = max(2.4, self.renderer().text_rect(t).width() / BL + 0.8)    # as long as its label
+                doc.texts[t].x = x + L / 2
+                j = doc.add_arrow(x, mid, x + L, mid, 'forward')
+                new += [('arrow', j), ('text', t)]
+                x += L + 0.7
+                clear = x - 0.3
+        self._renderer = None
+        self.sel = set(new)
+        self.edited()
+        return new
+
     def _paint_preview(self, p, BL, accent):
         kind, pts = self.preview
         pen = QPen(accent, 1.2, cap=Qt.PenCapStyle.RoundCap, join=Qt.PenJoinStyle.RoundJoin)

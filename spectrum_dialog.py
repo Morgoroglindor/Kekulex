@@ -21,35 +21,72 @@ MATCH_COLOR = '#D81B60'
 
 def ion_text(match):
     """The ion's formula with its charge and radical dot: C2H3O+, C4H8O•+, C4H9O+ for [M+H]+."""
+    if not match[1].startswith('['):                        # already the ion's formula (a rule-based fragment)
+        return match[1]
     m = re.search(r'(•?)(\d*[+−-])$', match[1])
     return match[2] + (m.group(1) + m.group(2) if m else '')
 
 
-def draw_spectrum(ax, rows, fg, stick, label_color, most_labels=14):
-    """Sticks of the peaks (relative intensity, %), the matched ones coloured and labelled with their ion formula;
-    labels that would overlap a taller labelled peak's are left out."""
+def draw_spectrum(ax, rows, fg, stick, label_color, most_labels=None):
+    """Sticks of the peaks (relative intensity, %), every matched one coloured and labelled with its m/z and ion
+    formula. Each label is measured on the figure and lifted until it covers no other label and no peak (a dotted
+    line joins a lifted label to its peak); the plot grows upward to hold them all. most_labels: the tallest so many
+    only (None: all)."""
     if not rows:
         return
     top = max(r[1] for r in rows) or 1.0
     xs = [r[0] for r in rows]
     span = (max(xs) - min(xs)) or 1.0
-    for mz, y, match, _err in rows:
-        ax.vlines(mz, 0, 100 * y / top, color=label_color if match else stick, lw=1.1 if match else 0.8)
-    placed = []
-    for mz, y, match, _err in sorted(rows, key=lambda r: -r[1]):
-        if not match or len(placed) >= most_labels:
-            continue
-        if any(abs(mz - p) < span * 0.035 for p in placed):
-            continue
-        placed.append(mz)
-        ax.annotate(f'{mz:.4f}\n{ion_text(match)}' if mz != round(mz) else f'{mz:g}\n{ion_text(match)}',
-                    (mz, 100 * y / top), xytext=(0, 3), textcoords='offset points', ha='center', va='bottom', fontsize=7.5,
-                    color=label_color)
-    ax.set_xlabel('m/z', color=fg)
-    ax.set_ylabel('Relative intensity (%)', color=fg)
-    ax.set_ylim(0, 118)
     pad = span * 0.05
     ax.set_xlim(min(xs) - pad, max(xs) + pad)
+    for mz, y, match, _err in rows:
+        ax.vlines(mz, 0, 100 * y / top, color=label_color if match else stick, lw=1.1 if match else 0.8)
+    ax.set_xlabel('m/z', color=fg)
+    ax.set_ylabel('Relative intensity (%)', color=fg)
+    matched = sorted((r for r in rows if r[2]), key=lambda r: -r[1])
+    if most_labels:
+        matched = matched[:most_labels]
+    fig = ax.figure
+    if not hasattr(fig.canvas, 'get_renderer'):
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
+        FigureCanvasAgg(fig)
+    sticks = [(mz, 100 * y / top) for mz, y, _m, _e in rows]
+    ymax = 118.0
+    for _attempt in range(6):                               # grow the plot until every label fits
+        ax.set_ylim(0, ymax)
+        renderer = fig.canvas.get_renderer()
+        to_disp = ax.transData.transform
+        placed, texts, highest = [], [], 0.0
+        for mz, y, match, _err in matched:
+            h = 100 * y / top
+            label = f'{mz:.4f}' if mz != round(mz) else f'{mz:g}'
+            t = ax.text(mz, h + 1.5, label + '\n' + ion_text(match), ha='center', va='bottom', fontsize=7.5,
+                        color=label_color)
+            base = h + 1.5
+            for _k in range(200):
+                t.set_y(base)
+                bb = t.get_window_extent(renderer).expanded(1.06, 1.05)
+                hit = any(bb.overlaps(o) for o in placed)
+                if not hit:
+                    for sx, sh in sticks:                   # a taller peak running through the label
+                        px, py = to_disp((sx, sh))
+                        if abs(sx - mz) > 1e-9 and bb.x0 <= px <= bb.x1 and py > bb.y0:
+                            hit = True
+                            break
+                if not hit:
+                    break
+                base += 1.5
+            placed.append(bb)
+            texts.append((t, mz, h, base))
+            highest = max(highest, ax.transData.inverted().transform((0, bb.y1))[1])
+        if highest <= ymax - 2 or _attempt == 5:
+            break
+        for t, *_r in texts:
+            t.remove()
+        ymax = highest * 1.08 + 4
+    for t, mz, h, base in texts:
+        if base > h + 2.5:
+            ax.plot([mz, mz], [h + 0.5, base], color=label_color, lw=0.5, ls=':')
 
 
 class SpectrumDialog(QtWidgets.QDialog):
@@ -60,7 +97,12 @@ class SpectrumDialog(QtWidgets.QDialog):
         self.canvas = window.canvas
         self.spectra = []
         self.rows = []
-        self.resize(980, 720)
+        scr = window.screen().availableGeometry() if window is not None and window.screen() else None
+        if scr is not None:                                 # big enough to show every label and column
+            self.resize(int(scr.width() * 0.88), int(scr.height() * 0.88))
+        else:
+            self.resize(1400, 900)
+        self.setWindowFlag(QtCore.Qt.WindowType.WindowMaximizeButtonHint, True)
         lay = QtWidgets.QVBoxLayout(self)
         top = QtWidgets.QHBoxLayout()
         open_b = QtWidgets.QPushButton('Open spectrum…')
@@ -103,15 +145,17 @@ class SpectrumDialog(QtWidgets.QDialog):
         self.plot = PlotCanvas(self)
         self.plot.x_only = True
         split.addWidget(self.plot)
-        self.table = QtWidgets.QTableWidget(0, 7)
-        self.table.setHorizontalHeaderLabels(['m/z', '%', 'Ion', 'Formula', 'm/z calc.', 'Error', 'Structure'])
+        self.table = QtWidgets.QTableWidget(0, 8)
+        self.table.setHorizontalHeaderLabels(['m/z', '%', 'Ion', 'Formula', 'm/z calc.', 'Error', 'Structure / rule',
+                                              'Other possible ions'])
+        self.table.setWordWrap(True)
         self.table.verticalHeader().setVisible(False)
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.cellDoubleClicked.connect(self._select)
         split.addWidget(self.table)
-        split.setSizes([420, 260])
+        split.setSizes([560, 340])
         lay.addWidget(split, 1)
         bottom = QtWidgets.QHBoxLayout()
         self.note = QtWidgets.QLabel('Open a spectrum, or paste m/z and intensity pairs.')
@@ -194,6 +238,7 @@ class SpectrumDialog(QtWidgets.QDialog):
             peaks = sorted(sorted(peaks, key=lambda p: -p[1])[:400])
         cands = ms.candidate_ions(self.canvas.doc, self.units(), self.mode.currentData(), self.cleave.isChecked())
         self.rows = ms.annotate(peaks, cands, self.tol.value(), self.unit.currentText())
+        self.others = ms.all_matches(peaks, cands, self.tol.value(), self.unit.currentText())
         self._fill()
         self._plot()
         n = sum(1 for r in self.rows if r[2])
@@ -204,18 +249,34 @@ class SpectrumDialog(QtWidgets.QDialog):
         top = max((r[1] for r in self.rows), default=1.0) or 1.0
         self.table.setRowCount(len(self.rows))
         unit = self.unit.currentText()
+        others = getattr(self, 'others', {})
         for k, (mz, y, m, err) in enumerate(sorted(self.rows, key=lambda r: -r[1])):
             vals = [f'{mz:.4f}', f'{100 * y / top:.1f}']
             vals += [m[1], m[2], f'{m[3]:.4f}', f'{err:+.1f} ppm' if unit == 'ppm' else f'{err:+.3f} Da', m[0]] if m \
                 else [''] * 5
+            alt = [c for c, _e in others.get(mz, []) if not m or (c[1], c[0]) != (m[1], m[0])]
+            seen, names = set(), []
+            for c in alt:
+                if c[1] not in seen:
+                    seen.add(c[1]); names.append(c[1])
+            vals.append(', '.join(names))
             for c, v in enumerate(vals):
                 it = QtWidgets.QTableWidgetItem(v)
                 if c in (0, 1, 4, 5):
                     it.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
                 if m:
                     it.setData(QtCore.Qt.ItemDataRole.UserRole, sorted(m[4]))
+                if c == 7 and alt:
+                    it.setToolTip('\n'.join(f'{a[1]}  {a[3]:.4f}  ({a[0]})' for a in alt))
+                elif c == 6 and m:
+                    it.setToolTip(m[0])
                 self.table.setItem(k, c, it)
         self.table.resizeColumnsToContents()
+        hh = self.table.horizontalHeader()
+        for c in (6, 7):
+            hh.setSectionResizeMode(c, QtWidgets.QHeaderView.ResizeMode.Interactive)
+            self.table.setColumnWidth(c, min(self.table.columnWidth(c), 520))
+        self.table.resizeRowsToContents()
 
     def _plot(self):
         T = theme.T
@@ -248,7 +309,9 @@ class SpectrumDialog(QtWidgets.QDialog):
     def image(self, dpi=200):
         """The annotated spectrum as a QImage (black on white, the zoom of the plot kept)."""
         from matplotlib.figure import Figure
-        fig = Figure(figsize=(6.4, 3.0), layout='constrained')
+        labels = sum(1 for r in self.rows if r[2])
+        fig = Figure(figsize=(max(6.4, min(16.0, 0.42 * labels)), 3.0 + min(2.5, 0.08 * labels)),
+                     layout='constrained')
         ax = fig.add_subplot(111)
         draw_spectrum(ax, self.rows, 'black', '#333333', MATCH_COLOR)
         if self.plot.view and self.plot.view.get('x'):

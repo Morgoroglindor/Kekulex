@@ -194,3 +194,102 @@ def test_fragments_tab_lists_highlights_and_draws(qapp):
     assert w.canvas.fragment_view is None
     w.dirty = False
     w.close()
+
+
+# ------------------------------------------------------------------------------------------- literature rules
+@pytest.mark.parametrize('smiles, mode, mz, words', [
+    ('CCOC(C)=O', 'EI', 61.0284, 'McLafferty+1'),                    # ethyl acetate: protonated acetic acid
+    ('CCOc1ccccc1', 'EI', 94.0413, 'alkene loss'),                   # phenetole → phenol•+
+    ('COC(=O)c1ccccc1O', 'EI', 120.0206, 'ortho effect'),            # methyl salicylate − CH3OH
+    ('C[Si](C)(C)OCCCC', 'EI', 73.0468, 'trimethylsilyl ion'),
+    ('C[Si](C)(C)OCCCC', 'EI', 131.0887, 'trimethylsilyl group'),    # M − CH3
+    ('CCCC=O', 'EI', 71.0491, 'aldehyde'),                           # M − H
+    ('CC1OC(Oc2c(-c3ccc(O)c(O)c3)oc3cc(O)cc(O)c3c2=O)C(O)C(O)C1O', 'ESI-', 300.0276, 'radical aglycone'),
+    ('CC(N)C(=O)NC(Cc1ccccc1)C(=O)O', 'ESI+', 120.0808, 'immonium'),  # Phe immonium
+    ('CCCCCCCCCCCCCCCC(=O)OCC(COP(=O)([O-])OCC[N+](C)(C)C)OC(C)=O', 'ESI+', 184.0733, 'phosphocholine'),
+    ('O=C(/C=C/c1ccc(O)c(O)c1)OC1CC(O)(C(=O)O)CC(O)C1O', 'ESI-', 161.0244, 'ketene'),
+])
+def test_literature_rules(smiles, mode, mz, words):
+    _p, _f, t = mzs(smiles, mode)
+    f = has(t, mz)
+    assert f is not None and words in f.how
+
+
+def test_every_fragment_has_a_mechanism_and_reference():
+    for smiles in SMILES:
+        d = doc_of(smiles)
+        for mode in ('EI', 'ESI+', 'ESI-'):
+            pre, frags = fragments.predict(d, None, mode, 2)
+            for f in frags or []:
+                for g in fragments.chain_of(f):
+                    assert g.mech, (smiles, mode, g.how)
+                    assert g.ref, (smiles, mode, g.how)
+
+
+def test_mechanism_docs_have_tied_curved_arrows():
+    d = doc_of('CCCCC(C)=O')
+    pre, frags = fragments.predict(d, None, 'EI', 2)
+    mc = next(f for f in frags if f.how == 'McLafferty rearrangement')
+    states, why = fragments.mechanism(d, mc, set(d.atoms))
+    assert not why and len(states) == 2
+    first = states[0][0]
+    arrows = list(first.arrows.values())
+    assert len(arrows) == 4 and all(a.kind == 'curved_half' for a in arrows)     # fish-hooks
+    assert all(a.tail_on and a.head_on for a in arrows)
+    assert any(at.el == 'H' for at in first.atoms.values())                 # the γ-H that moves
+    o = next(at for at in first.atoms.values() if at.el == 'O')
+    assert o.charge == 1 and o.radical == 1                                 # O•+ before the step
+    assert chem.analyse(first).formula == 'C6H12O'
+    assert states[0][1] == 'C3H6'
+    two = next(f for f in frags if f.step == 2 and f.S is not None)
+    states, _why = fragments.mechanism(d, two, set(d.atoms))
+    assert len(states) == 3 and states[1][0].arrows                          # the second step's arrows too
+
+
+def test_draw_mechanism_on_the_canvas(qapp):
+    from kekulex import MainWindow
+    w = MainWindow()
+    w.canvas.set_doc(doc_of('O=c1cc(-c2ccc(O)cc2)oc2cc(O)cc(O)c12'))
+    w.show_fragments()
+    tab = w.info.frag_tab
+    tab.mode.setCurrentIndex(tab.mode.findData('ESI+'))
+    tab.level.setCurrentIndex(2)
+    w.info.refresh(keep_choice=True)
+    row = next(r for r in range(tab.table.rowCount()) if tab.table.item(r, 0).text().startswith('125.02'))
+    tab.table.selectRow(row)
+    assert 'retro-Diels–Alder' in tab.details.toPlainText() and 'Literature' in tab.details.toPlainText()
+    arrows = len(w.canvas.doc.arrows)
+    tab.draw_mechanism()
+    doc = w.canvas.doc
+    curved = [a for a in doc.arrows.values() if a.kind in ('curved', 'curved_half')]
+    assert len(curved) >= 4 and len(doc.arrows) - arrows >= len(curved) + 2   # + the two reaction arrows
+    assert any('−CO' == t.text for t in doc.texts.values())
+    assert any('m/z 125.0233' in t.text for t in doc.texts.values())
+    tab.enlarge(True)
+    assert w.info_dock.isFloating()
+    tab.enlarge(False)
+    assert not w.info_dock.isFloating()
+    w.dirty = False
+    w.close()
+
+
+def test_spectrum_labels_every_match_and_lists_alternatives():
+    from matplotlib.figure import Figure
+    import spectrum_dialog
+    d = doc_of('O=C(/C=C/c1ccc(O)c(O)c1)OC1CC(O)(C(=O)O)CC(O)C1O')
+    units = [('1', set(d.atoms))]
+    peaks = [(353.0878, 18), (191.0561, 100), (179.0350, 45), (173.0455, 12), (161.0244, 8), (135.0452, 30)]
+    cands = ms.candidate_ions(d, units, False, True)
+    rows = ms.annotate(peaks, cands, 5.0)
+    assert all(r[2] for r in rows)
+    fig = Figure(figsize=(6.4, 3.0))
+    ax = fig.add_subplot(111)
+    spectrum_dialog.draw_spectrum(ax, rows, 'black', 'gray', 'red')
+    labels = [t for t in ax.texts]
+    assert len(labels) == len(rows)
+    r = fig.canvas.get_renderer()
+    boxes = [t.get_window_extent(r) for t in labels]
+    assert not any(boxes[i].overlaps(boxes[j]) for i in range(len(boxes)) for j in range(i))
+    assert spectrum_dialog.ion_text(rows[1][2]) == 'C7H11O6−'
+    alt = ms.all_matches(peaks, cands, 5.0)
+    assert len(alt[191.0561]) >= 2

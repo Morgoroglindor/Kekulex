@@ -216,7 +216,7 @@ def rdbe_of(counts):
 def candidate_ions(doc, units, positive=True, cleave=True, rules=True):
     """[(where, ion label, formula, calculated m/z, atom ids)] the drawn structures could give: their own ions and
     adducts (a drawn fragment ion as itself); with rules, the fragments of fragments.predict (ESI+ and EI, or ESI−,
-    two steps, all likelihoods: where is '<name>, fragment: <rule>'); and, with cleave, each piece of breaking one
+    three steps, all likelihoods: where is '<name>, fragment: <rule>'); and, with cleave, each piece of breaking one
     bond outside a ring, as the piece capped with H (PH) protonated [PH+H]+, as a radical cation [PH]•+ and as the
     even-electron cation [PH−H]+ (P+); in negative mode [PH−H]−."""
     out, seen = [], set()
@@ -238,7 +238,7 @@ def candidate_ions(doc, units, positive=True, cleave=True, rules=True):
         if rules and info.fragments == 1 and not info.errors:
             import fragments
             for mode in (('ESI+', 'EI') if positive else ('ESI-',)):
-                _pre, frs = fragments.predict(doc, set(ids), mode, 2)
+                _pre, frs = fragments.predict(doc, set(ids), mode, 3)
                 if _pre is None or (_pre.z > 0) != positive:
                     continue
                 for f in frs:
@@ -290,4 +290,18 @@ def annotate(peaks, candidates, tol, unit='ppm'):
                 if best is None or score < (round(abs(err), 6), rank(best)):
                     best, err = c, e
         out.append((mz, y, best, err))
+    return out
+
+
+def all_matches(peaks, candidates, tol, unit='ppm'):
+    """{m/z: [(candidate, error)]} - every candidate within tol of each peak, closest first."""
+    out = {}
+    for mz, _y in peaks:
+        hits = []
+        for c in candidates:
+            e = ppm(mz, c[3]) if unit == 'ppm' else mz - c[3]
+            if abs(e) <= tol:
+                hits.append((c, e))
+        hits.sort(key=lambda h: abs(h[1]))
+        out[mz] = hits
     return out

@@ -27,6 +27,60 @@ from rdkit import Chem
 import chem
 
 MODES = (('ESI+', 'ESI+  [M+H]+'), ('ESI-', 'ESI−  [M−H]−'), ('EI', 'EI  M•+'))
+
+REFS = {
+    'ei': 'McLafferty FW, Tureček F. Interpretation of Mass Spectra, 4th ed. University Science Books, 1993.',
+    'mclafferty': 'McLafferty FW. Anal. Chem. 1959, 31, 82-87; McLafferty & Tureček, Interpretation of Mass '
+                  'Spectra, 1993.',
+    'esi': 'Demarque DP et al. Fragmentation reactions using electrospray ionization mass spectrometry. Nat. Prod. '
+           'Rep. 2016, 33, 432-455 (doi:10.1039/C5NP00073D).',
+    'even': 'Karni M, Mandelbaum A. The even-electron rule. Org. Mass Spectrom. 1980, 15, 53-64.',
+    'rda': 'Fabre N et al. J. Am. Soc. Mass Spectrom. 2001, 12, 707-715 (flavonoid 1,3A / 1,3B ions); '
+           'Ma YL et al. Rapid Commun. Mass Spectrom. 1997, 11, 1357-1364.',
+    'glyco': 'Domon B, Costello CE. Glycoconjugate J. 1988, 5, 397-409 (B / Y ions); Cuyckens F, Claeys M. '
+             'J. Mass Spectrom. 2004, 39, 1-15.',
+    'radical': 'Hvattum E, Ekeberg D. J. Mass Spectrom. 2003, 38, 43-49 (radical aglycone [Y0-H]•−).',
+    'peptide': 'Roepstorff P, Fohlman J. Biomed. Mass Spectrom. 1984, 11, 601 (b / y ions); Paizs B, Suhai S. '
+               'Mass Spectrom. Rev. 2005, 24, 508-548 (mobile proton, immonium ions).',
+    'lipid': 'Hsu FF, Turk J. J. Am. Soc. Mass Spectrom. 2003, 14, 352-363 (phosphocholine m/z 184; PE loss of 141).',
+    'tms': 'Harvey DJ, Vouros P. Mass Spectrom. Rev. 2020, 39, 105-211 (TMS derivatives: m/z 73, 147, M−15).',
+    'chlorogenic': 'Clifford MN et al. J. Agric. Food Chem. 2003, 51, 2900-2911 (quinate m/z 191, caffeate 179).',
+}
+
+LOSS_TEXT = {
+    'alcohol': ('Protonation of the OH makes water a good leaving group: the C–O bond pair goes to O and H2O '
+                'leaves, giving the carbocation (or, with a neighbouring H, a double bond).',
+                'The radical cation loses water: a hydrogen (often from C-4, through a six-membered ring) moves to '
+                'the OH as the C–O bond breaks (1,2- / 1,4-elimination).'),
+    'carboxylic acid': ('The protonated acid loses water from its OH (giving the acylium ion), or CO2 / HCOOH; '
+                        'the carboxylate anion loses CO2, its C–C bond pair staying on the carbon.', None),
+    'primary amine': ('The protonated NH3+ group leaves as ammonia: the C–N bond pair goes to N, leaving a '
+                      'carbocation (or an alkene after a 1,2-H shift).', None),
+    'primary amide': ('The protonated amide loses ammonia, giving the acylium ion.', None),
+    'methyl ester': ('Protonation at the ester O-methyl oxygen; the acyl–O bond pair goes to O and methanol '
+                     'leaves, giving the acylium ion.', None),
+    'methyl ether': ('The protonated methoxy group leaves as methanol, giving the carbocation.', None),
+    'aryl methoxy group': ('Homolysis of the O–CH3 bond: a methyl radical leaves and the stable phenoxyl-type '
+                           'radical ion remains (an exception to the even-electron rule, typical of methoxylated '
+                           'flavonoids and phenolic acids).', None),
+    'tert-butyl group': ('Protonation at the heteroatom; the O/N–C(CH3)3 bond pair goes to the heteroatom and the '
+                         'tert-butyl cation leaves as isobutene after losing a proton (E1).', None),
+    'acetyl group, as ketene': ('Four-centre elimination: an H of the acetyl CH3 moves to the O / N as the acyl–'
+                                'O / N bond breaks, and ketene (CH2=C=O) leaves.', None),
+    'alkyl chloride': ('A hydrogen on the next carbon leaves with the halogen (1,2-elimination of HX).', None),
+    'alkyl bromide': ('A hydrogen on the next carbon leaves with the halogen (1,2-elimination of HX).', None),
+    'alkyl fluoride': ('A hydrogen on the next carbon leaves with the halogen (1,2-elimination of HX).', None),
+    'nitro group': ('The C–NO2 bond breaks homolytically: NO2• leaves and the aryl cation (or anion) remains.', None),
+    'thiol': ('The protonated SH leaves as H2S, as water leaves an alcohol.', None),
+    'sulfate / sulfonic acid': ('The S–O bond pair stays on the oxygen and SO3 leaves (sulfates: [M−H−80]−).', None),
+    'phosphate ester': ('The protonated phosphate leaves as H3PO4 (with a neighbouring H, an alkene forms), or HPO3 '
+                        'is expelled and the alcohol remains (phosphopeptides: −98 / −80).', None),
+    'trimethylsilyl group': ('A methyl radical leaves from silicon (α-cleavage at Si): the [M−CH3]+ ion of TMS '
+                             'derivatives, often stronger than M•+.', None),
+    'tert-butyldimethylsilyl group': ('The tert-butyl radical leaves from silicon: [M−57]+, usually the base peak '
+                                      'of TBDMS derivatives.', None),
+}
+
 LIKELY, POSSIBLE = 0.65, 0.40
 
 
@@ -46,6 +100,12 @@ class Fragment:
     also: list = field(default_factory=list)                # other rules giving the same ion
     S: frozenset = None                                     # expanded-drawing atom ids (None: formula only)
     marks: dict = None                                      # {expanded atom id: (charge, radicals, H)}
+    mech: str = ''                                          # the mechanism of this step, in words
+    arrows: list = field(default_factory=list)              # its curved arrows: ('full' | 'half', from, to), each end
+                                                            # ('atom', id) | ('bond', (id, id)) | ('H', id) | ('bondH', id)
+    pre: list = field(default_factory=list)                 # where the charge sits before it: [(atom, charge, •, H)]
+    ref: str = ''                                           # literature for the rule
+    parent: object = None                                   # the fragment it comes from (None: the precursor ion)
 
     @property
     def likelihood(self):
@@ -100,7 +160,51 @@ GROUP_LOSSES = (
      'phosphate ester'),
     ('HPO3', '[#6]O[PX4](=O)([OX2H1,OX1-])[OX2H1,OX1-]', (2, 3, 4, 5), 1, 1, False, {'ESI-': 0.6, 'ESI+': 0.3},
      'phosphate ester'),
+    ('CH3•', '[Si]([CH3])([CH3])[CH3]', (1,), 0, 3, True, {'EI': 0.75}, 'trimethylsilyl group'),
+    ('C4H9•', '[Si]([CH3])([CH3])C([CH3])([CH3])[CH3]', (3, 4, 5, 6), 0, 9, True, {'EI': 0.9},
+     'tert-butyldimethylsilyl group'),
 )
+
+# diagnostic ions: (ion formula, odd electron, SMARTS that must match (count), {mode: likelihood}, what, text, ref)
+DIAGNOSTIC = (
+    ({'C': 3, 'H': 9, 'Si': 1}, False, ('[O,N,S,#6][Si]([CH3])([CH3])[CH3]', 1), {'EI': 0.85},
+     'trimethylsilyl ion Si(CH3)3+ (m/z 73)', 'Cleavage of the X–Si bond with the charge on silicon: the '
+     'trimethylsilyl cation, present in the spectrum of every TMS derivative.', 'tms'),
+    ({'C': 5, 'H': 15, 'O': 1, 'Si': 2}, False, ('O[Si]([CH3])([CH3])[CH3]', 2), {'EI': 0.6},
+     'pentamethyldisiloxanyl ion (m/z 147)', 'Two TMS groups close in space: a silyl group migrates to the other '
+     'TMS oxygen and (CH3)2Si=O+–Si(CH3)3 forms; it shows two or more TMS–O groups.', 'tms'),
+    ({'C': 5, 'H': 15, 'N': 1, 'O': 4, 'P': 1}, False, ('C[N+](C)(C)CCOP(=O)([O-,OX2H1])O', 1), {'ESI+': 0.95},
+     'phosphocholine ion (m/z 184)', 'The protonated phosphate of a phosphatidylcholine / sphingomyelin breaks at '
+     'the glycerol C–O bond; the charge stays on the phosphocholine head group. Precursor scans of m/z 184 find '
+     'choline lipids.', 'lipid'),
+    ({'C': 8, 'H': 14, 'N': 1, 'O': 5}, False, ('[CX4;R1]1([OX2])[CX4;R1](NC(=O)[CH3])[CX4;R1][CX4;R1][CX4;R1]O1', 1),
+     {'ESI+': 0.8}, 'HexNAc oxonium ion (m/z 204)', 'Glycosidic cleavage with the charge on the N-acetylhexosamine '
+     '(B1 oxonium ion); it then loses water (186, 168) and C2H4O2 (138, 126) - the marker of glycopeptides.', 'glyco'),
+)
+
+
+FORMULA_TEXT = {
+    'ring C=O (from the ring)': 'The ring opens next to the C=O and carbon monoxide is expelled (ring contraction): '
+                                'flavones, chromones, xanthones, quinones.',
+    'phenol (from the ring)': 'The phenol ring keto-tautomerises, then expels CO (the cyclopentadiene ion '
+                              'remains).',
+    'nitro group (as the nitrite)': 'The nitro group rearranges to the nitrite Ar–O–N=O, which loses NO• (then '
+                                    'often CO).',
+    'aromatic N': 'The ring opens and HCN is expelled (pyridines, anilines, indoles).',
+    'C-glycoside (cross-ring, 0,3X)': 'C-glycosides cannot lose the sugar whole; the sugar ring breaks across two '
+                                      'bonds instead (0,3X: −90; 0,2X: −120).',
+    'C-glycoside (cross-ring, 0,2X)': 'C-glycosides cannot lose the sugar whole; the sugar ring breaks across two '
+                                      'bonds instead (0,2X: −120; 0,3X: −90).',
+    'lactone / coumarin (from the ring)': 'The lactone ring opens and CO2 leaves (coumarins also lose CO first).',
+    'chromone C ring (from the ring)': 'The C ring of the flavone / chromone opens and loses CO2.',
+    'chromone C ring, as ketene (from the ring)': 'The C ring loses ketene (C2H2O, −42), as flavones do in CID.',
+    'ortho effect': 'Ortho effect: the neighbouring OH / NH2 gives its hydrogen to the ester / acid oxygen through a '
+                    'six-membered ring, and the alcohol (or water) leaves; meta and para isomers do not do this.',
+    'aryl methyl ether': 'The methyl H moves to the ring and formaldehyde (CH2O) leaves (anisoles: M−30).',
+    'phenol, as formyl': 'After ring opening the phenol loses the formyl radical (M−29).',
+    'phosphocholine': 'The phosphocholine head group leaves as a neutral (−183), the diacylglycerol ion remains.',
+    'phosphoethanolamine': 'Protonated phosphatidylethanolamines lose the phosphoethanolamine head group (−141).',
+}
 
 FORMULA_LOSSES = (
     ('CO', '[#6;R][#6X3;R](=O)[#6;R]', {'C': 1, 'O': 1}, False, {'EI': 0.45, 'ESI+': 0.55, 'ESI-': 0.4},
@@ -119,6 +223,17 @@ FORMULA_LOSSES = (
      {'ESI+': 0.55, 'ESI-': 0.7}, 'C-glycoside (cross-ring, 0,3X)'),
     ('C4H8O4', '[c][CX4;R1]1[OX2;R1][CX4;R1][CX4;R1][CX4;R1][CX4;R1]1', {'C': 4, 'H': 8, 'O': 4},
      False, {'ESI+': 0.55, 'ESI-': 0.75}, 'C-glycoside (cross-ring, 0,2X)'),
+    ('CH3OH', 'c([OX2H1,NX3H2,NX3H1])c[CX3](=O)[OX2][CH3]', {'C': 1, 'H': 4, 'O': 1}, False, {'EI': 0.8},
+     'ortho effect'),
+    ('C2H5OH', 'c([OX2H1,NX3H2,NX3H1])c[CX3](=O)[OX2][CH2][CH3]', {'C': 2, 'H': 6, 'O': 1}, False, {'EI': 0.8},
+     'ortho effect'),
+    ('H2O', 'c([OX2H1,NX3H2,NX3H1,CH3])c[CX3](=O)[OX2H1]', {'H': 2, 'O': 1}, False, {'EI': 0.75}, 'ortho effect'),
+    ('CH2O', 'c[OX2][CH3]', {'C': 1, 'H': 2, 'O': 1}, False, {'EI': 0.4}, 'aryl methyl ether'),
+    ('CHO•', 'c[OX2H1]', {'C': 1, 'H': 1, 'O': 1}, True, {'EI': 0.3}, 'phenol, as formyl'),
+    ('C5H14NO4P', 'C[N+](C)(C)CCOP(=O)([O-,OX2H1])OC', {'C': 5, 'H': 14, 'N': 1, 'O': 4, 'P': 1}, False,
+     {'ESI+': 0.5}, 'phosphocholine'),
+    ('C2H8NO4P', '[NX3H2]CCOP(=O)([OX2H1,O-])OC', {'C': 2, 'H': 8, 'N': 1, 'O': 4, 'P': 1}, False, {'ESI+': 0.85},
+     'phosphoethanolamine'),
 )
 
 
@@ -400,7 +515,7 @@ class _Engine:
                 best = (rank, i)
         return best[1] if best else None
 
-    def make(self, S, marks, odd, how, score, step=1, lost_name=None, parent=None):
+    def make(self, S, marks, odd, how, score, step=1, lost_name=None, parent=None, mech=None):
         """A fragment from atom set S (molecule indices) and marks, or None when the bookkeeping fails."""
         m = self.m
         S = frozenset(S)
@@ -427,9 +542,9 @@ class _Engine:
         was_odd = parent.odd if parent else self.odd
         name = lost_name or (chem.formula_text(lost) + ('•' if was_odd != odd else ''))
         total = name if parent is None else f'{parent.lost} + {name}'
-        return self._frag(counts, odd, total, how, score, step, S, marks)
+        return self._frag(counts, odd, total, how, score, step, S, marks, mech, parent)
 
-    def formula_only(self, lost, radical, how, score, highlight, parent=None, step=1):
+    def formula_only(self, lost, radical, how, score, highlight, parent=None, step=1, mech=None):
         start = parent.counts if parent else self.pre
         counts = _sub(start, lost)
         if any(v < 0 for v in counts.values()):
@@ -440,14 +555,36 @@ class _Engine:
         odd = (parent.odd if parent else self.odd) != radical
         name = chem.formula_text(lost) + ('•' if radical else '')
         total = name if parent is None else f'{parent.lost} + {name}'
-        f = self._frag(counts, odd, total, how, score, step, None, None)
+        f = self._frag(counts, odd, total, how, score, step, None, None, mech, parent)
         f.atoms = frozenset(highlight)
         return f
 
-    def _frag(self, counts, odd, lost, how, score, step, S, marks):
+    def fixed_ion(self, counts, odd, how, score, highlight, mech=None):
+        """A diagnostic ion known from the literature (Si(CH3)3+, phosphocholine ...): its formula only."""
+        lost = _sub(self.pre, counts)
+        if any(v < 0 for v in lost.values()) or not any(lost.values()):
+            return None
+        name = chem.formula_text(_clean(lost)) + ('•' if odd != self.odd else '')
+        f = self._frag(dict(counts), odd, name, how, score, 1, None, None, mech, None)
+        f.atoms = frozenset(highlight)
+        return f
+
+    def _frag(self, counts, odd, lost, how, score, step, S, marks, mech=None, parent=None):
         m = self.m
         f = Fragment(self.mz(counts, self.z), self.z, odd, counts, ion_text(counts, self.z, odd), lost, how,
                      max(0.0, min(1.0, score)), step=step)
+        f.parent = parent
+        if mech:
+            text, arrows, pre, ref = (tuple(mech) + ((), (), ''))[:4]
+            f.mech, f.ref = text, REFS.get(ref, ref)
+
+            def end(e):
+                kind, v = e
+                if kind == 'bond':
+                    return ('bond', (m.order[v[0]], m.order[v[1]]))
+                return (kind, m.order[v])
+            f.arrows = [(k, end(a), end(b)) for k, a, b in arrows]
+            f.pre = [(m.order[a], dq, dr, dh) for a, dq, dr, dh in pre]
         if S is not None:
             f.S = frozenset(m.order[i] for i in S)
             f.marks = {m.order[i]: v for i, v in marks.items()}
@@ -462,6 +599,19 @@ class _Engine:
         if f is not None:
             self.out.append(f)
         return f
+
+    def proton(self, x):
+        """Where the charge sits before an ESI step at atom x: the proton on x ([M+H]+), or the deprotonated acidic
+        OH ([M−H]−), as [(atom, charge, •, H)]."""
+        if self.z > 0:
+            return [(x, 1, 0, 1)] if x is not None else []
+        acid = self.acid_site(frozenset(range(self.m.n)), ())
+        return [(acid, -1, 0, -1)] if acid is not None else []
+
+    def beta_h(self, c, S, avoid=()):
+        """A neighbour of c in S carrying an H (for eliminations), or None."""
+        m = self.m
+        return next((j for j in m.heavy(c) if j in S and j not in avoid and m.h(j)), None)
 
     # ------------------------------------------------------------------------------------------- the rules
     def run(self, steps=2):
@@ -494,9 +644,17 @@ class _Engine:
                 continue
             acyl = any(m.carbonyl_o(j) is not None for j in m.nb[y])
             kind = {'N': 'iminium', 'O': 'oxonium', 'S': 'sulfonium'}[m.el[y]]
+            Y = m.el[y]
             for ca in m.nb[y]:
                 if not m.single(ca, y, ring=True) or not m.saturated(ca):
                     continue
+                if m.h(ca):                                 # [M−H]+: the α-hydrogen leaves as H•
+                    self.add(self.make(range(m.n), {ca: (1, 0, -1)}, False, f'loss of H• α to {Y} ({kind} ion)',
+                                       {'N': 0.45}.get(Y, 0.3) - (0.2 if acyl else 0), mech=(
+                        f'Ionisation at {Y} ({Y}•+). One electron of an α C–H bond pairs with the unpaired electron '
+                        f'on {Y} (C={Y}+ forms), the other leaves with the hydrogen atom: [M−H]+.',
+                        [('half', ('bondH', ca), ('bond', (y, ca))), ('half', ('atom', y), ('bond', (y, ca))),
+                         ('half', ('bondH', ca), ('H', ca))], [(y, 1, 1, 0)], 'ei')))
                 for r in m.heavy(ca):
                     if r == y or not m.single(ca, r):
                         continue
@@ -504,11 +662,24 @@ class _Engine:
                     if S is None:
                         continue
                     score = alpha[m.el[y]] - (0.3 if acyl else 0) + (0.05 if len(m.side(r, ca)) >= 2 else 0)
-                    self.add(self.make(S, {ca: (1, 0, -1)}, False, f'α-cleavage at {m.el[y]} ({kind} ion)', score))
+                    self.add(self.make(S, {ca: (1, 0, -1)}, False, f'α-cleavage at {Y} ({kind} ion)', score, mech=(
+                        f'Ionisation removes an electron from a lone pair of {Y} ({Y}•+). One electron of the '
+                        f'Cα–{m.el[r]} bond pairs with the unpaired electron on {Y}, making the C={Y}+ double bond of '
+                        f'the {kind} ion; the other electron leaves with that side as a radical. The largest radical '
+                        "is lost most easily (Stevenson's rule).",
+                        [('half', ('bond', (ca, r)), ('bond', (y, ca))), ('half', ('atom', y), ('bond', (y, ca))),
+                         ('half', ('bond', (ca, r)), ('atom', r))], [(y, 1, 1, 0)], 'ei')))
         for c in range(m.n):                                # α-cleavage at C=O: acylium ions
             o = m.carbonyl_o(c)
             if o is None:
                 continue
+            if m.hs[c]:                                     # an aldehyde loses its H•
+                self.add(self.make(range(m.n), {c: (1, 0, -1)}, False, 'loss of H• from the aldehyde (acylium ion)',
+                                   0.55, mech=(
+                    'Ionisation at the C=O oxygen. The aldehyde C–H bond gives one electron to the oxygen\'s unpaired '
+                    'electron (C≡O+ forms) and the hydrogen atom leaves: [M−H]+, strong for aldehydes.',
+                    [('half', ('bondH', c), ('bond', (c, o))), ('half', ('atom', o), ('bond', (c, o))),
+                     ('half', ('bondH', c), ('H', c))], [(o, 1, 1, 0)], 'ei')))
             for r in m.heavy(c):
                 if r == o or not m.single(c, r):
                     continue
@@ -523,11 +694,19 @@ class _Engine:
                     score = 0.55
                 else:
                     score = 0.4
-                self.add(self.make(S, {c: (1, 0, -1)}, False, 'α-cleavage at C=O (acylium ion)', score))
+                self.add(self.make(S, {c: (1, 0, -1)}, False, 'α-cleavage at C=O (acylium ion)', score, mech=(
+                    f'Ionisation removes a lone-pair electron of the C=O oxygen (O•+). One electron of the '
+                    f'C(=O)–{m.el[r]} bond pairs with it, making the C≡O+ triple bond of the acylium ion; the other '
+                    'electron leaves with the group as a radical.',
+                    [('half', ('bond', (c, r)), ('bond', (c, o))), ('half', ('atom', o), ('bond', (c, o))),
+                     ('half', ('bond', (c, r)), ('atom', r))], [(o, 1, 1, 0)], 'ei')))
                 if m.el[r] == 'C':
                     S2 = m.side(r, c)
                     self.add(self.make(S2, {r: (1, 0, -1)}, False, 'α-cleavage at C=O (charge on the other side)',
-                                       0.6 * m.cation(r, S2)))
+                                       0.6 * m.cation(r, S2), mech=(
+                        'Inductive cleavage: the charged C=O oxygen pulls the C–C bond pair toward the carbonyl '
+                        'carbon; the acyl radical leaves and the alkyl / aryl cation remains.',
+                        [('full', ('bond', (c, r)), ('atom', c))], [(o, 1, 1, 0)], 'ei')))
         for b in range(m.n):                                # benzylic / allylic cleavage
             if not m.saturated(b):
                 continue
@@ -541,8 +720,16 @@ class _Engine:
                 S = m.side(b, r)
                 if S is None:
                     continue
+                pi = (aro or allyl)[0]
                 f = self.make(S, {b: (1, 0, -1)}, False, 'benzylic cleavage' if aro else 'allylic cleavage',
-                              0.9 if aro else 0.6)
+                              0.9 if aro else 0.6, mech=(
+                    ('Ionisation of the aromatic π system (ring•+). One electron of the benzylic C–R bond pairs with '
+                     'the ring\'s unpaired electron, the other leaves with R•. The benzyl cation formed rearranges '
+                     'to the seven-membered aromatic tropylium ion.') if aro else
+                    ('Ionisation of the C=C π bond. One electron of the allylic C–R bond pairs with the π radical, the '
+                     'other leaves with R•: the resonance-stabilised allyl cation remains.'),
+                    [('half', ('bond', (b, r)), ('bond', (b, pi))), ('half', ('bond', (b, r)), ('atom', r))],
+                    [(pi, 1, 1, 0)], 'ei'))
                 if f is not None and f.counts == {'C': 7, 'H': 7}:
                     f.how = 'benzylic cleavage (tropylium ion C7H7+)'
                 self.add(f)
@@ -554,12 +741,16 @@ class _Engine:
                 S = m.side(c, x)
                 if S is None:
                     continue
-                if m.el[x] in base:
-                    s = base[m.el[x]] * (0.5 + 0.5 * m.cation(c, S)) * (0.6 if m.aro[c] else 1)
-                    self.add(self.make(S, {c: (1, 0, -1)}, False, f'inductive cleavage at C–{m.el[x]}', s))
-                elif m.el[x] in ('O', 'S') and not m.h(x) and m.saturated(c):
+                X = m.el[x]
+                mech = (f'Ionisation at {X} ({X}•+). The C–{X} bond pair moves to {X} (inductive cleavage, i): '
+                        f'{X} leaves as a radical and the carbon keeps the positive charge.',
+                        [('full', ('bond', (c, x)), ('atom', x))], [(x, 1, 1, 0)], 'ei')
+                if X in base:
+                    s = base[X] * (0.5 + 0.5 * m.cation(c, S)) * (0.6 if m.aro[c] else 1)
+                    self.add(self.make(S, {c: (1, 0, -1)}, False, f'inductive cleavage at C–{X}', s, mech=mech))
+                elif X in ('O', 'S') and not m.h(x) and m.saturated(c):
                     s = 0.3 * (0.5 + m.cation(c, S))
-                    self.add(self.make(S, {c: (1, 0, -1)}, False, f'inductive cleavage at C–{m.el[x]}', s))
+                    self.add(self.make(S, {c: (1, 0, -1)}, False, f'inductive cleavage at C–{X}', s, mech=mech))
         for a in range(m.n):                                # σ-cleavage of C–C bonds (branch points)
             if not m.saturated(a):
                 continue
@@ -573,7 +764,41 @@ class _Engine:
                     s = m.cation(c, S)
                     if s >= 0.35:
                         self.add(self.make(S, {c: (1, 0, -1)}, False, 'σ-cleavage of C–C (alkyl cation)',
-                                           0.1 + 0.4 * s))
+                                           0.1 + 0.4 * s, mech=(
+                            'σ-Ionisation of the C–C bond (no lone pair or π bond nearby). The one-electron bond '
+                            'breaks; the more substituted carbon keeps the charge (the most stable carbocation) and '
+                            'the other side leaves as a radical - branch points break most.',
+                            [('half', ('bond', (c, other)), ('atom', other))], [(c, 1, 1, 0)], 'ei')))
+        for x in range(m.n):                                # alkene loss with H transfer from ethers / esters
+            if m.el[x] not in ('O', 'N') or m.aro[x] or m.q[x]:
+                continue
+            for c in m.heavy(x):
+                a = next((j for j in m.heavy(x) if j != c and (m.aro[j] or m.carbonyl_o(j) is not None)), None)
+                if a is None or not m.saturated(c) or not m.single(c, x):
+                    continue
+                Sx, Sc = m.side(x, c), m.side(c, x)
+                if Sx is None:
+                    continue
+                bh = self.beta_h(c, Sc, (x,))
+                if bh is None:
+                    continue
+                ester = m.carbonyl_o(a) is not None
+                arrows = [('half', ('bondH', bh), ('atom', x)), ('half', ('bondH', bh), ('bond', (bh, c))),
+                          ('half', ('bond', (c, x)), ('bond', (bh, c)))]
+                o_ion = m.carbonyl_o(a) if ester else x
+                self.add(self.make(Sx, {x: (1, 1, 0)}, True, 'alkene loss, H to ' + ('the ester O' if ester else
+                                                                                     m.el[x] + ' (four-centre)'),
+                                   0.4 if ester else 0.6, mech=(
+                    'A β-hydrogen of the alkyl group moves to the heteroatom as the C–' + m.el[x] + ' bond breaks '
+                    '(four-membered transition state); the alkene leaves and the ' +
+                    ('acid' if ester else 'phenol / amine') + ' radical cation remains (phenetole → phenol•+, m/z 94).',
+                    arrows, [(o_ion, 1, 1, 0)], 'ei')))
+                if ester and len([j for j in Sc if m.el[j] == 'C']) >= 2:
+                    self.add(self.make(Sx, {x: (1, 0, 1)}, False, 'double hydrogen rearrangement (McLafferty+1)',
+                                       0.5, mech=(
+                        'Two hydrogens of the alkoxy group move to the ester oxygens (two consecutive H transfers) '
+                        'and an allyl / alkenyl radical leaves: the protonated acid [RC(OH)2]+ (ethyl acetate → '
+                        'm/z 61).', arrows, [(m.carbonyl_o(a), 1, 1, 0)], 'mclafferty')))
 
     def mclafferty(self):
         m = self.m
@@ -602,13 +827,32 @@ class _Engine:
                             continue
                         done.add((y, xa, cb))
                         s = {'O': 0.85, 'S': 0.6, 'N': 0.6, 'C': 0.35}[m.el[y]] - (0.15 if m.el[xa] == 'O' else 0)
-                        self.add(self.make(S, {y: (1, 1, 0)}, True, 'McLafferty rearrangement', s))
+                        g = gs[0]
+                        arrows = [('half', ('atom', y), ('H', g)), ('half', ('bondH', g), ('bond', (cb, g))),
+                                  ('half', ('bond', (xa, cb)), ('bond', (cb, g))),
+                                  ('half', ('bond', (xa, cb)), ('bond', (c1, xa)))]
+                        Y = m.el[y]
+                        self.add(self.make(S, {y: (1, 1, 0)}, True, 'McLafferty rearrangement', s, mech=(
+                            f'Ionisation at {Y} ({Y}•+). Through a six-membered ring the unpaired electron on {Y} '
+                            'takes a γ-hydrogen; the Cα–Cβ bond then breaks: one of its electrons pairs with the '
+                            'one left on Cγ (the neutral alkene Cβ=Cγ leaves), the other makes the C=C of the enol '
+                            'radical cation.', arrows, [(y, 1, 1, 0)], 'mclafferty')))
                         S2 = m.side(cb, xa)
-                        self.add(self.make(S2, {cb: (1, 0, -1), gs[0]: (0, 1, -1)}, True,
-                                           'McLafferty rearrangement (charge on the alkene)', 0.3))
+                        self.add(self.make(S2, {cb: (1, 0, -1), g: (0, 1, -1)}, True,
+                                           'McLafferty rearrangement (charge on the alkene)', 0.3, mech=(
+                            'The same γ-hydrogen transfer and Cα–Cβ cleavage, but the charge stays on the alkene '
+                            'side (when its ionisation energy is the lower).', arrows, [(y, 1, 1, 0)],
+                            'mclafferty')))
                     if ortho and not ys and m.el[xa] == 'C':
+                        g = gs[0]
                         self.add(self.make(S, {ortho[0]: (1, 1, 0)}, True, 'McLafferty-type H shift to the ring',
-                                           0.55))
+                                           0.55, mech=(
+                            'The ring radical cation takes a γ-hydrogen at its ortho carbon (six-membered '
+                            'transition state) and the benzylic Cα–Cβ bond breaks: an alkene leaves and the '
+                            'methylene-cyclohexadiene radical cation remains (propylbenzene → m/z 92).',
+                            [('half', ('atom', ortho[0]), ('H', g)), ('half', ('bondH', g), ('bond', (cb, g))),
+                             ('half', ('bond', (xa, cb)), ('bond', (cb, g)))], [(ortho[0], 1, 1, 0)],
+                            'mclafferty')))
 
     def rda(self):
         """Retro-Diels–Alder: a six-membered ring with a double (or aromatic fusion) bond a=b splits at the two
@@ -635,13 +879,20 @@ class _Engine:
                 if D is None or u in D or w in D:
                     continue
                 E = frozenset(range(m.n)) - D
+                arrows = [('full', ('bond', (a, b)), ('bond', (a, p))), ('full', ('bond', (p, w)), ('bond', (w, u))),
+                          ('full', ('bond', (q, u)), ('bond', (b, q)))]
+                text = ('The six-membered ring opens at the two bonds across from its double (or fused aromatic) bond '
+                        '- a retro-Diels–Alder reaction: the three electron pairs of the ring shift together, giving a '
+                        'diene and an alkene (the dienophile). ')
                 if self.mode == 'EI':
                     site = p if m.el[p] == 'C' else q
                     other = q if site == p else p
+                    mech = (text + 'In the radical cation the charge usually stays on the diene.', arrows,
+                            [(a, 1, 1, 0)], 'ei')
                     self.add(self.make(D, {site: (1, 0, -1), other: (0, 1, -1)}, True, 'retro-Diels–Alder (diene)',
-                                       0.7))
+                                       0.7, mech=mech))
                     self.add(self.make(E, {w: (1, 0, -1), u: (0, 1, -1)}, True, 'retro-Diels–Alder (dienophile)',
-                                       0.3))
+                                       0.3, mech=mech))
                 else:
                     sign = 1 if self.z > 0 else -1
                     for piece, ends, s, part in ((D, (p, q), 0.65, '1,3A-type diene'),
@@ -657,7 +908,14 @@ class _Engine:
                                     marks = self.place(piece, marks, e, 0, 0, -1) if marks else None
                             else:
                                 marks = None            # nothing to deprotonate: no [M−H]− ion of this piece
-                        self.add(self.make(piece, marks, False, f'retro-Diels–Alder ({part})', s))
+                        if sign > 0:
+                            pre = self.proton(self.base_site(piece) if piece is D else self.base_site(E))
+                        else:
+                            pre = self.proton(None)
+                        self.add(self.make(piece, marks, False, f'retro-Diels–Alder ({part})', s, mech=(
+                            text + ('The protonated (or deprotonated) molecule splits the same way; for flavonoids '
+                                    'the A-ring piece is the 1,3A ion and the B-ring piece the 1,3B ion.'),
+                            arrows, pre, 'rda')))
 
     def esi_cleavages(self):
         """Heterolysis of C–O, C–N, C–S bonds outside rings, as in CID of [M+H]+ / [M−H]−."""
@@ -687,10 +945,46 @@ class _Engine:
                     else:
                         s = 0.9 * m.cation(c, Sc)
                         how = f'C–{m.el[x]} cleavage (carbocation)'
+                    X = m.el[x]
                     if s >= 0.15:
-                        self.add(self.make(Sc, {c: (1, 0, -1)}, False, how, s))
+                        self.add(self.make(Sc, {c: (1, 0, -1)}, False, how, s, mech=(
+                            f'Protonation of {X} turns it into a good leaving group. The C–{X} bond pair goes to '
+                            f'{X}, which leaves as a neutral molecule, and the ' +
+                            ('acylium (b) ion' if acyl else 'oxocarbenium (B) ion' if glyco else 'carbocation') +
+                            ' remains (charge-migration fragmentation).',
+                            [('full', ('bond', (c, x)), ('atom', x))], [(x, 1, 0, 1)],
+                            'peptide' if acyl and X == 'N' else 'glyco' if glyco else 'esi')))
+                if not pos and glyco and (x_aryl or any(m.vinyl(j) for j in m.heavy(x) if j != c)):
+                    acid = self.acid_site(Sx, (x,))                 # flavonol 3-O-glycosides: radical aglycone
+                    if acid is not None:
+                        marks = {acid: (-1, 0, -1), x: (0, 1, -1)}
+                        flavonol = any(m.vinyl(j) for j in m.heavy(x) if j != c)
+                        self.add(self.make(Sx, marks, True, 'homolytic glycosidic cleavage (radical aglycone '
+                                           '[Y0−H]•−)', 0.75 if flavonol else 0.4, mech=(
+                            'The glycosidic O–C bond breaks homolytically: the aglycone keeps the oxygen as a '
+                            'radical next to the deprotonated phenol ([Y0−H]•−) and the sugar leaves as a radical. '
+                            'Strong for flavonol 3-O-glycosides, where the radical is conjugated with the 2,3-double '
+                            'bond and C-4 carbonyl.', [('half', ('bond', (c, x)), ('atom', x)),
+                                                        ('half', ('bond', (c, x)), ('atom', c))],
+                            self.proton(None), 'radical')))
+                if not pos and acyl and m.el[x] == 'O' and not pendant:   # the acyl side as the anion (ketene)
+                    acid = self.acid_site(Sc)
+                    alpha = self.beta_h(c, Sc, (x,))
+                    if acid is not None and alpha is not None:
+                        marks = self.place(Sc, {acid: (-1, 0, -1)}, c, 0, 0, -1)
+                        marks = self.place(Sc, marks, alpha, 0, 0, -1) if marks else None
+                        self.add(self.make(Sc, marks, False, 'ester cleavage (acyl side as the anion, ketene)', 0.45,
+                                           mech=(
+                            'The deprotonated phenol / acid on the acyl side stays charged while the ester O–C(=O) '
+                            'bond breaks with an α-hydrogen moving to the alkoxy oxygen: the alcohol leaves as a '
+                            'neutral molecule and the acyl part remains as a ketene anion (chlorogenic acids: '
+                            'caffeoyl m/z 161).',
+                            [('full', ('bondH', alpha), ('bond', (alpha, c))), ('full', ('bond', (c, x)), ('atom', x))],
+                            self.proton(None), 'chlorogenic')))
                 if not beta_h or pendant and not glyco:
                     continue
+                bh = self.beta_h(c, Sc, (x,))
+                elim = [('full', ('bondH', bh), ('bond', (bh, c))), ('full', ('bond', (c, x)), ('atom', x))]
                 if pos:                                         # the heteroatom side takes the proton
                     if glyco:
                         s, how = 0.9, 'glycosidic cleavage (aglycone or sugar loss, Y ion)'
@@ -706,7 +1000,13 @@ class _Engine:
                         s, how = 0.45, 'C–N cleavage: amine, alkene lost'
                     else:
                         s, how = 0.3, f'C–{m.el[x]} cleavage, alkene lost'
-                    self.add(self.make(Sx, {x: (1, 0, 1)}, False, how, s))
+                    self.add(self.make(Sx, {x: (1, 0, 1)}, False, how, s, mech=(
+                        f'Proton on {m.el[x]}. As the C–{m.el[x]} bond breaks, a hydrogen next to the carbon '
+                        f'goes with the electrons into a C=C (or C=C=O) bond and is handed over to {m.el[x]} '
+                        '(1,2-elimination, charge retention on the heteroatom side): the neutral ' +
+                        ('anhydro sugar leaves and the aglycone (Y) ion remains.' if glyco else
+                         'ketene leaves.' if acyl else 'alkene leaves.'),
+                        elim, [(x, 1, 0, 1)], 'glyco' if glyco else 'peptide' if acyl and m.el[x] == 'N' else 'esi')))
                 else:                                           # the heteroatom side as the anion
                     if glyco:
                         s, how = 0.85, 'glycosidic cleavage (aglycone or sugar loss, Y⁻ ion)'
@@ -720,7 +1020,11 @@ class _Engine:
                         s, how = 0.3, 'amide cleavage (amide anion)'
                     else:
                         s, how = 0.2, f'C–{m.el[x]} cleavage (anion)'
-                    self.add(self.make(Sx, {x: (-1, 0, -1)}, False, how, s))
+                    self.add(self.make(Sx, {x: (-1, 0, -1)}, False, how, s, mech=(
+                        f'The negative charge (the deprotonated acidic OH) takes a hydrogen next to the carbon as the '
+                        f'C–{m.el[x]} bond pair goes to {m.el[x]}: {m.el[x]} leaves with the charge and the carbon side '
+                        'becomes a neutral ' + ('anhydro sugar.' if glyco else 'ketene.' if acyl else 'alkene.'),
+                        elim, self.proton(None), 'chlorogenic' if x_acyl or acyl else 'glyco' if glyco else 'esi')))
 
     def charge_remote(self):
         """A structure drawn as an ion: each single bond outside a ring splits, the charged side keeping an H from
@@ -736,7 +1040,10 @@ class _Engine:
                         continue
                     if not any(m.h(k) for k in m.heavy(b) if k not in S) and not m.h(b):
                         continue
-                    self.add(self.make(S, {}, self.odd, 'cleavage, neutral molecule lost (charge-remote)', 0.45))
+                    self.add(self.make(S, {}, self.odd, 'cleavage, neutral molecule lost (charge-remote)', 0.45,
+                                       mech=('The charge stays where it is drawn: a hydrogen moves to the charged side '
+                                             'as the bond breaks and the other side leaves as a neutral molecule '
+                                             '(charge-remote fragmentation).', [], [], 'esi')))
 
     def _matches(self):
         if not hasattr(self, '_gm'):
@@ -761,7 +1068,8 @@ class _Engine:
                 attach = match[att]
                 if attach not in S or m.side(attach, -1, cut=[(attach, g) for g in gone]) != S:
                     continue
-                f = self._loss(S, None, attach, radical, name, _lh, s, f'loss of {name} ({what})', None, 1)
+                f = self._loss(S, None, attach, radical, name, _lh, s, f'loss of {name} ({what})', None, 1,
+                               mech=self.loss_mech(row, match, attach, None))
                 self.add(f)
         for name, smarts, lost, radical, scores, what in FORMULA_LOSSES:
             s = scores.get(self.mode)
@@ -771,9 +1079,71 @@ class _Engine:
             hits = m.mol.GetSubstructMatches(patt)
             if hits:
                 hl = {m.owner[m.order[i]] for i in range(m.n)}
-                self.add(self.formula_only(lost, radical, f'loss of {name} ({what})', s, hl))
+                ref = 'lipid' if 'phospho' in what else 'rda' if 'chromone' in what else 'glyco' if 'glycoside' in \
+                    what else 'ei'
+                self.add(self.formula_only(lost, radical, f'loss of {name} ({what})', s, hl,
+                                           mech=(FORMULA_TEXT.get(what, ''), [], [], ref)))
+        for counts, odd, (smarts, most), scores, what, text, ref in DIAGNOSTIC:
+            s = scores.get(self.mode)
+            patt = Chem.MolFromSmarts(smarts)
+            if not s or patt is None or len(m.mol.GetSubstructMatches(patt)) < most:
+                continue
+            self.add(self.fixed_ion(counts, odd, what, s, {m.owner[m.order[i]] for i in range(m.n)},
+                                    mech=(text, [], [], ref)))
+        if self.z > 0 and not self.odd:
+            self.immonium()
 
-    def _loss(self, S, base, attach, radical, name, lh, s, how, parent, step):
+    def immonium(self):
+        """Peptides / amino acids: the immonium ion H2N+=CH–R of each residue."""
+        m = self.m
+        aromatic = 0
+        for ca in range(m.n):
+            if not m.saturated(ca):
+                continue
+            n = next((j for j in m.heavy(ca) if m.el[j] == 'N' and not m.aro[j] and m.single(ca, j, True)), None)
+            co = next((j for j in m.heavy(ca) if m.carbonyl_o(j) is not None and m.single(ca, j)), None)
+            if n is None or co is None:
+                continue
+            prev = [j for j in m.heavy(n) if j != ca and m.carbonyl_o(j) is not None and m.single(n, j)]
+            S = m.side(ca, co, cut=[(n, j) for j in prev])
+            if S is None or any(j in S for j in prev):
+                continue
+            aromatic = any(m.aro[j] for j in S)
+            self.add(self.make(S, {ca: (1, 0, -1)}, False, 'immonium ion of the residue',
+                               0.7 if aromatic else 0.45, mech=(
+                'An internal fragment (b → a ion of one residue): the amide bond before the residue and its Cα–C(=O) '
+                'bond break, CO leaves, and the iminium ion H2N+=CH–R remains. It tells which amino acid is present '
+                '(Phe 120.08, Tyr 136.08, Trp 159.09, His 110.07, Leu / Ile 86.10, Pro 70.07).',
+                [('full', ('bond', (ca, co)), ('atom', co))], [(n, 1, 0, 1)], 'peptide')))
+
+    def loss_mech(self, row, match, attach, parent):
+        """(text, arrows, pre, ref) of losing a group: heterolysis toward the leaving group, or toward the ion for
+        CO2, SO3, ketene, isobutene; homolysis for a radical."""
+        m = self.m
+        name, _s, rem, _att, _lh, radical, _sc, what = row
+        g0 = next((match[k] for k in rem if attach in m.nb[match[k]]), match[rem[0]])
+        texts = LOSS_TEXT.get(what, ('', None))
+        text = texts[1] if self.mode == 'EI' and texts[1] else texts[0]
+        if radical:
+            arrows = [('half', ('bond', (attach, g0)), ('atom', g0)), ('half', ('bond', (attach, g0)), ('atom', attach))]
+        elif name in ('CO2', 'SO3', 'HPO3', 'C2H2O', 'C4H8'):
+            arrows = [('full', ('bond', (attach, g0)), ('atom', attach))]
+        else:
+            arrows = [('full', ('bond', (attach, g0)), ('atom', g0))]
+        if parent is not None:
+            pre = []
+        elif self.mode == 'EI':
+            pre = [(g0 if m.el[g0] in ('O', 'N', 'S', 'Cl', 'Br', 'I', 'F') else attach, 1, 1, 0)]
+        elif self.z > 0:
+            site = g0 if m.el[g0] in ('O', 'N', 'S') and name not in ('C2H2O', 'C4H8', 'CO2') else attach \
+                if m.el[attach] in ('O', 'N') else self.base_site(frozenset(range(m.n)))
+            pre = self.proton(site)
+        else:
+            pre = self.proton(None)
+        ref = 'tms' if 'silyl' in what else 'lipid' if 'phosph' in what else 'esi' if self.mode != 'EI' else 'ei'
+        return (text, arrows, pre, ref)
+
+    def _loss(self, S, base, attach, radical, name, lh, s, how, parent, step, mech=None):
         """S after a group left from attach: the charge / radical and the H balance placed at attach."""
         m = self.m
         start = parent if parent is not None else None
@@ -830,7 +1200,7 @@ class _Engine:
         if marks is None:
             return None
         return self.make(S, marks, odd, how, s, step, lost_name=name + ('' if not radical or name.endswith('•')
-                                                                            else '•'), parent=parent)
+                                                                            else '•'), parent=parent, mech=mech)
 
     def next_losses(self, f, step):
         m = self.m
@@ -854,7 +1224,7 @@ class _Engine:
                           [(x, y) for x in S0 for y in m.nb[x] if y not in S0]) != S:
                     continue
                 g = self._loss(S, f._imarks, attach, radical, name, _lh, f.score * s * 0.85,
-                               f'{f.how}, then −{name}', f, step)
+                               f'{f.how}, then −{name}', f, step, mech=self.loss_mech(row, match, attach, f))
                 if g is not None:
                     out.append(g)
         for c, v in f._imarks.items():                      # an acylium ion loses CO
@@ -872,7 +1242,10 @@ class _Engine:
             target = _sub(f.counts, {'C': 1, 'O': 1})
             dh = target.get('H', 0) - hc - sum(w[2] for k, w in base.items() if k in S)
             marks = self.place(S, base, rest[0], v[0], 0, dh)
-            g = self.make(S, marks, f.odd, f'{f.how}, then −CO', f.score * 0.75, step, lost_name='CO', parent=f)
+            g = self.make(S, marks, f.odd, f'{f.how}, then −CO', f.score * 0.75, step, lost_name='CO', parent=f,
+                          mech=('The acylium ion R–C≡O+ expels carbon monoxide: the R–C bond pair goes with the CO '
+                                'carbon and the carbocation R+ remains (benzoyl 105 → phenyl 77; peptide b → a ions).',
+                                [('full', ('bond', (rest[0], c)), ('atom', c))], [], 'ei'))
             if g is not None:
                 out.append(g)
         for x, v in f._imarks.items():                      # a carboxylate ion loses CO2
@@ -891,7 +1264,10 @@ class _Engine:
             target = _sub(f.counts, {'C': 1, 'O': 2})
             dh = target.get('H', 0) - hc - sum(w[2] for k, w in base.items() if k in S)
             marks = self.place(S, base, rest[0], v[0], 0, dh)
-            g = self.make(S, marks, f.odd, f'{f.how}, then −CO2', f.score * 0.8, step, lost_name='CO2', parent=f)
+            g = self.make(S, marks, f.odd, f'{f.how}, then −CO2', f.score * 0.8, step, lost_name='CO2', parent=f,
+                          mech=('The carboxylate COO− expels CO2: the C–C bond pair stays on the carbon, which keeps '
+                                'the negative charge (caffeate 179 → 135).',
+                                [('full', ('bond', (rest[0], c)), ('atom', rest[0]))], [], 'chlorogenic'))
             if g is not None:
                 out.append(g)
         if f.z > 0 and not f.odd:                           # an onium ion loses an alkene, its H moving to N / O
@@ -912,13 +1288,20 @@ class _Engine:
                         continue
                     kept = _clean(m.counts(S, hc + sum(w[2] for k, w in f._imarks.items() if k in S)))
                     lost = _clean(_sub(f.counts, kept))
+                    bh = self.beta_h(c, R)
                     g = self.make(S, {k: w for k, w in f._imarks.items() if k in S}, f.odd,
                                   f'{f.how}, then −{chem.formula_text(lost)} (alkene; H to {m.el[y]})',
-                                  f.score * 0.6, step, parent=f)
+                                  f.score * 0.6, step, parent=f, mech=(
+                        f'The onium ion loses an alkene: a hydrogen of the alkyl group moves to {m.el[y]} '
+                        f'(four-membered transition state) as the {m.el[y]}–C bond breaks (triethylamine 86 → 58).',
+                        [('full', ('bondH', bh), ('bond', (bh, c))), ('full', ('bond', (c, y)), ('atom', y))]
+                        if bh is not None else [], [], 'ei'))
                     if g is not None:
                         out.append(g)
         if f.counts in ({'C': 7, 'H': 7}, {'C': 6, 'H': 5}) and f.z > 0 and not f.odd:
-            g = self.formula_only({'C': 2, 'H': 2}, False, f'{f.how}, then −C2H2', f.score * 0.5, f.atoms, f, step)
+            g = self.formula_only({'C': 2, 'H': 2}, False, f'{f.how}, then −C2H2', f.score * 0.5, f.atoms, f, step,
+                                  mech=('The tropylium (or phenyl) ion breaks its ring and loses acetylene: 91 → 65, '
+                                        '77 → 51.', [], [], 'ei'))
             if g is not None:
                 out.append(g)
         return out
@@ -1088,3 +1471,133 @@ def _rings6(d, a, b):
                 walk(path + [n])
     walk([a, b])
     return out
+
+
+# ------------------------------------------------------------------------------------------- drawing a mechanism
+def chain_of(frag):
+    """The fragments from the precursor's first product to frag, in order."""
+    out = []
+    while frag is not None:
+        out.insert(0, frag)
+        frag = frag.parent
+    return out
+
+
+def step_loss(f):
+    """What one step loses ('CH3•', 'H2O'), from its fragment's running list."""
+    return f.lost.split(' + ')[-1] if f.lost else ''
+
+
+def mechanism(doc, frag, atoms):
+    """The fragmentation drawn step by step: ([(Doc, loss after it)], why the chain stops early or ''). The first
+    Doc is the precursor (the structure with atom ids atoms, its charge where the first step starts), the others the
+    ions along the way; each holds, as curved arrows tied to its atoms and bonds (fish-hooks for one electron), the
+    step that follows it - with explicit H atoms where a hydrogen moves."""
+    from model import Doc
+    chain = chain_of(frag)
+    first = Doc()
+    first.style = dict(doc.style)
+    first.insert_dict(doc.to_dict([('atom', a) for a in atoms if a in doc.atoms]), keep_ids=True)
+    _mark(first, chain[0].pre)
+    _arrows(first, chain[0].arrows)
+    states = [(first, step_loss(chain[0]))]
+    for k, f in enumerate(chain):
+        piece, why = draw_doc(doc, f)
+        if piece is None:
+            return states, why
+        if k + 1 < len(chain):
+            _mark(piece, chain[k + 1].pre)
+            _arrows(piece, chain[k + 1].arrows)
+        states.append((piece, step_loss(chain[k + 1]) if k + 1 < len(chain) else ''))
+    return states, ''
+
+
+def _mark(d, pre):
+    """The charge (and unpaired electron, and the extra or missing H) where a step starts, on its atom - or, when
+    the atom cannot carry it as drawn (an aromatic carbon with •+), written beside it."""
+    for a, dq, dr, dh in pre or []:
+        at = d.atoms.get(a)
+        if at is None or at.label:
+            continue
+        keep = (at.charge, at.radical, at.hcount)
+        h = d.implicit_h(a) + dh
+        at.charge += dq
+        at.radical = min(2, at.radical + dr)
+        at.hcount = None
+        if d.implicit_h(a) != h:
+            at.hcount = max(0, h)
+        if d.valence_problem(a):
+            at.charge, at.radical, at.hcount = keep
+            sign = ('•' if dr else '') + ('+' if dq > 0 else '−' if dq < 0 else '')
+            if sign:
+                d.add_text(at.x + 0.35, at.y - 0.95, sign, size=0)
+
+
+def _h_atom(d, a, made):
+    """An explicit H on atom a (made once), pointing away from its neighbours."""
+    import math
+    if a in made:
+        return made[a]
+    at = d.atoms[a]
+    vx = vy = 0.0
+    for n, _b in d.neighbors(a):
+        vx += d.atoms[n].x - at.x
+        vy += d.atoms[n].y - at.y
+    L = math.hypot(vx, vy)
+    ux, uy = (-vx / L, -vy / L) if L > 1e-6 else (0.0, -1.0)
+    if L <= 1e-6 and d.neighbors(a):
+        n = d.atoms[d.neighbors(a)[0][0]]
+        ux, uy = -(n.y - at.y), n.x - at.x
+    h = d.add_atom(at.x + 0.8 * ux, at.y + 0.8 * uy, 'H')
+    if at.hcount:
+        at.hcount -= 1
+    d.add_bond(a, h)
+    made[a] = h
+    return h
+
+
+def _arrows(d, arrows):
+    """Curved arrows (full or fish-hook) tied to the atoms and bonds of d; ends that are not in d are skipped."""
+    import model
+    made = {}
+
+    def item(e):
+        kind, v = e
+        if kind == 'atom':
+            return ('atom', v) if v in d.atoms and not d.atoms[v].label else None
+        if kind == 'bond':
+            b = d.bond_between(*v) if all(x in d.atoms for x in v) else None
+            return ('bond', b) if b is not None else None
+        if v not in d.atoms or d.atoms[v].label:
+            return None
+        h = _h_atom(d, v, made)
+        return ('atom', h) if kind == 'H' else ('bond', d.bond_between(v, h))
+    ends = [(k, item(a), item(b)) for k, a, b in arrows]
+    if not d.atoms:
+        return
+    cx = sum(at.x for at in d.atoms.values()) / len(d.atoms)
+    cy = sum(at.y for at in d.atoms.values()) / len(d.atoms)
+    for kind, a, b in ends:
+        if a is None or b is None or a == b:
+            continue
+        (x1, y1), (x2, y2) = d.anchor(*a), d.anchor(*b)
+        if a[0] == 'atom':                                  # a lone pair: start just off the atom, away from the head
+            dx, dy = x1 - x2, y1 - y2
+            L = max((dx * dx + dy * dy) ** 0.5, 1e-6)
+            x1, y1 = x1 + 0.22 * dx / L, y1 + 0.22 * dy / L
+        if b[0] == 'atom' and d.atoms[b[1]].el != 'H':      # to an atom: stop just short of its label
+            dx, dy = x1 - x2, y1 - y2
+            L = max((dx * dx + dy * dy) ** 0.5, 1e-6)
+            x2, y2 = x2 + 0.2 * dx / L, y2 + 0.2 * dy / L
+        if ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5 < 0.15:
+            continue
+        span = ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
+        ar = model.Arrow(x1, y1, x2, y2, 'curved' if kind == 'full' else 'curved_half', 0.3 if span < 1.2 else 0.16)
+        mx, my = (x1 + x2) / 2, (y1 + y2) / 2
+        px, py = model.curve_control(ar)
+        if (px - cx) ** 2 + (py - cy) ** 2 < (mx - cx) ** 2 + (my - cy) ** 2:
+            ar.bend = -ar.bend                              # bulge away from the middle of the structure
+        i = d._id()
+        d.arrows[i] = ar
+        d.attach_arrow_end(ar, 'tail', a)
+        d.attach_arrow_end(ar, 'head', b)

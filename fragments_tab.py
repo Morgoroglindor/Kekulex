@@ -70,14 +70,23 @@ class FragmentsTab(QtWidgets.QWidget):
         self.table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setAlternatingRowColors(True)
         self.table.setSortingEnabled(True)
-        self.table.setWordWrap(False)
+        self.table.setWordWrap(True)
+        self.table.setTextElideMode(QtCore.Qt.TextElideMode.ElideNone)
         self.table.setToolTip('Pick a row to see it on the drawing; double-click to draw the fragment. '
                               'Ctrl+C copies the list.')
         self.table.itemSelectionChanged.connect(self._picked)
         self.table.cellDoubleClicked.connect(lambda _r, _c: self.draw())
         QtGui.QShortcut(QtGui.QKeySequence.StandardKey.Copy, self.table, self.copy,
                         context=QtCore.Qt.ShortcutContext.WidgetShortcut)
-        lay.addWidget(self.table, 1)
+        self.details = QtWidgets.QTextBrowser()
+        self.details.setOpenExternalLinks(False)
+        self.details.setPlaceholderText('Pick a fragment: how it forms, step by step, and where the rule comes from.')
+        split = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
+        split.addWidget(self.table)
+        split.addWidget(self.details)
+        split.setStretchFactor(0, 3)
+        split.setStretchFactor(1, 2)
+        lay.addWidget(split, 1)
         brow = QtWidgets.QHBoxLayout()
         self.note = QtWidgets.QLabel()
         self.note.setWordWrap(True)
@@ -89,8 +98,19 @@ class FragmentsTab(QtWidgets.QWidget):
         self.draw_b = QtWidgets.QPushButton('Draw')
         self.draw_b.setToolTip('The picked fragment ion under the structure, after an arrow labelled with the loss')
         self.draw_b.clicked.connect(self.draw)
+        self.mech_b = QtWidgets.QPushButton('Draw mechanism')
+        self.mech_b.setToolTip('The precursor ion with its curved arrows (fish-hooks for one electron), each ion on '
+                               'the way and the fragment, joined by arrows labelled with the losses')
+        self.mech_b.clicked.connect(self.draw_mechanism)
+        self.big_b = QtWidgets.QPushButton('Enlarge')
+        self.big_b.setCheckable(True)
+        self.big_b.setToolTip('The panel as a large window of its own, so every column and the mechanism show in '
+                              'full; press again to dock it back')
+        self.big_b.toggled.connect(self.enlarge)
+        brow.addWidget(self.big_b)
         brow.addWidget(copy)
         brow.addWidget(self.draw_b)
+        brow.addWidget(self.mech_b)
         lay.addLayout(brow)
         for w in (self.mode, self.level):
             w.currentIndexChanged.connect(lambda _i: self.recompute())
@@ -103,6 +123,7 @@ class FragmentsTab(QtWidgets.QWidget):
         self.head.setText(text)
         self.table.setRowCount(0)
         self.note.clear()
+        self.details.clear()
         self.canvas.show_fragment(None)
 
     def refresh(self, ids, info):
@@ -165,6 +186,8 @@ class FragmentsTab(QtWidgets.QWidget):
             tip = f.how + (('\nAlso: ' + '\n      '.join(f.also)) if f.also else '')
             if f.S is None:
                 tip += '\n(worked out from the formula: no structure to draw)'
+            if f.mech:
+                tip += '\n\n' + f.mech
             how.setToolTip(tip)
             cells = (mz, QtWidgets.QTableWidgetItem(f.ion), QtWidgets.QTableWidgetItem('−' + f.lost), how, like)
             for c, it in enumerate(cells):
@@ -173,6 +196,8 @@ class FragmentsTab(QtWidgets.QWidget):
                 t.setItem(r, c, it)
         t.blockSignals(False)
         t.setSortingEnabled(True)
+        t.resizeRowsToContents()
+        self.details.clear()
         if t.horizontalHeader().sortIndicatorSection() not in range(5) or not hasattr(self, '_sorted'):
             t.sortItems(0, QtCore.Qt.SortOrder.DescendingOrder)
             self._sorted = True
@@ -192,11 +217,78 @@ class FragmentsTab(QtWidgets.QWidget):
         f = self.current()
         if f is None:
             self.canvas.show_fragment(None)
+            self.details.clear()
             return
+        self.details.setHtml(self.describe(f))
         doc = self.canvas.doc
         keep, lost = set(f.atoms) & set(doc.atoms), set(f.lost_atoms) & set(doc.atoms)
         cut = {i for i, b in doc.bonds.items() if (b.a in keep and b.b in lost) or (b.b in keep and b.a in lost)}
         self.canvas.show_fragment((keep, lost, cut) if f.S is not None else (keep, set(), set()))
+
+    def describe(self, f):
+        """The picked fragment as HTML: the ion, then each step from the precursor with its mechanism, the other
+        rules that give the same ion, and the literature."""
+        import html
+        e = html.escape
+        steps = fragments.chain_of(f)
+        out = [f'<p><b>{e(f.ion)}</b> &nbsp; m/z {f.mz:.4f} &nbsp; ({e(f.likelihood)}, {f.score:.2f})<br>'
+               f'from {e(self.pre.label)} {e(self.pre.ion)} m/z {self.pre.mz:.4f}, losing {e(f.lost)}</p><ol>']
+        for k, g in enumerate(steps):
+            name = g.how.split(', then ')[-1] if k else g.how.split(', then ')[0]
+            text = g.mech or 'Worked out from the formula.'
+            out.append(f'<li><b>{e(name)}</b> (−{e(fragments.step_loss(g))} → {e(g.ion)} {g.mz:.4f})<br>'
+                       f'{e(text)}</li>')
+        out.append('</ol>')
+        if f.also:
+            out.append('<p><b>Also from:</b> ' + '; '.join(e(a) for a in f.also) + '</p>')
+        refs = []
+        for g in steps:
+            if g.ref and g.ref not in refs:
+                refs.append(g.ref)
+        if refs:
+            out.append('<p style="color:gray"><b>Literature:</b><br>' + '<br>'.join(e(r) for r in refs) + '</p>')
+        if f.S is None:
+            out.append('<p style="color:gray">Worked out from the formula: no structure or arrows to draw.</p>')
+        return ''.join(out)
+
+    def draw_mechanism(self):
+        f = self.current()
+        if f is None:
+            self.canvas.message.emit('Pick a fragment in the list first.')
+            return
+        doc = self.canvas.doc
+        parent = set(self.pre.atoms) & set(doc.atoms)
+        states, why = fragments.mechanism(doc, f, parent)
+        if len(states) < 2:
+            self.canvas.message.emit(why or 'This fragment has no structure to draw.')
+            return
+        caps = [f'{self.pre.ion}  m/z {self.pre.mz:.4f}'] + [f'{g.ion}  m/z {g.mz:.4f}' for g in fragments.chain_of(f)]
+        self.canvas.draw_mechanism(states, parent, caps)
+        if why:
+            self.canvas.message.emit('Drawn up to the last ion that can be drawn: ' + why)
+
+    def _dock(self):
+        w = self.parent()
+        while w is not None and not isinstance(w, QtWidgets.QDockWidget):
+            w = w.parent()
+        return w
+
+    def enlarge(self, on):
+        """The formula panel as a large floating window (on), or docked again."""
+        dock = self._dock()
+        if dock is None:
+            return
+        dock.setFeatures(dock.features() | QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetFloatable)
+        dock.setFloating(on)
+        if on:
+            scr = dock.screen().availableGeometry()
+            dock.resize(min(1250, int(scr.width() * 0.85)), min(860, int(scr.height() * 0.85)))
+            dock.move(scr.center() - dock.rect().center())
+        self.big_b.blockSignals(True)
+        self.big_b.setChecked(on)
+        self.big_b.blockSignals(False)
+        self.big_b.setText('Dock' if on else 'Enlarge')
+        self.table.resizeRowsToContents()
 
     def draw(self):
         f = self.current()
