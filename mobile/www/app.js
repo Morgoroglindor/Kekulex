@@ -6,6 +6,7 @@ import { Doc, snapAngle } from './core/doc.js';
 import { bounds, DRAWN_SHAPES, paint, toCanvas } from './core/draw.js';
 import { align, arrangeScheme, checkStructure, fixCharges, hotkey } from './core/keys.js';
 import { layoutSmiles, usualForm } from './core/layout.js';
+import { chainOf, LIKELY, MODES, POSSIBLE, predict as predictFragments, stepLoss } from './core/fragments.js';
 
 const $ = id => document.getElementById(id);
 const canvas = $('canvas'), ctx = canvas.getContext('2d');
@@ -19,7 +20,8 @@ let doc = new Doc();
 let undo = [], redo = [];
 let path = 'structure';
 const view = { bl: 42, ox: 0, oy: 0, dpr: 1 };
-const state = { tool: 'bond', bond: 'single', ring: 'benzene', el: 'N', sel: new Set(), press: null, preview: null, hint: null, hover: null };
+const state = { tool: 'bond', bond: 'single', ring: 'benzene', el: 'N', sel: new Set(), press: null, preview: null, hint: null, hover: null,
+  frag: null, fragOpts: { mode: 'ESI+', steps: 2, level: 1 } };
 const MOUSE = window.matchMedia?.('(pointer: fine)').matches;   // a PC: hover, keys and right-click as on the desktop
 let clip = null;                                          // what Ctrl+C copied: {smiles, sed}, pasted as drawn
 const pointers = new Map();
@@ -148,8 +150,10 @@ function schedule() { if (!needsPaint) { needsPaint = true; requestAnimationFram
 const toModel = (x, y) => [(x - view.ox) / view.bl, (y - view.oy) / view.bl];
 const toPx = (x, y) => [x * view.bl + view.ox, y * view.bl + view.oy];
 
-function fit() {
-  const r = canvas.getBoundingClientRect(), b = bounds(doc);
+function fit(above = 0) {
+  // above: pixels covered at the bottom (a half-height sheet): the drawing goes in the space above it
+  const c = canvas.getBoundingClientRect(), b = bounds(doc);
+  const r = { width: c.width, height: Math.max(120, c.height - above) };
   if (!b) { view.bl = 42; view.ox = r.width / 2; view.oy = r.height / 2; schedule(); return; }
   // labels reach past their atoms: 1.1 bond lengths of room on each side, plus a little for the finger
   const w = Math.max(b[2] - b[0], 1) + 2.2, h = Math.max(b[3] - b[1], 1) + 2.2;
@@ -197,6 +201,7 @@ function render() {
       ctx.lineWidth = 0.32 * BL; ctx.beginPath(); ctx.moveTo(p.x * BL, p.y * BL); ctx.lineTo(q.x * BL, q.y * BL); ctx.stroke();
     }
   }
+  if (state.frag) paintFragment(BL);
   paint(ctx, doc, BL, { errors: true });
   const pv = state.preview;
   if (pv) {
@@ -212,6 +217,30 @@ function render() {
     ctx.fillText(MOUSE ? 'Click to start drawing' : 'Tap to start drawing', r.width / 2, r.height / 2 - 12);
     ctx.fillText(MOUSE ? 'Point at an atom and type O, N, Cl …  ·  right-click: more  ·  ? : keys' : 'Two fingers: move and zoom', r.width / 2, r.height / 2 + 12);
     ctx.textAlign = 'left';
+  }
+}
+
+/** The MS fragments sheet's picked ion: atoms kept (green), atoms lost (red), a red bar across each broken bond. */
+function paintFragment(BL) {
+  const { keep, lost } = state.frag;
+  ctx.lineCap = 'round';
+  for (const b of doc.bonds.values()) {
+    const p = doc.atoms.get(b.a), q = doc.atoms.get(b.b);
+    if (!p || !q) continue;
+    const inK = keep.has(b.a) && keep.has(b.b), inL = lost.has(b.a) && lost.has(b.b);
+    if (inK || inL) {
+      ctx.strokeStyle = inK ? '#2e9d4f55' : '#e0463a4d'; ctx.lineWidth = 0.32 * BL;
+      ctx.beginPath(); ctx.moveTo(p.x * BL, p.y * BL); ctx.lineTo(q.x * BL, q.y * BL); ctx.stroke();
+    } else if ((keep.has(b.a) && lost.has(b.b)) || (keep.has(b.b) && lost.has(b.a))) {
+      const mx = (p.x + q.x) / 2 * BL, my = (p.y + q.y) / 2 * BL, dx = q.x - p.x, dy = q.y - p.y, n = Math.hypot(dx, dy) || 1;
+      const ux = -dy / n * 0.32 * BL, uy = dx / n * 0.32 * BL;
+      ctx.strokeStyle = '#d32f2f'; ctx.lineWidth = 0.09 * BL;
+      ctx.beginPath(); ctx.moveTo(mx - ux, my - uy); ctx.lineTo(mx + ux, my + uy); ctx.stroke();
+    }
+  }
+  for (const [set, color] of [[keep, '#2e9d4f55'], [lost, '#e0463a4d']]) {
+    ctx.fillStyle = color;
+    for (const a of set) { const at = doc.atoms.get(a); if (at) { ctx.beginPath(); ctx.arc(at.x * BL, at.y * BL, 0.22 * BL, 0, 7); ctx.fill(); } }
   }
 }
 
@@ -631,15 +660,17 @@ function cleanUp() {
 }
 
 // ---------------------------------------------------------------------------------------------- sheets
-function openSheet(html, onClose = null) {
+function openSheet(html, onClose = null, half = false) {
   const s = $('sheet');
   s.innerHTML = html; s.hidden = false; s.scrollTop = 0; $('scrim').hidden = false;
+  s.classList.toggle('half', half); $('scrim').classList.toggle('clear', half);   // the drawing stays in view
   sheetOnClose = onClose;
   return s;
 }
 function closeSheet() {
   if ($('sheet').hidden) return false;
   $('sheet').hidden = true; $('scrim').hidden = true;
+  $('sheet').classList.remove('half'); $('scrim').classList.remove('clear');
   const f = sheetOnClose; sheetOnClose = null;
   if (f) f();
   return true;
@@ -717,9 +748,56 @@ function showInfo() {
     <h3>SMILES</h3><div class="mono copy" data-copy="${esc(info.smiles)}">${esc(info.smiles || '—')}</div>
     <h3>InChIKey</h3><div class="mono copy" data-copy="${esc(info.inchikey)}">${esc(info.inchikey || '—')}</div>
     <div class="hint">Tap a value to copy it.</div>
-    <div class="actions"><button class="btn primary" id="infoClose">Close</button></div>`);
+    <div class="actions"><button class="btn" id="infoFrags">MS fragments</button><button class="btn primary" id="infoClose">Close</button></div>`);
   s.querySelector('#infoClose').onclick = closeSheet;
+  s.querySelector('#infoFrags').onclick = () => { closeSheet(); fragmentsSheet(); };
   s.querySelectorAll('[data-copy]').forEach(el => { el.onclick = () => copy(el.dataset.copy, 'Copied'); });
+}
+
+const DOTS = { likely: '●●●', possible: '●●○', minor: '●○○' };
+const LEVELS = [['Likely', LIKELY], ['Likely and possible', POSSIBLE], ['All', 0]];
+
+/** MS fragments of the structure (the selection, if any): the desktop's Fragments tab, as a sheet. */
+function fragmentsSheet() {
+  if (!doc.atoms.size) { toast('Draw a structure first'); return; }
+  const ids = selectedAtoms();
+  const info = analyse(RD, doc, ids.size ? ids : null);
+  if (info.fragments > 1) { toast('Select one structure: fragments are worked out for one molecule'); return; }
+  if (info.errors.length) { toast(info.errors[0]); return; }
+  const o = state.fragOpts;
+  const { pre, frags } = predictFragments(RD, doc, ids.size ? ids : null, o.mode, o.steps);
+  if (!pre) { toast('This structure could not be read'); return; }
+  const shown = frags.filter(f => f.score >= LEVELS[o.level][1]);
+  const sel = (id, list, now) => `<select id="${id}" class="field small">${list.map(([v, t]) => `<option value="${esc(v)}"${String(v) === String(now) ? ' selected' : ''}>${esc(t)}</option>`).join('')}</select>`;
+  const s = openSheet(`<h2>MS fragments</h2>
+    <div class="opts">${sel('fMode', pre.drawnIon ? [[o.mode, 'as drawn']] : MODES, o.mode)}${sel('fSteps', [[1, '1 step'], [2, '2 steps'], [3, '3 steps']], o.steps)}${sel('fLevel', LEVELS.map(([t], k) => [k, t]), o.level)}</div>
+    <div class="hint">${pre.drawnIon ? 'The ion as drawn' : 'Precursor ' + esc(pre.label)} ${esc(pre.ion)} m/z ${pre.mz.toFixed(4)} · ${shown.length} of ${frags.length} fragments</div>
+    <div id="fragList">${shown.map((f, k) => `<button class="frag ${f.likelihood}" data-k="${k}"><span class="mz">${f.mz.toFixed(4)}</span><span class="ion">${esc(f.ion)}</span><span class="dots">${DOTS[f.likelihood]}</span><small>−${esc(f.lost)} · ${esc(f.how)}</small></button><div class="fragMore" id="fm${k}" hidden></div>`).join('') ||
+      '<p>No fragment at this likelihood: choose "All".</p>'}</div>
+    <div class="hint">Tap a fragment: how it forms, and where it is on the drawing (green kept, red lost). Drawing the mechanism with curved arrows is on the desktop.</div>
+    <div class="actions"><button class="btn" id="fCopy">Copy list</button><button class="btn primary" id="fClose">Close</button></div>`,
+  () => { state.frag = null; fit(); }, true);
+  fit(s.getBoundingClientRect().height);
+  const reopen = () => { state.frag = null; fragmentsSheet(); };
+  s.querySelector('#fMode').onchange = e => { o.mode = e.target.value; reopen(); };
+  s.querySelector('#fSteps').onchange = e => { o.steps = Number(e.target.value); reopen(); };
+  s.querySelector('#fLevel').onchange = e => { o.level = Number(e.target.value); reopen(); };
+  s.querySelector('#fClose').onclick = closeSheet;
+  s.querySelector('#fCopy').onclick = () => copy(['m/z\tIon\tLost\tHow\tLikelihood', ...shown.map(f => `${f.mz.toFixed(4)}\t${f.ion}\t−${f.lost}\t${f.how}\t${f.likelihood}`)].join('\n'), 'List copied');
+  s.querySelectorAll('[data-k]').forEach(b => { b.onclick = () => {
+    const k = Number(b.dataset.k), f = shown[k], more = s.querySelector(`#fm${k}`);
+    const open = more.hidden;
+    s.querySelectorAll('.fragMore').forEach(m => { m.hidden = true; });
+    s.querySelectorAll('.frag').forEach(x => x.classList.remove('on'));
+    if (!open) { state.frag = null; schedule(); return; }
+    b.classList.add('on');
+    const steps = chainOf(f).map(g => `<li><b>${esc(g.how.split(', then ').pop())}</b> (−${esc(stepLoss(g))} → ${esc(g.ion)} ${g.mz.toFixed(4)})<br>${esc(g.mech || 'Worked out from the formula.')}</li>`).join('');
+    const refs = [...new Set(chainOf(f).map(g => g.ref).filter(Boolean))];
+    more.innerHTML = `<ol>${steps}</ol>${f.also.length ? `<p><b>Also from:</b> ${f.also.map(esc).join('; ')}</p>` : ''}${refs.length ? `<p class="refs">${refs.map(esc).join('<br>')}</p>` : ''}`;
+    more.hidden = false;
+    state.frag = { keep: new Set([...f.atoms].filter(a => doc.atoms.has(a))), lost: new Set([...f.lostAtoms].filter(a => doc.atoms.has(a))) };
+    schedule();
+  }; });
 }
 
 async function copy(text, done) {
@@ -731,6 +809,7 @@ async function copy(text, done) {
 function showMenu() {
   const items = [['name', 'Structure from a name', 'Looked up online at PubChem: only the name is sent'], ['smiles', 'Paste SMILES or MOL', ''], ['templates', 'Templates', 'Amino acids, sugars, rings, reagents …'],
     ['clean', 'Clean up everything', 'Usual orientation, even bonds'], ['fit', 'Fit to screen', ''],
+    ['frags', 'MS fragments', 'EI, ESI+, ESI−, Na+ / NH4+ adducts: what the structure breaks into, and how'],
     ['check', 'Check structure', 'Valence, labels, charges'], ['charges', 'Add missing charges', 'N with four bonds: N+, O with one bond: O−'],
     ['rotate', 'Rotate…', 'The selection, or everything'], ['scale', 'Scale…', ''], ['align', 'Align…', 'Two or more selected structures, arrows, captions'],
     ['arrange', 'Arrange as reaction scheme', 'Structures and arrows in one row, evenly spaced'],
@@ -746,6 +825,7 @@ function menuAction(k) {
   if (k === 'name') nameDialog();
   else if (k === 'smiles') ask('Paste a structure', { placeholder: 'SMILES or MOL text', ok: 'Add' }, addText);
   else if (k === 'templates') templatesSheet();
+  else if (k === 'frags') fragmentsSheet();
   else if (k === 'clean') { if (doc.atoms.size) { cleanUp(); edited(); fit(); } }
   else if (k === 'fit') fit();
   else if (k === 'check') showProblems();

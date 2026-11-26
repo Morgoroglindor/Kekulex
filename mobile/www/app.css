@@ -68,3 +68,19 @@ input { -webkit-user-select: text; user-select: text; }
 #ctxMenu button:disabled { opacity: .4; }
 #ctxMenu hr { border: 0; border-top: 1px solid var(--line); margin: 3px 2px; }
 #sheet .item.on { outline: 2px solid var(--accent); }
+
+/* the MS fragments sheet: half height over a clear backdrop, the drawing above it */
+#sheet.half { max-height: 55%; }
+#scrim.clear { background: transparent; }
+.opts { display: flex; gap: 6px; flex-wrap: wrap; }
+.field.small { width: auto; flex: 1 1 30%; font-size: 14px; padding: 8px; }
+.frag { display: grid; grid-template-columns: auto 1fr auto; column-gap: 10px; width: 100%; text-align: left; padding: 9px 6px; border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; }
+.frag .mz { font-weight: 600; }
+.frag .dots { color: var(--accent); letter-spacing: -1px; }
+.frag small { grid-column: 1 / -1; color: var(--muted); font-size: 12.5px; }
+.frag.minor { opacity: .6; }
+.frag.on { background: var(--line); }
+.fragMore { font-size: 13.5px; padding: 4px 6px 10px; border-bottom: 1px solid var(--line); }
+.fragMore ol { padding-left: 18px; margin: 4px 0; }
+.fragMore li { margin-bottom: 6px; }
+.fragMore .refs { color: var(--muted); font-size: 12px; }

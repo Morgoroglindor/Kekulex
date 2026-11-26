@@ -304,3 +304,25 @@ test('align and arrange as a reaction scheme', async () => {
   for (let k = 1; k < objs.length; k++) assert.ok(objs[k].box[0] > objs[k - 1].box[2]);   // one row, in order, apart
   assert.ok(Math.abs(d.arrows.values().next().value.x2 - d.arrows.values().next().value.x1) >= 3);
 });
+
+// ------------------------------------------------------------------------------------------- MS fragments
+import { predict as predictFragments } from '../www/core/fragments.js';
+
+for (const row of REF.fragments) {
+  test(`MS fragments as on the desktop: ${row.smiles.slice(0, 28)} ${row.mode}`, () => {
+    const d = Doc.fromDict(row.sed);
+    const { pre, frags } = predictFragments(RD, d, null, row.mode, 2);
+    assert.ok(pre, 'a precursor');
+    assert.equal(pre.ion, row.pre[0]);
+    assert.equal(pre.label, row.pre[2]);
+    assert.ok(Math.abs(pre.mz - row.pre[1]) < 1e-6);
+    const got = frags.map(f => [f.ion, f.lost, f.how, f.step]);
+    assert.deepEqual(got, row.frags.map(f => [f[1], f[2], f[3], f[5]]));
+    frags.forEach((f, k) => {
+      assert.ok(Math.abs(f.mz - row.frags[k][0]) < 1e-6, `${f.ion} m/z`);
+      assert.ok(Math.abs(f.score - row.frags[k][4]) < 1e-9, `${f.ion} ${f.how} score ${f.score} ${row.frags[k][4]}`);
+      assert.deepEqual([...f.atoms].sort((p, q) => p - q), row.frags[k][6]);
+      assert.ok(f.mech, `${f.how}: a mechanism`);
+    });
+  });
+}

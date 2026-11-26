@@ -26,7 +26,8 @@ from rdkit import Chem
 
 import chem
 
-MODES = (('ESI+', 'ESI+  [M+H]+'), ('ESI-', 'ESI−  [M−H]−'), ('EI', 'EI  M•+'))
+MODES = (('ESI+', 'ESI+  [M+H]+'), ('ESI+Na', 'ESI+  [M+Na]+'), ('ESI+NH4', 'ESI+  [M+NH4]+'),
+         ('ESI-', 'ESI−  [M−H]−'), ('EI', 'EI  M•+'))
 
 REFS = {
     'ei': 'McLafferty FW, Tureček F. Interpretation of Mass Spectra, 4th ed. University Science Books, 1993.',
@@ -45,7 +46,31 @@ REFS = {
     'lipid': 'Hsu FF, Turk J. J. Am. Soc. Mass Spectrom. 2003, 14, 352-363 (phosphocholine m/z 184; PE loss of 141).',
     'tms': 'Harvey DJ, Vouros P. Mass Spectrom. Rev. 2020, 39, 105-211 (TMS derivatives: m/z 73, 147, M−15).',
     'chlorogenic': 'Clifford MN et al. J. Agric. Food Chem. 2003, 51, 2900-2911 (quinate m/z 191, caffeate 179).',
+    'sodium': 'Cancilla MT et al. J. Am. Soc. Mass Spectrom. 1999, 10, 1145 (sodiated glycans: cross-ring cleavage); '
+              'Hsu FF, Turk J. J. Am. Soc. Mass Spectrom. 2003, 14, 352 ([M+Na−59]+ of PC); Demarque et al. 2016.',
 }
+
+# [M+Na]+: neutral losses (name, SMARTS that must match, formula, likelihood, text)
+SODIUM_LOSSES = (
+    ('CO2', '[#6][CX3](=O)[OX2H1]', {'C': 1, 'O': 2}, 0.6,
+     'The sodium carboxylate-like complex loses CO2 (decarboxylation stays possible with Na+ bound).'),
+    ('H2O', '[CX4][OX2H1]', {'H': 2, 'O': 1}, 0.25,
+     'Water loss is weak from sodium adducts: Na+ does not protonate the OH, so there is no good leaving group.'),
+    ('C2H4O2', '[CX4;R1]1[OX2;R1][CX4;R1][CX4;R1][CX4;R1][CX4;R1]1', {'C': 2, 'H': 4, 'O': 2}, 0.45,
+     'Cross-ring cleavage of the sugar (0,4A / 2,4A, −60): sodium holds the ring oxygens, so the ring breaks '
+     'across instead of at the glycosidic bond.'),
+    ('C3H6O3', '[CX4;R1]1[OX2;R1][CX4;R1][CX4;R1][CX4;R1][CX4;R1]1', {'C': 3, 'H': 6, 'O': 3}, 0.4,
+     'Cross-ring cleavage of the sugar (0,3X, −90), typical of sodiated glycosides.'),
+    ('C4H8O4', '[CX4;R1]1[OX2;R1][CX4;R1][CX4;R1][CX4;R1][CX4;R1]1', {'C': 4, 'H': 8, 'O': 4}, 0.4,
+     'Cross-ring cleavage of the sugar (0,2X, −120), typical of sodiated glycosides.'),
+    ('C3H9N', 'C[N+](C)(C)CCOP(=O)([O-,OX2H1])O', {'C': 3, 'H': 9, 'N': 1}, 0.9,
+     'Sodiated phosphatidylcholines lose trimethylamine (−59) first, then the cyclophosphane (−183 total).'),
+    ('C5H14NO4P', 'C[N+](C)(C)CCOP(=O)([O-,OX2H1])O', {'C': 5, 'H': 14, 'N': 1, 'O': 4, 'P': 1}, 0.5,
+     'The phosphocholine head group leaves (−183) and the sodiated diacylglycerol ion remains.'),
+    ('C5H13NNaO4P', 'C[N+](C)(C)CCOP(=O)([O-,OX2H1])O', {'C': 5, 'H': 13, 'N': 1, 'Na': 1, 'O': 4, 'P': 1}, 0.6,
+     'Sodium cholinephosphate leaves (−205): the diacylglycerol keeps the charge as a carbocation / dioxolanylium.'),
+)
+
 
 LOSS_TEXT = {
     'alcohol': ('Protonation of the OH makes water a good leaving group: the C–O bond pair goes to O and H2O '
@@ -353,7 +378,7 @@ class _Mol:
 
     def counts(self, S, h):
         out = {}
-        for i in S:
+        for i in sorted(S):
             out[self.key[i]] = out.get(self.key[i], 0) + 1
         if h:
             out['H'] = out.get('H', 0) + h
@@ -485,7 +510,7 @@ class _Engine:
         alcohol (None when there is none)."""
         m = self.m
         best = None
-        for o in S:
+        for o in sorted(S):
             if o in avoid or m.el[o] != 'O' or not m.hs[o] or len(m.heavy(o)) != 1:
                 continue
             c = m.heavy(o)[0]
@@ -499,7 +524,7 @@ class _Engine:
         N, a C=O oxygen, another O (None when there is none)."""
         m = self.m
         best = None
-        for i in S:
+        for i in sorted(S):
             if i in avoid or m.q[i] or m.el[i] not in ('N', 'O'):
                 continue
             hv = m.heavy(i)
@@ -835,7 +860,8 @@ class _Engine:
                                   ('half', ('bond', (xa, cb)), ('bond', (cb, g))),
                                   ('half', ('bond', (xa, cb)), ('bond', (c1, xa)))]
                         Y = m.el[y]
-                        self.add(self.make(S, {y: (1, 1, 0)}, True, 'McLafferty rearrangement', s, mech=(
+                        enol = {y: (1, 0, 1), xa: (0, 1, -1)} if Y != 'C' else {y: (1, 1, 0)}   # H on Y: the enol
+                        self.add(self.make(S, enol, True, 'McLafferty rearrangement', s, mech=(
                             f'Ionisation at {Y} ({Y}•+). Through a six-membered ring the unpaired electron on {Y} '
                             'takes a γ-hydrogen; the Cα–Cβ bond then breaks: one of its electrons pairs with the '
                             'one left on Cγ (the neutral alkene Cβ=Cγ leaves), the other makes the C=C of the enol '
@@ -1274,7 +1300,7 @@ class _Engine:
             if g is not None:
                 out.append(g)
         if f.z > 0 and not f.odd:                           # an onium ion loses an alkene, its H moving to N / O
-            for y in S0:
+            for y in sorted(S0):
                 if m.el[y] not in ('N', 'O') or m.aro[y]:
                     continue
                 for c in m.heavy(y):
@@ -1331,10 +1357,16 @@ class _Engine:
 
 def predict(doc, atom_ids=None, mode='ESI+', steps=2):
     """(precursor Fragment, [Fragment] highest m/z first) of the structure(s) with these atoms; (None, []) when
-    the structure cannot be read. A structure drawn with a charge is used as it is (mode is ignored)."""
+    the structure cannot be read. A structure drawn with a charge is used as it is (mode is ignored).
+    'ESI+NH4': [M+NH4]+ first loses NH3 to [M+H]+, which fragments as in ESI+. 'ESI+Na': [M+Na]+ keeps its sodium -
+    the [M+H]+ pieces that keep the heteroatom side ([Y+Na]+, [acid+Na]+ ...), and the losses sodium adducts are
+    known for (CO2, cross-ring cleavage of sugars, trimethylamine from choline lipids); these are worked out from
+    the formula, as Na+ sits on no atom."""
     m = _Mol(doc, atom_ids)
     if m.mol is None or not m.n:
         return None, []
+    if mode in ('ESI+NH4', 'ESI+Na') and not sum(m.q):
+        return _adduct(m, mode, steps)
     e = _Engine(m, mode)
     if e.pre.get('H', 0) < 0:
         return None, []
@@ -1347,6 +1379,82 @@ def predict(doc, atom_ids=None, mode='ESI+', steps=2):
     for f in frags:
         f.lost_atoms = frozenset(everything - f.atoms) if f.S is not None else frozenset()
     return pre, frags
+
+
+def _adduct(m, mode, steps):
+    """predict() for [M+NH4]+ and [M+Na]+, from the [M+H]+ fragments."""
+    e = _Engine(m, 'ESI+')
+    frags = e.run(steps)
+    atoms = frozenset(m.owner[m.order[i]] for i in range(m.n))
+    plus = {'N': 1, 'H': 4} if mode == 'ESI+NH4' else {'Na': 1}
+    counts = dict(e.M)
+    for k, v in plus.items():
+        counts[k] = counts.get(k, 0) + v
+    label = '[M+NH4]+' if mode == 'ESI+NH4' else '[M+Na]+'
+    pre = Fragment(e.mz(counts, 1), 1, False, counts, ion_text(counts, 1, False), '', f'precursor ion {label}', 1.0,
+                   atoms=atoms, step=0)
+    pre.label, pre.drawn_ion = label, False
+    out = []
+    if mode == 'ESI+NH4':
+        base = e.base_site(frozenset(range(m.n)))
+        mh = Fragment(e.mz(e.pre, 1), 1, False, dict(e.pre), ion_text(e.pre, 1, False), 'NH3',
+                      'loss of NH3 from the ammonium adduct ([M+H]+)', 0.9, atoms=atoms, step=1)
+        if base is not None:
+            mh.S = frozenset(m.order[i] for i in range(m.n))
+            mh.marks = {m.order[base]: (1, 0, 1)}
+        mh.mech = ('The ammonium ion is held by hydrogen bonds; on collision it hands its proton to the molecule and '
+                   'ammonia leaves: [M+H]+, which then breaks up as a protonated molecule.')
+        mh.ref = REFS['esi']
+        out.append(mh)
+        for f in frags:
+            f.lost = 'NH3 + ' + f.lost
+            f.step += 1
+            f.score *= 0.9
+            if f.parent is None:
+                f.parent = mh
+            out.append(f)
+    else:
+        for f in frags:                                     # pieces that keep the protonated heteroatom side
+            if f.step != 1 or not f.marks or f.odd:
+                continue
+            if not any(v[0] > 0 and v[2] > 0 for v in f.marks.values()):
+                continue
+            c = dict(f.counts)
+            c['H'] = c.get('H', 0) - 1
+            c['Na'] = c.get('Na', 0) + 1
+            c = _clean(c)
+            lost = _clean(_sub(counts, c))
+            if any(v < 0 for v in lost.values()) or not lost:
+                continue
+            g = Fragment(e.mz(c, 1), 1, False, c, ion_text(c, 1, False), chem.formula_text(lost),
+                         f.how.replace('[acid+H]+', '[acid+Na]+').replace('Y ion', 'Y ion, sodiated') + ' (Na+)',
+                         f.score * 0.8, atoms=f.atoms, step=1)
+            g.mech = ('With Na+ in place of the proton the same bond breaks, the sodium staying on the oxygen-rich '
+                      'piece (charge-remote cleavage of the sodium adduct). As for [M+H]+: ' + f.mech)
+            g.ref = REFS['sodium']
+            out.append(g)
+        everything = {m.owner[m.order[i]] for i in range(m.n)}
+        for name, smarts, lost, score, text in SODIUM_LOSSES:
+            patt = Chem.MolFromSmarts(smarts)
+            if patt is None or not m.mol.HasSubstructMatch(patt):
+                continue
+            c = _sub(counts, lost)
+            if any(v < 0 for v in c.values()):
+                continue
+            c = _clean(c)
+            g = Fragment(e.mz(c, 1), 1, False, c, ion_text(c, 1, False), name, f'loss of {name} (sodium adduct)',
+                         score, atoms=frozenset(everything), step=1)
+            g.mech, g.ref = text, REFS['sodium']
+            out.append(g)
+    best = {}
+    for f in out:
+        key = (f.formula, f.odd)
+        if key not in best or f.score > best[key].score:
+            best[key] = f
+    out = sorted(best.values(), key=lambda f: -f.mz)
+    for f in out:
+        f.lost_atoms = frozenset(atoms - f.atoms) if f.S is not None else frozenset()
+    return pre, out
 
 
 # ------------------------------------------------------------------------------------------- drawing a fragment
@@ -1619,10 +1727,33 @@ def _carbanion_to_acid(d):
 
 
 def _radical_pairs(d):
-    """An unpaired electron next to a charged carbon: one more bond between them, •+ (or •−) written beside it."""
+    """An unpaired electron next to a charged carbon: one more bond between them, •+ (or •−) written beside it;
+    two or three atoms apart across a double bond (a–b=c+ , a–b=c–n+), the double bond moves."""
     for a, at in d.atoms.items():
         if at.label or not at.radical:
             continue
+        for b1, bb1 in d.neighbors(a):                      # 1,3: a•–b=c+ becomes a=b–c, •+ beside (enol ions)
+            if d.bonds[bb1].order != 1:
+                continue
+            for c1, bb2 in d.neighbors(b1):
+                cc = d.atoms[c1]
+                if c1 == a or d.bonds[bb2].order != 2 or cc.label or not cc.charge or cc.radical:
+                    continue
+                hs = {k: _h(d, k) for k in (a, b1, c1)}
+                q = cc.charge
+                d.bonds[bb1].order, d.bonds[bb2].order = 2, 1
+                at.radical, cc.charge = 0, 0
+                for k, h in hs.items():
+                    _set_h(d, k, h)
+                if _valid(d):
+                    xs = [d.atoms[k].x for k in (a, b1, c1)]
+                    ys = [d.atoms[k].y for k in (a, b1, c1)]
+                    d.add_text(max(xs) + 0.3, min(ys) - 0.9, '•' + ('+' if q > 0 else '−'), size=0)
+                    return True
+                d.bonds[bb1].order, d.bonds[bb2].order = 1, 2
+                at.radical, cc.charge = 1, q
+                for k, h in hs.items():
+                    _set_h(d, k, h)
         for n, b in d.neighbors(a):
             na = d.atoms[n]
             if na.label or not na.charge or na.radical or d.bonds[b].order >= 3 or na.el not in ('C', 'N', 'O'):
@@ -1721,7 +1852,8 @@ def mechanism(doc, frag, atoms):
     first.style = dict(doc.style)
     first.insert_dict(doc.to_dict([('atom', a) for a in atoms if a in doc.atoms]), keep_ids=True)
     _mark(first, chain[0].pre)
-    _arrows(first, chain[0].arrows)
+    made = _six_ring(first, chain[0]) if chain[0].how.startswith('McLafferty') else {}
+    _arrows(first, chain[0].arrows, made)
     states = [(first, step_loss(chain[0]))]
     for k, f in enumerate(chain):
         piece, why = draw_doc(doc, f)
@@ -1778,10 +1910,70 @@ def _h_atom(d, a, made):
     return h
 
 
-def _arrows(d, arrows):
+def _six_ring(d, f):
+    """A McLafferty precursor redrawn as its six-membered transition state: Y=C1–Cα–Cβ–Cγ–H as a hexagon on the
+    side where the chain already was (the rest of the molecule moving with the atoms it hangs on), the γ-H drawn at
+    the sixth corner. Returns {Cγ: the H atom} for the arrows."""
+    import math
+    try:
+        y = f.arrows[0][1][1]
+        g = f.arrows[0][2][1]
+        cb = next(v for v in f.arrows[1][2][1] if v != g)
+        xa = next(v for v in f.arrows[2][1][1] if v != cb)
+        c1 = next(v for v in f.arrows[3][2][1] if v != xa)
+    except (IndexError, StopIteration, TypeError):
+        return {}
+    ring = [c1, xa, cb, g]
+    if any(a not in d.atoms or d.atoms[a].label for a in ring + [y]):
+        return {}
+    Y, C = d.atoms[y], d.atoms[c1]
+    ex, ey = Y.x - C.x, Y.y - C.y
+    L = math.hypot(ex, ey) or 1.0
+    nx, ny = -ey / L, ex / L
+    A = d.atoms[xa]
+    if (A.x - C.x) * nx + (A.y - C.y) * ny < 0:             # the side the chain is on
+        nx, ny = -nx, -ny
+    cx, cy = (C.x + Y.x) / 2 + nx * L * math.sqrt(3) / 2, (C.y + Y.y) / 2 + ny * L * math.sqrt(3) / 2
+    vx, vy = C.x - cx, C.y - cy
+
+    def rot(k, sgn):
+        t = math.radians(60 * k * sgn)
+        return cx + vx * math.cos(t) - vy * math.sin(t), cy + vx * math.sin(t) + vy * math.cos(t)
+    sgn = 1 if math.hypot(rot(-1, 1)[0] - Y.x, rot(-1, 1)[1] - Y.y) < 1e-3 else -1
+    places = [rot(k, sgn) for k in range(6)]               # C1, Cα, Cβ, Cγ, H, Y
+    fixed = {y, c1}
+    moved = {}
+    for a, (px, py) in zip(ring[1:], places[1:4]):
+        moved[a] = (px - d.atoms[a].x, py - d.atoms[a].y)
+    owner = {}
+    for a in ring[1:]:                                      # what hangs on each moved atom goes with it
+        todo = [a]
+        while todo:
+            x = todo.pop()
+            for n, _b in d.neighbors(x):
+                if n in fixed or n in ring or n in owner:
+                    continue
+                owner[n] = a
+                todo.append(n)
+    for a, (dx, dy) in moved.items():
+        d.atoms[a].x += dx
+        d.atoms[a].y += dy
+    for n, a in owner.items():
+        dx, dy = moved[a]
+        d.atoms[n].x += dx
+        d.atoms[n].y += dy
+    at = d.atoms[g]
+    h = d.add_atom(places[4][0], places[4][1], 'H')
+    if at.hcount:
+        at.hcount -= 1
+    d.add_bond(g, h)
+    return {g: h}
+
+
+def _arrows(d, arrows, made=None):
     """Curved arrows (full or fish-hook) tied to the atoms and bonds of d; ends that are not in d are skipped."""
     import model
-    made = {}
+    made = dict(made or {})
 
     def item(e):
         kind, v = e

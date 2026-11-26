@@ -33,6 +33,11 @@ data['KEYS'] = dict(ATOM=canvas.ATOM_KEYS, SPROUT={k: list(v) for k, v in canvas
 data['STYLE_SHEETS'] = {name: {k: v for k, v in s.items() if isinstance(v, (int, float, str, bool))}
                         for name, s in render.STYLE_SHEETS.items()}
 data['DEFAULT_STYLE'] = {k: v for k, v in render.DEFAULT_STYLE.items() if isinstance(v, (int, float, str, bool))}
+import fragments  # noqa: E402  (the MS fragmentation rules: the phone's fragments.js runs the same tables)
+data['FRAG'] = dict(MODES=fragments.MODES, LIKELY=fragments.LIKELY, POSSIBLE=fragments.POSSIBLE, REFS=fragments.REFS,
+                    LOSS_TEXT=fragments.LOSS_TEXT, FORMULA_TEXT=fragments.FORMULA_TEXT,
+                    GROUP_LOSSES=fragments.GROUP_LOSSES, FORMULA_LOSSES=fragments.FORMULA_LOSSES,
+                    DIAGNOSTIC=fragments.DIAGNOSTIC, SODIUM_LOSSES=fragments.SODIUM_LOSSES)
 with open(os.path.join(MOBILE, 'www', 'core', 'data.js'), 'w', encoding='utf-8') as f:
     f.write('// Made by tools/export_data.py from the desktop program: do not edit.\n')
     for k, v in data.items():
@@ -78,7 +83,23 @@ for s, tweak in (('[CH3]', None), ('[CH2]', None), ('C[CH2]', None), ('CC(C)=O',
         d.atoms[o].charge, d.atoms[o].radical = 1, 1
     info = chem.analyse(d)
     radical_rows.append(dict(sed=d.to_dict(), formula=info.formula, ions=[[i.label, i.mz] for i in info.ions[:3]]))
+FRAG_SMILES = ['CCCCC(C)=O', 'CCCc1ccccc1', 'CCN(CC)CC', 'C1CC=CCC1', 'O=c1cc(-c2ccc(O)cc2)oc2cc(O)cc(O)c12',
+               'O=C(/C=C/c1ccc(O)c(O)c1)OC1CC(O)(C(=O)O)CC(O)C1O', 'CC(N)C(=O)NC(Cc1ccccc1)C(=O)O', 'CCOC(C)=O',
+               'CC1OC(Oc2c(-c3ccc(O)c(O)c3)oc3cc(O)cc(O)c3c2=O)C(O)C(O)C1O', 'C[Si](C)(C)OCCCC', 'COC(=O)c1ccccc1O',
+               'CC(=O)Oc1ccccc1C(=O)O', 'CCCCBr', 'O=[N+]([O-])c1ccccc1', 'C[N+](C)(C)CCO',
+               'CCCCCCCCCCCCCCCC(=O)OCC(COP(=O)([O-])OCC[N+](C)(C)C)OC(C)=O']
+frag_rows = []
+for s in FRAG_SMILES:
+    d = Doc()
+    d.insert_rdkit(Chem.MolFromSmiles(s))
+    for mode in ('EI', 'ESI+', 'ESI-', 'ESI+Na', 'ESI+NH4'):
+        pre, frs = fragments.predict(d, None, mode, 2)
+        if pre is None:
+            continue
+        frag_rows.append(dict(smiles=s, mode=mode, sed=d.to_dict(), pre=[pre.ion, pre.mz, pre.label],
+                              frags=[[f.mz, f.ion, f.lost, f.how, f.score, f.step, sorted(f.atoms)] for f in frs]))
 with open(os.path.join(MOBILE, 'tests', 'reference.json'), 'w', encoding='utf-8') as f:
     json.dump(dict(rows=rows, usual=usual, condensed=condensed_rows, labels=labels, radicals=radical_rows,
+                   fragments=frag_rows,
                    parse=[[t, list(model.parse_label(t) or [])] for t in ('N', 'OH', 'NH2', 'Na+', 'O-', 'OMe', 'Boc', 'cl', 'Xx', 'ome')]), f)
 print(len(rows), 'reference molecules')

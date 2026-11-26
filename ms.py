@@ -237,7 +237,7 @@ def candidate_ions(doc, units, positive=True, cleave=True, rules=True):
             add(name, '[M]•+', info.counts, info.exact - chem.ELECTRON, ids)
         if rules and info.fragments == 1 and not info.errors:
             import fragments
-            for mode in (('ESI+', 'EI') if positive else ('ESI-',)):
+            for mode in (('ESI+', 'ESI+Na', 'ESI+NH4', 'EI') if positive else ('ESI-',)):
                 _pre, frs = fragments.predict(doc, set(ids), mode, 3)
                 if _pre is None or (_pre.z > 0) != positive:
                     continue
@@ -304,4 +304,193 @@ def all_matches(peaks, candidates, tol, unit='ppm'):
                 hits.append((c, e))
         hits.sort(key=lambda h: abs(h[1]))
         out[mz] = hits
+    return out
+
+
+
+# ------------------------------------------------------------------------------------------- isotopes
+def parse_formula(text):
+    """{element: n} of a plain formula such as C7H11O6 (isotope labels and charges ignored)."""
+    import re
+    out = {}
+    for el, n in re.findall(r'([A-Z][a-z]?)(\d*)', text or ''):
+        out[el] = out.get(el, 0) + (int(n) if n else 1)
+    return out
+
+
+def ion_charge(label):
+    """The charge of an ion label: '[M+2H]2+' → 2, 'C7H11O6−' → -1, '[M]•+' → 1 (0 when it shows none)."""
+    import re
+    text = (label or '').replace('•', '')
+    m = re.search(r'\](\d*)([+−-])$', text)                 # [M+2H]2+: the count after the bracket
+    if m:
+        n = int(m.group(1)) if m.group(1) else 1
+    else:
+        m = re.search(r'([+−-])$', text)                    # C7H11O6−: a formula's digits are not the charge
+        if not m:
+            return 0
+        n = 1
+    return n if m.group(m.lastindex) == '+' else -n
+
+
+def isotopes(rows, tol, unit='ppm'):
+    """Peaks left unmatched that are the M+1, M+2 ... isotope peaks of a matched ion (their m/z within tol of the
+    calculated isotope peak, their height within a factor of 3 of the expected share) become matched as
+    ('isotope of <ion> (<where>)', '<ion> M+k', formula, m/z calc., atom ids). Returns (rows, {monoisotopic m/z:
+    'M+1 9.8 % (calc. 10.2), M+2 ...'}) - how well each matched ion's measured isotope peaks fit its formula."""
+    out = list(rows)
+    index = {r[0]: k for k, r in enumerate(out)}
+    fits = {}
+    for mz, y, match, _err in rows:
+        if not match or match[0].startswith('isotope of'):
+            continue
+        counts = parse_formula(match[2])
+        z = abs(ion_charge(match[1])) or 1
+        if not counts:
+            continue
+        pattern = chem.isotope_pattern(counts, z, min_percent=0.5)
+        if len(pattern) < 2:
+            continue
+        _mono_mz, mono_pct = pattern[0]
+        bits = []
+        for k, (iso_mz, pct) in enumerate(pattern[1:], 1):
+            want = pct / mono_pct
+            if want < 0.005:
+                continue
+            best = None
+            for pm, py, pmatch, _e in out:
+                if pm == mz:
+                    continue
+                e = ppm(pm, iso_mz) if unit == 'ppm' else pm - iso_mz
+                if abs(e) <= max(tol, 3.0) if unit == 'ppm' else abs(e) <= tol:
+                    if best is None or abs(e) < abs(best[1]):
+                        best = (pm, e, py, pmatch)
+            if best is None:
+                if want >= 0.3:
+                    bits.append(f'M+{k} missing (calc. {100 * want:.0f} %)')
+                continue
+            pm, e, py, pmatch = best
+            got = py / y if y else 0.0
+            bits.append(f'M+{k} {100 * got:.1f} % (calc. {100 * want:.1f})')
+            if pmatch is None and want / 3 <= got <= want * 3:
+                out[index[pm]] = (pm, py, (f'isotope of {match[1]} ({match[0]})', f'{match[1]} M+{k}', match[2],
+                                           iso_mz, match[4]), e)
+        if bits:
+            fits[mz] = ', '.join(bits)
+    return out, fits
+
+
+# ------------------------------------------------------------------------------------------- ranking structures
+def rank_structures(doc, units, peaks, positive, tol, unit='ppm', cleave=False):
+    """How well each drawn structure explains a measured spectrum, best first: [{'name', 'ids', 'explained' (share
+    of the measured intensity matched by its ions, fragments and their isotope peaks), 'matched', 'peaks',
+    'similarity' (cosine of measured and predicted sticks, a predicted stick's height being the fragment's
+    likelihood), 'score'}]. Peaks: [(m/z, intensity)]."""
+    import math
+    import fragments
+    total = sum(y for _m, y in peaks) or 1.0
+    out = []
+    for name, ids in units:
+        cands = candidate_ions(doc, [(name, ids)], positive, cleave)
+        rows, _fits = isotopes(annotate(peaks, cands, tol, unit), tol, unit)
+        explained = sum(y for _m, y, match, _e in rows if match)
+        matched = sum(1 for r in rows if r[2])
+        predicted = []                                      # (m/z, weight) of the ions it should give
+        info = chem.analyse(doc, ids)
+        for ion in info.ions:
+            if (ion.z > 0) == positive:
+                predicted.append((ion.mz, 0.5))
+        for mode in (('ESI+', 'EI') if positive else ('ESI-',)):
+            try:
+                _pre, frs = fragments.predict(doc, set(ids), mode, 2)
+            except Exception:
+                frs = []
+            predicted += [(f.mz, f.score) for f in frs]
+        a, b, used = [], [], set()
+        for mz, w in predicted:
+            hit = None
+            for k, (pm, _py) in enumerate(peaks):
+                e = ppm(pm, mz) if unit == 'ppm' else pm - mz
+                if abs(e) <= tol:
+                    hit = k
+                    break
+            if hit is None and w < 0.4:                     # an unlikely ion that is absent says little
+                continue
+            a.append(w)
+            b.append(math.sqrt(peaks[hit][1] / total) if hit is not None else 0.0)
+            if hit is not None:
+                used.add(hit)
+        for k, (_pm, py) in enumerate(peaks):
+            if k not in used and py / total > 0.02:
+                a.append(0.0)
+                b.append(math.sqrt(py / total))
+        dot = sum(x * y for x, y in zip(a, b))
+        na, nb = math.sqrt(sum(x * x for x in a)), math.sqrt(sum(y * y for y in b))
+        cos = dot / (na * nb) if na and nb else 0.0
+        share = explained / total
+        out.append({'name': name, 'ids': ids, 'explained': share, 'matched': matched, 'peaks': len(peaks),
+                    'similarity': cos, 'score': 0.6 * share + 0.4 * cos})
+    out.sort(key=lambda r: -r['score'])
+    return out
+
+
+# ------------------------------------------------------------------------------------------- LC-MS runs
+ADDUCT_MODE = {'[M+H]+': 'ESI+', '[M+Na]+': 'ESI+Na', '[M+NH4]+': 'ESI+NH4', '[M-H]-': 'ESI-'}
+
+
+def search_run(doc, ids, spectra, positive, tol, unit='ppm', min_rel=0.01):
+    """Where a drawn structure shows up in an LC-MS run (a list of msfile.Spectrum): the MS/MS scans whose
+    precursor is one of its ions, scored by the share of their intensity its predicted fragments explain, and the
+    MS1 scan where each of its ions is tallest. [{'kind': 'MS2' | 'MS1', 'index', 'rt', 'precursor', 'ion',
+    'explained', 'matched', 'peaks', 'intensity'}], MS/MS best first, then the MS1 apexes."""
+    import fragments
+    import msfile
+    info = chem.analyse(doc, ids)
+    ions = [(ion.label, ion.mz) for ion in info.ions if (ion.z > 0) == positive and abs(ion.z) == 1]
+    if positive and not info.charge:
+        ions.append(('[M]•+', info.exact - chem.ELECTRON))
+    cache = {}
+
+    def frags_for(label):
+        mode = ADDUCT_MODE.get(label.replace('−', '-'), 'EI' if '•' in label else None)
+        if mode is None:
+            return []
+        if mode not in cache:
+            try:
+                pre, frs = fragments.predict(doc, set(ids), mode, 3)
+            except Exception:
+                pre, frs = None, []
+            cache[mode] = [f.mz for f in frs] + ([pre.mz] if pre else [])
+        return cache[mode]
+
+    def close(a, b):
+        return abs(ppm(a, b)) <= tol if unit == 'ppm' else abs(a - b) <= tol
+    out, apex = [], {}
+    for k, sp in enumerate(spectra):
+        if sp.level >= 2 and sp.precursor:
+            hit = next(((lab, mz) for lab, mz in ions if abs(sp.precursor - mz) <= max(0.02, mz * 20e-6)), None)
+            if hit is None:
+                continue
+            peaks = msfile.centroid(sp, min_rel)
+            total = sum(y for _m, y in peaks) or 1.0
+            cands = frags_for(hit[0])
+            matched, explained = 0, 0.0
+            for pm, py in peaks:
+                if any(close(pm, c) for c in cands):
+                    matched += 1
+                    explained += py
+            out.append({'kind': 'MS2', 'index': k, 'rt': sp.rt, 'precursor': sp.precursor, 'ion': hit[0],
+                        'explained': explained / total, 'matched': matched, 'peaks': len(peaks), 'intensity': total})
+        elif sp.level == 1 and len(sp.mz):
+            for lab, mz in ions:
+                lo, hi = (mz * (1 - tol * 1e-6), mz * (1 + tol * 1e-6)) if unit == 'ppm' else (mz - tol, mz + tol)
+                sel = (sp.mz >= lo) & (sp.mz <= hi)
+                if sel.any():
+                    y = float(sp.intensity[sel].max())
+                    if y > apex.get(lab, (0.0, None))[0]:
+                        apex[lab] = (y, k)
+    for lab, (y, k) in apex.items():
+        out.append({'kind': 'MS1', 'index': k, 'rt': spectra[k].rt, 'precursor': None, 'ion': lab, 'explained': None,
+                    'matched': None, 'peaks': None, 'intensity': y})
+    out.sort(key=lambda r: (r['kind'] != 'MS2', -(r['explained'] or 0), -(r['intensity'] or 0)))
     return out

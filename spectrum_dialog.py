@@ -17,6 +17,7 @@ from plotcanvas import PlotCanvas
 
 FILE_FILTER = ('Mass spectra (*.csv *.txt *.tsv *.xy *.jdx *.dx *.msp *.mgf *.mzML *.mzml);;All files (*)')
 MATCH_COLOR = '#D81B60'
+ISOTOPE_COLOR = '#F48FB1'                                  # isotope peaks of a matched ion
 
 
 def ion_text(match):
@@ -40,10 +41,12 @@ def draw_spectrum(ax, rows, fg, stick, label_color, most_labels=None):
     pad = span * 0.05
     ax.set_xlim(min(xs) - pad, max(xs) + pad)
     for mz, y, match, _err in rows:
-        ax.vlines(mz, 0, 100 * y / top, color=label_color if match else stick, lw=1.1 if match else 0.8)
+        iso = bool(match) and match[0].startswith('isotope of')
+        ax.vlines(mz, 0, 100 * y / top, color=ISOTOPE_COLOR if iso else label_color if match else stick,
+                  lw=1.1 if match else 0.8)
     ax.set_xlabel('m/z', color=fg)
     ax.set_ylabel('Relative intensity (%)', color=fg)
-    matched = sorted((r for r in rows if r[2]), key=lambda r: -r[1])
+    matched = sorted((r for r in rows if r[2] and not r[2][0].startswith('isotope of')), key=lambda r: -r[1])
     if most_labels:
         matched = matched[:most_labels]
     fig = ax.figure
@@ -131,11 +134,25 @@ class SpectrumDialog(QtWidgets.QDialog):
         top.addStretch(1)
         lay.addLayout(top)
         opts = QtWidgets.QHBoxLayout()
+        self.find_b = QtWidgets.QPushButton('Find the structure in this run…')
+        self.find_b.setToolTip('The MS/MS scans of this LC-MS run whose precursor is an ion of a drawn structure, '
+                               'scored by how much of their intensity its predicted fragments explain, and the MS1 '
+                               'scan where each of its ions is tallest')
+        self.find_b.clicked.connect(self.find_in_run)
+        self.find_b.setEnabled(False)
         for w in (self.mode, QtWidgets.QLabel('within'), self.tol, self.unit, QtWidgets.QLabel('peaks over'),
                   self.min_rel, self.cleave):
             opts.addWidget(w)
         opts.addStretch(1)
+        opts.addWidget(self.find_b)
         lay.addLayout(opts)
+        self.rank = QtWidgets.QLabel()
+        self.rank.setWordWrap(True)
+        self.rank.setToolTip('Explains: the share of the measured intensity matched by the structure\'s ions, '
+                             'fragments and their isotope peaks. Similarity: cosine of the measured and predicted '
+                             'sticks (a predicted stick as tall as the fragment is likely). Draw several candidate '
+                             'structures to compare them.')
+        lay.addWidget(self.rank)
         for w in (self.mode, self.unit):
             w.currentIndexChanged.connect(self.update_view)
         for w in (self.tol, self.min_rel):
@@ -145,9 +162,9 @@ class SpectrumDialog(QtWidgets.QDialog):
         self.plot = PlotCanvas(self)
         self.plot.x_only = True
         split.addWidget(self.plot)
-        self.table = QtWidgets.QTableWidget(0, 8)
+        self.table = QtWidgets.QTableWidget(0, 9)
         self.table.setHorizontalHeaderLabels(['m/z', '%', 'Ion', 'Formula', 'm/z calc.', 'Error', 'Structure / rule',
-                                              'Other possible ions'])
+                                              'Isotope peaks (measured vs calc.)', 'Other possible ions'])
         self.table.setWordWrap(True)
         self.table.verticalHeader().setVisible(False)
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -238,12 +255,34 @@ class SpectrumDialog(QtWidgets.QDialog):
             peaks = sorted(sorted(peaks, key=lambda p: -p[1])[:400])
         cands = ms.candidate_ions(self.canvas.doc, self.units(), self.mode.currentData(), self.cleave.isChecked())
         self.rows = ms.annotate(peaks, cands, self.tol.value(), self.unit.currentText())
+        self.rows, self.fits = ms.isotopes(self.rows, self.tol.value(), self.unit.currentText())
         self.others = ms.all_matches(peaks, cands, self.tol.value(), self.unit.currentText())
         self._fill()
         self._plot()
         n = sum(1 for r in self.rows if r[2])
-        self.note.setText(f'{n} of {len(self.rows)} peaks matched to {len(cands)} possible ions of the structures '
-                          'drawn.' + ('' if self.canvas.doc.atoms else ' Draw the structure to match its ions.'))
+        iso = sum(1 for r in self.rows if r[2] and r[2][0].startswith('isotope of'))
+        self.note.setText(f'{n} of {len(self.rows)} peaks matched ({iso} of them isotope peaks) to {len(cands)} possible '
+                          'ions of the structures drawn.' +
+                          ('' if self.canvas.doc.atoms else ' Draw the structure to match its ions.'))
+        self.find_b.setEnabled(len(self.spectra) > 1 and bool(self.canvas.doc.atoms))
+        self._rank(peaks)
+
+    def _rank(self, peaks):
+        """The drawn structures ranked by how well they explain this spectrum."""
+        units = self.units()
+        if not units or not peaks:
+            self.rank.setText('')
+            return
+        ranked = ms.rank_structures(self.canvas.doc, units, peaks, self.mode.currentData(), self.tol.value(),
+                                    self.unit.currentText(), self.cleave.isChecked())
+        self.ranked = ranked
+        lines = []
+        for k, r in enumerate(ranked):
+            line = (f'{r["name"]}: explains {100 * r["explained"]:.0f} % of the intensity ({r["matched"]} of '
+                    f'{r["peaks"]} peaks), similarity {r["similarity"]:.2f}')
+            lines.append(f'<b>{line}</b>' if k == 0 and len(ranked) > 1 else line)
+        head = 'Best fit first: ' if len(ranked) > 1 else 'Fit: '
+        self.rank.setText(head + '<br>'.join(lines))
 
     def _fill(self):
         top = max((r[1] for r in self.rows), default=1.0) or 1.0
@@ -259,6 +298,7 @@ class SpectrumDialog(QtWidgets.QDialog):
             for c in alt:
                 if c[1] not in seen:
                     seen.add(c[1]); names.append(c[1])
+            vals.append(getattr(self, 'fits', {}).get(mz, ''))
             vals.append(', '.join(names))
             for c, v in enumerate(vals):
                 it = QtWidgets.QTableWidgetItem(v)
@@ -266,17 +306,75 @@ class SpectrumDialog(QtWidgets.QDialog):
                     it.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
                 if m:
                     it.setData(QtCore.Qt.ItemDataRole.UserRole, sorted(m[4]))
-                if c == 7 and alt:
+                if c == 8 and alt:
                     it.setToolTip('\n'.join(f'{a[1]}  {a[3]:.4f}  ({a[0]})' for a in alt))
                 elif c == 6 and m:
                     it.setToolTip(m[0])
+                if m and m[0].startswith('isotope of'):
+                    it.setForeground(QtGui.QColor(ISOTOPE_COLOR))
                 self.table.setItem(k, c, it)
         self.table.resizeColumnsToContents()
         hh = self.table.horizontalHeader()
-        for c in (6, 7):
+        for c in (6, 7, 8):
             hh.setSectionResizeMode(c, QtWidgets.QHeaderView.ResizeMode.Interactive)
             self.table.setColumnWidth(c, min(self.table.columnWidth(c), 520))
         self.table.resizeRowsToContents()
+
+    def find_in_run(self):
+        """Search the opened LC-MS run for a drawn structure (the best-fitting one, or the one picked)."""
+        units = self.units()
+        if not units or len(self.spectra) < 2:
+            return
+        names = [u[0] for u in units]
+        k = 0
+        if len(units) > 1:
+            name, ok = QtWidgets.QInputDialog.getItem(self, 'Find the structure in this run', 'Structure:', names, 0,
+                                                      False)
+            if not ok:
+                return
+            k = names.index(name)
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.WaitCursor)
+        try:
+            hits = ms.search_run(self.canvas.doc, units[k][1], self.spectra, self.mode.currentData(),
+                                 max(self.tol.value(), 5.0) if self.unit.currentText() == 'ppm' else self.tol.value(),
+                                 self.unit.currentText())
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle(f'{names[k]} in this run')
+        dlg.resize(820, 520)
+        lay = QtWidgets.QVBoxLayout(dlg)
+        n2 = sum(1 for h in hits if h['kind'] == 'MS2')
+        lay.addWidget(QtWidgets.QLabel(f'{n2} MS/MS scans of its ions; MS1: where each ion is tallest. Double-click a '
+                                       'row to open that scan.' if hits else
+                                       'None of its ions were found in this run.'))
+        t = QtWidgets.QTableWidget(len(hits), 7)
+        t.setHorizontalHeaderLabels(['Scan', 'RT (min)', 'Ion', 'Precursor', 'Explained', 'Fragments found',
+                                     'Intensity'])
+        t.verticalHeader().hide()
+        t.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        t.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        for r, h in enumerate(hits):
+            sp = self.spectra[h['index']]
+            vals = [f'{sp.title} ({h["kind"]})', f'{h["rt"]:.2f}' if h['rt'] is not None else '', h['ion'],
+                    f'{h["precursor"]:.4f}' if h['precursor'] else '',
+                    f'{100 * h["explained"]:.0f} %' if h['explained'] is not None else '',
+                    f'{h["matched"]} of {h["peaks"]}' if h['matched'] is not None else '', f'{h["intensity"]:.3g}']
+            for c, v in enumerate(vals):
+                it = QtWidgets.QTableWidgetItem(v)
+                it.setData(QtCore.Qt.ItemDataRole.UserRole, h['index'])
+                t.setItem(r, c, it)
+        t.resizeColumnsToContents()
+
+        def open_scan(row, _col):
+            self.which.setCurrentIndex(t.item(row, 0).data(QtCore.Qt.ItemDataRole.UserRole))
+        t.cellDoubleClicked.connect(open_scan)
+        lay.addWidget(t, 1)
+        close = QtWidgets.QPushButton('Close')
+        close.clicked.connect(dlg.accept)
+        lay.addWidget(close, 0, QtCore.Qt.AlignmentFlag.AlignRight)
+        self.run_dialog = dlg
+        dlg.show()
 
     def _plot(self):
         T = theme.T

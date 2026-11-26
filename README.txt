@@ -110,8 +110,14 @@ ChemDraw-like features (0.3.0)
                        Domon & Costello 1988; Hvattum & Ekeberg 2003 ...). Draw mechanism puts the precursor with
                        its charge and curved arrows (fish-hooks for one electron, the moving H drawn), each ion on the
                        way with the arrows of its next step, and the fragment in a row under the structure, joined by
-                       arrows labelled with each loss. Enlarge turns the panel into a large window so every column
-                       and the whole mechanism show. fragments.py, fragments_tab.py.
+                       arrows labelled with each loss (McLafferty steps drawn as their six-membered transition state,
+                       the ion as the enol radical cation). Enlarge turns the panel into a large window so every
+                       column and the whole mechanism show. Adducts: ESI+ [M+NH4]+ loses NH3 to [M+H]+ and goes on
+                       from there; [M+Na]+ keeps its sodium ([Y+Na]+, [acid+Na]+), loses CO2, cuts across sugars
+                       (−60, −90, −120) and loses trimethylamine / phosphocholine from choline lipids. Tree shows each
+                       ion under the one it comes from; Draw scheme puts that tree on the page (formulas, m/z, arrows
+                       labelled with the losses); Export writes the predicted MS/MS spectrum as an MSP or MGF entry
+                       (heights = likelihood). fragments.py, fragments_tab.py.
   Match m/z           Structure > Match m/z (Ctrl+M): a measured m/z within so many ppm against every drawn structure's
                        ions and adducts (charged fragments as themselves; double-click selects it) and against
                        elemental compositions of the ion (elements C H N O S by default, any of P F Cl Br I Si B Na K
@@ -121,8 +127,16 @@ ChemDraw-like features (0.3.0)
                        NIST MSP, MGF, mzML - its scan with the most ions first, any scan from the list) or paste one;
                        profile data is reduced to its peak tops. Each peak gets the best of the drawn structures' ions
                        within the tolerance (ppm, or Da for unit-mass EI spectra): adducts, M•+, a drawn fragment ion
-                       as itself, the rule-based fragments of the Fragments tab and, with Bond cleavages, each piece of breaking one bond ([PH+H]+, [PH]•+, P+;
-                       negative [PH−H]−). Stick plot with every matched peak labelled (labels lifted clear of each
+                       as itself, the rule-based fragments of the Fragments tab (sodium and ammonium adducts too)
+                       and, with Bond cleavages, each piece of breaking one bond ([PH+H]+, [PH]•+, P+; negative
+                       [PH−H]−). Isotope peaks (M+1, M+2 of a matched ion, at its calculated mass and about its
+                       expected height) are matched too, drawn paler, and the table compares each ion's measured
+                       isotope peaks with its formula's. With several structures drawn, they are ranked by how well
+                       they fit: the share of the intensity their ions explain and the similarity of the measured and
+                       predicted sticks - draw the candidate isomers and see which one the spectrum supports. Find the
+                       structure in this run (an mzML with many scans): the MS/MS scans whose precursor is one of its
+                       ions, scored by how much their fragments explain, and the MS1 scan where each ion is tallest;
+                       double-click to open one. Stick plot with every matched peak labelled (labels lifted clear of each
                        other and of the peaks, the plot growing to hold them; the window opens at nearly full
                        screen), a table with the best ion, its rule and every other ion within the tolerance, to copy
                        (double-click selects the structure or piece), Insert into drawing puts the annotated spectrum

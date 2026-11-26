@@ -10,6 +10,7 @@ What it is
   www/core/layout.js   usual drawings: skeleton templates, even bonds, ring-fusion H, checked wedges (as layout2d.py)
   www/core/draw.js     painting on a canvas (as render.py)
   www/core/condensed.js typed labels read as condensed formulas: SO3K, N(CH3)2, COCH3 ... (as condensed.py)
+  www/core/fragments.js MS fragments: the desktop's fragmentation rules, rule for rule (as fragments.py predict)
   www/core/data.js     made from the desktop's Python by tools/export_data.py: do not edit
   www/app.js           tools, gestures, sheets, files
   tests/core.test.mjs  against the desktop's results (tests/reference.json, also from tools/export_data.py)
@@ -22,6 +23,10 @@ On the phone
   Clean up, SMILES, Flip and rotate.   Two fingers: move and zoom.
   Top: the menu; the formula (tap it: masses, adducts, SMILES, InChIKey; it covers the selection, if any); undo, redo.
   Menu: structure from a name (PubChem, only the name is sent), paste SMILES / MOL, templates, clean up, open and send files.
+  MS fragments (menu, or the formula sheet's button): the ions the structure (or the selection) can give in ESI+ [M+H]+,
+  [M+Na]+, [M+NH4]+, ESI− or EI, one to three steps, by likelihood - the same list as the desktop's Fragments tab. Tap
+  one: how it forms, step by step, the other rules giving it and the literature; the drawing above the sheet shows the
+  atoms kept (green), lost (red) and the bonds that break. Copy list puts it on the clipboard.
   The drawing is kept between sessions.
 
 On a PC (a mouse and keyboard: the web version in the lab notebook, or opened in a browser)
@@ -40,7 +45,8 @@ On a PC (a mouse and keyboard: the web version in the lab notebook, or opened in
   (names, properties and isotope patterns keep their text until the desktop updates them).
 
 Desktop only
-  NMR prediction and the 3D tab need 3D conformers (ETKDG + MMFF), which RDKit.js does not have; so do MD exports. Also .cdxml /
+  Drawing a fragment, its mechanism with curved arrows or the fragmentation scheme, spectrum annotation and LC-MS
+  search (they need RDKit's bond-order solver and the plotting). NMR prediction and the 3D tab need 3D conformers (ETKDG + MMFF), which RDKit.js does not have; so do MD exports. Also .cdxml /
   .cdx, stoichiometry, TLC plates, bio objects and sequences: these are kept when a .sed is opened and saved here, not shown.
 
 Build (Windows; needs Node.js, JDK 21, Android SDK with platform 36 + build-tools 36)

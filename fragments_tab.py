@@ -82,7 +82,18 @@ class FragmentsTab(QtWidgets.QWidget):
         self.details.setOpenExternalLinks(False)
         self.details.setPlaceholderText('Pick a fragment: how it forms, step by step, and where the rule comes from.')
         split = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
-        split.addWidget(self.table)
+        self.tree = QtWidgets.QTreeWidget()
+        self.tree.setColumnCount(5)
+        self.tree.setHeaderLabels(['Ion', 'm/z', 'Lost in this step', 'How', ''])
+        self.tree.setAlternatingRowColors(True)
+        self.tree.setToolTip('The fragmentation tree: each ion under the one it comes from. Pick a row to see it, '
+                             'double-click to draw it.')
+        self.tree.itemSelectionChanged.connect(self._picked)
+        self.tree.itemDoubleClicked.connect(lambda _i, _c: self.draw())
+        self.stack = QtWidgets.QStackedWidget()
+        self.stack.addWidget(self.table)
+        self.stack.addWidget(self.tree)
+        split.addWidget(self.stack)
         split.addWidget(self.details)
         split.setStretchFactor(0, 3)
         split.setStretchFactor(1, 2)
@@ -91,7 +102,7 @@ class FragmentsTab(QtWidgets.QWidget):
         self.note = QtWidgets.QLabel()
         self.note.setWordWrap(True)
         self.note.setStyleSheet('color: palette(mid);')
-        brow.addWidget(self.note, 1)
+        lay.addWidget(self.note)
         copy = QtWidgets.QPushButton('Copy')
         copy.setToolTip('The list as tab-separated text (m/z, ion, lost, how, likelihood)')
         copy.clicked.connect(self.copy)
@@ -107,7 +118,22 @@ class FragmentsTab(QtWidgets.QWidget):
         self.big_b.setToolTip('The panel as a large window of its own, so every column and the mechanism show in '
                               'full; press again to dock it back')
         self.big_b.toggled.connect(self.enlarge)
+        self.tree_b = QtWidgets.QPushButton('Tree')
+        self.tree_b.setCheckable(True)
+        self.tree_b.setToolTip('Show the fragments as a tree (each ion under the one it comes from) instead of a list')
+        self.tree_b.toggled.connect(lambda on: (self.stack.setCurrentIndex(1 if on else 0), self._picked()))
+        self.scheme_b = QtWidgets.QPushButton('Draw scheme')
+        self.scheme_b.setToolTip('The fragmentation tree on the drawing: each ion as its formula and m/z, joined by '
+                                 'arrows labelled with the losses (the fragments shown in the list)')
+        self.scheme_b.clicked.connect(self.draw_scheme)
+        self.export_b = QtWidgets.QPushButton('Export…')
+        self.export_b.setToolTip('The predicted MS/MS spectrum as an MSP or MGF library entry (heights from the '
+                                 'likelihood), for other software')
+        self.export_b.clicked.connect(self.export)
         brow.addWidget(self.big_b)
+        brow.addWidget(self.tree_b)
+        brow.addWidget(self.export_b)
+        brow.addWidget(self.scheme_b)
         brow.addWidget(copy)
         brow.addWidget(self.draw_b)
         brow.addWidget(self.mech_b)
@@ -122,6 +148,7 @@ class FragmentsTab(QtWidgets.QWidget):
         self.frags, self.pre = [], None
         self.head.setText(text)
         self.table.setRowCount(0)
+        self.tree.clear()
         self.note.clear()
         self.details.clear()
         self.canvas.show_fragment(None)
@@ -203,10 +230,149 @@ class FragmentsTab(QtWidgets.QWidget):
             self._sorted = True
         self.note.setText('Green: atoms the ion keeps; red: atoms lost; red bars: bonds broken.' if shown else
                           'No fragment at this likelihood: choose "All".')
+        self._fill_tree()
         self.canvas.show_fragment(None)
+
+    def tree_links(self):
+        """[(fragment index, parent index or None)] of the shown fragments: each under the nearest shown ion it
+        comes from (None: straight from the precursor)."""
+        index = {(f.formula, f.z, f.odd): k for k, f in enumerate(self.frags)}
+        out = []
+        for k, f in enumerate(self.frags):
+            p = f.parent
+            parent = None
+            while p is not None:
+                key = (p.formula, p.z, p.odd)
+                if key in index and index[key] != k:
+                    parent = index[key]
+                    break
+                p = p.parent
+            out.append((k, parent))
+        return out
+
+    def _fill_tree(self):
+        tr = self.tree
+        tr.blockSignals(True)
+        tr.clear()
+        if self.pre is None:
+            tr.blockSignals(False)
+            return
+        root = QtWidgets.QTreeWidgetItem([f'{self.pre.label} {self.pre.ion}', f'{self.pre.mz:.4f}', '', 'precursor', ''])
+        tr.addTopLevelItem(root)
+        items = {}
+        links = self.tree_links()
+        pending = list(links)
+        for _round in range(len(links) + 1):               # parents before their children
+            left = []
+            for k, parent in pending:
+                if parent is not None and parent not in items:
+                    left.append((k, parent))
+                    continue
+                f = self.frags[k]
+                it = QtWidgets.QTreeWidgetItem([f.ion, f'{f.mz:.4f}', '−' + fragments.step_loss(f),
+                                                f.how.split(', then ')[-1], DOTS[f.likelihood]])
+                it.setData(0, QtCore.Qt.ItemDataRole.UserRole, k)
+                it.setToolTip(3, f.mech or f.how)
+                if f.likelihood == 'minor':
+                    for c in range(5):
+                        it.setForeground(c, QtGui.QColor('#8A8A8A'))
+                (items[parent] if parent is not None else root).addChild(it)
+                items[k] = it
+            pending = left
+            if not pending:
+                break
+        tr.expandAll()
+        for c in range(5):
+            tr.resizeColumnToContents(c)
+        tr.blockSignals(False)
+
+    def draw_scheme(self):
+        """The fragmentation tree drawn on the page under the structure: the precursor on top, each ion under the
+        one it comes from, as its formula and m/z, joined by arrows labelled with the losses."""
+        from PyQt6.QtCore import QRectF
+        import render
+        if self.pre is None or not self.frags:
+            self.canvas.message.emit('No fragments to draw.')
+            return
+        c = self.canvas
+        doc = c.doc
+        rend = c.renderer()
+        BL = rend.BL
+        box = QRectF()
+        for a in set(self.pre.atoms) & set(doc.atoms):
+            r = rend.item_rect('atom', a)
+            box = r if box.isNull() else box.united(r)
+        for kind in ('text', 'shape', 'arrow', 'grid'):
+            for i in doc.table(kind):
+                r = rend.item_rect(kind, i)
+                if not box.isNull() and r.right() > box.left() and r.top() >= box.top():
+                    box = box.united(r)
+        children = {}
+        for k, parent in self.tree_links():
+            children.setdefault(parent, []).append(k)
+        for v in children.values():
+            v.sort(key=lambda k: -self.frags[k].mz)
+        width = {}
+
+        def span(node):                                     # leaves side by side, parents over their children
+            kids = children.get(node, [])
+            width[node] = max(1, sum(span(k) for k in kids))
+            return width[node]
+        span(None)
+        col, row_h = 7.5, 4.0
+        page_w = c.page_size()[0] / BL
+        col = min(col, max(4.5, (page_w - 2) / max(1, width[None])))
+        left = max(0.8, box.left() / BL if not box.isNull() else 1.0)
+        top = (box.bottom() / BL if not box.isNull() else 2.0) + 2.0
+        size = render.style_of(doc)['font_size']
+        c.snapshot()
+        new, place = [], {}
+
+        def put(node, x0, depth):
+            x = x0 + width[node] * col / 2
+            f = self.pre if node is None else self.frags[node]
+            text = (f'{f.ion}\nm/z {f.mz:.4f}')
+            t = doc.add_text(x, top + depth * row_h, text, align='center', formula=True, size=size * 0.9)
+            new.append(('text', t))
+            place[node] = (x, top + depth * row_h)
+            xx = x0
+            for k in children.get(node, []):
+                put(k, xx, depth + 1)
+                cx, cy = place[k]
+                px, py = place[node]
+                j = doc.add_arrow(px, py + 1.7, cx, cy - 0.3, 'forward')
+                lab = doc.add_text((px + cx) / 2 + 0.2, (py + 1.7 + cy - 0.3) / 2 - 0.4,
+                                   '−' + fragments.step_loss(self.frags[k]), align='left', formula=True,
+                                   size=size * 0.75)
+                new.extend([('arrow', j), ('text', lab)])
+                xx += width[k] * col
+        put(None, left, 0)
+        c._renderer = None
+        c.sel = set(new)
+        c.edited()
+
+    def export(self):
+        """The predicted spectrum as an MSP or MGF entry."""
+        import chem
+        if self.pre is None or not self.frags:
+            return
+        path, _f = QtWidgets.QFileDialog.getSaveFileName(self, 'Export predicted spectrum', 'predicted.msp',
+                                                         'NIST MSP (*.msp);;Mascot MGF (*.mgf)')
+        if not path:
+            return
+        info = chem.analyse(self.canvas.doc, self._ids)
+        text = spectrum_text(self.pre, self.frags, info.formula, info.smiles, path.lower().endswith('.mgf'),
+                             self.mode.currentData())
+        with open(path, 'w', encoding='utf-8', newline='\n') as fh:
+            fh.write(text)
+        self.canvas.message.emit(f'Predicted spectrum written to {path}')
 
     # ------------------------------------------------------------------------------------------- using a row
     def current(self):
+        if self.stack.currentIndex() == 1:
+            sel = self.tree.selectedItems()
+            k = sel[0].data(0, QtCore.Qt.ItemDataRole.UserRole) if sel else None
+            return self.frags[k] if k is not None and 0 <= k < len(self.frags) else None
         rows = {i.row() for i in self.table.selectedItems()}
         if not rows:
             return None
@@ -310,3 +476,23 @@ class FragmentsTab(QtWidgets.QWidget):
             f = self.frags[k]
             lines.append(f'{f.mz:.4f}\t{f.ion}\t−{f.lost}\t{f.how}\t{f.likelihood}')
         QtWidgets.QApplication.clipboard().setText('\n'.join(lines))
+
+
+def spectrum_text(pre, frags, formula, smiles, mgf=False, mode=''):
+    """The predicted spectrum of a precursor and its fragments as an MSP (or MGF) entry: each fragment's height is
+    its likelihood x 999, annotated with its ion and rule."""
+    peaks = sorted({round(f.mz, 4): f for f in frags}.items())
+    ion_mode = 'N' if pre.z < 0 else 'P'
+    label = pre.label.replace('−', '-')                    # plain ASCII for other programs
+    if mgf:
+        out = ['BEGIN IONS', f'TITLE={formula} {label} predicted (Kekulex rules)', f'PEPMASS={pre.mz:.5f}',
+               f'CHARGE={abs(pre.z)}{"-" if pre.z < 0 else "+"}', f'SMILES={smiles}']
+        out += [f'{mz:.4f} {max(1, round(999 * f.score))}' for mz, f in peaks]
+        out.append('END IONS')
+    else:
+        out = [f'Name: {formula} {label} predicted', f'Formula: {formula}', f'Precursor_type: {label}',
+               f'PrecursorMZ: {pre.mz:.5f}', f'Ion_mode: {ion_mode}', f'SMILES: {smiles}',
+               f'Comments: "predicted by Kekulex fragmentation rules ({mode}); heights are likelihoods"',
+               f'Num Peaks: {len(peaks)}']
+        out += [f'{mz:.4f}\t{max(1, round(999 * f.score))}\t"{f.ion.replace("−", "-")} {f.how}"' for mz, f in peaks]
+    return '\n'.join(out) + '\n\n'
