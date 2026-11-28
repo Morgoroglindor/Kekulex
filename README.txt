@@ -164,6 +164,12 @@ ChemDraw-like features (0.3.0)
                        and atoms with too many wedges.
   Snap guides          dragging a selection lines its edges or centre up with another object's (pink guides); hold
                        Alt to move freely.
+  Drag modifiers       as in ChemDraw: Ctrl+drag a selection (or a structure) drags a copy, which is left selected and
+                       the original stays; Shift+drag keeps the move straight across or straight down (whichever the
+                       mouse goes most); Ctrl+Shift+drag drags a copy straight across or down. One undo step each.
+  Caption width        a selected caption has a small square on its side: drag it in and the lines wrap at that width
+                       (after "; ", then ", ", then a space) - e.g. the m/z line of a pasted analysis in two lines;
+                       drag it out past the longest line and it is one line again. Live captions keep their width.
   Reaction schemes     right-click a reaction arrow > Reaction conditions: reagents over the arrow, solvent / temperature
                        / time under it (formula style, grouped with the arrow, which grows to fit). Object > Arrange as
                        reaction scheme: the selected structures and arrows in one row, centred on one line, evenly spaced.

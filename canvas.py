@@ -1542,6 +1542,10 @@ class Canvas(QWidget):
                 p.drawRect(r)
                 if self.tool in ('select', 'lasso'):
                     self._paint_rotate_handle(p, rend, accent)
+                    wh = self._width_handle(rend)
+                    if wh is not None:                      # a caption's width handle
+                        p.setPen(QPen(accent, 1 / self.px_per_pt())); p.setBrush(QColor('#FFFFFF'))
+                        p.drawRect(wh[1])
         if self.preview:
             self._paint_preview(p, BL, accent)
         if self.press and self.press.get('move'):
@@ -2025,7 +2029,12 @@ class Canvas(QWidget):
             return
         pos = e.position()
         item = self.item_at(pos)
-        self.press = dict(pos=pos, item=item, moved=False, shift=bool(e.modifiers() & Qt.KeyboardModifier.ShiftModifier))
+        self.press = dict(pos=pos, item=item, moved=False, shift=bool(e.modifiers() & Qt.KeyboardModifier.ShiftModifier),
+                          ctrl=bool(e.modifiers() & Qt.KeyboardModifier.ControlModifier))
+        tw = self._on_width_handle(pos)
+        if tw is not None:                                  # a caption's width: drag to wrap its lines
+            self.press['text_width'] = tw
+            return
         if self._on_rotate_handle(pos):                     # turn the selection freely about its centre
             items = list(self.sel)
             c = self._center(items)
@@ -2174,6 +2183,61 @@ class Canvas(QWidget):
                 r = ir if r.isNull() else r.united(ir)
         return r if r.isNull() else r.adjusted(-3, -3, 3, 3)
 
+    def _drag_copy(self, items):
+        """Ctrl+drag: a copy of the dragged objects in their place, selected; the drag moves the copy."""
+        new = self.doc.insert_dict(self.doc.to_dict(items))
+        self.sel = set(new)
+        self._renderer = None
+        self.selection_changed.emit()
+        self.message.emit('Copy: let go where it goes (Shift keeps it straight across or down).')
+        return list(new)
+
+    def _width_handle(self, rend):
+        """(text id, QRectF in pt) of the small square on the side of the one selected caption that sets its width,
+        or None."""
+        texts = [i for k, i in self.sel if k == 'text' and i in self.doc.texts]
+        if len(texts) != 1 or len(self.sel) != 1 or self.tool not in ('select', 'lasso'):
+            return None
+        i = texts[0]
+        t = self.doc.texts[i]
+        r = rend.text_rect(i)
+        side = r.left() if t.align == 'right' else r.right()
+        h = 7 / self.px_per_pt()
+        return i, QRectF(side - h / 2, r.center().y() - h / 2, h, h)
+
+    def _on_width_handle(self, pos):
+        rend = self.renderer()
+        handle = self._width_handle(rend)
+        if handle is None:
+            return None
+        x, y = self.to_model(pos)
+        hit = handle[1].adjusted(-3, -3, 3, 3)
+        return handle[0] if hit.contains(QPointF(x * rend.BL, y * rend.BL)) else None
+
+    def _drag_width(self, pr, x):
+        """Dragging a caption's side: its lines wrap at that width (ChemDraw's text box); dragged out past its
+        longest line, it is one line again."""
+        i = pr['text_width']
+        t = self.doc.texts.get(i)
+        if t is None:
+            return
+        if not pr.get('snapped'):
+            pr['snapped'] = True
+            self.snapshot()
+        if t.align == 'right':
+            w = t.x - x
+        elif t.align == 'center':
+            w = 2 * (x - t.x)
+        else:
+            w = x - t.x
+        rend = self.renderer()
+        keep, t.width = t.width, 0.0
+        natural = rend.text_rect(i).width() / rend.BL
+        t.width = 0.0 if w >= natural - 0.05 else max(1.0, w)
+        self._renderer = None
+        self.update()
+        self.message.emit('One line' if not t.width else f'Wraps at {t.width:.1f} bond lengths')
+
     def _rotate_handle(self, rend):
         """(centre, radius) in pt of the round handle above the selection's top right corner that turns it, or None."""
         r = self._sel_box(rend)
@@ -2315,7 +2379,8 @@ class Canvas(QWidget):
             elif item and item[0] == 'seq':                 # residue by residue along a sequence
                 self._explain(item, e)
             if self.tool in ('select', 'lasso'):            # a charge sign can be dragged, the handle turns
-                self.setCursor(Qt.CursorShape.PointingHandCursor if self._on_rotate_handle(pos) else
+                self.setCursor(Qt.CursorShape.SizeHorCursor if self._on_width_handle(pos) is not None else
+                               Qt.CursorShape.PointingHandCursor if self._on_rotate_handle(pos) else
                                Qt.CursorShape.SizeAllCursor if self._charge_at(pos) is not None
                                else Qt.CursorShape.ArrowCursor)
             return
@@ -2326,6 +2391,9 @@ class Canvas(QWidget):
         t = self.tool
         if 'rotate' in pr:
             self._drag_rotate(pr, x, y, bool(e.modifiers() & Qt.KeyboardModifier.ShiftModifier))
+            return
+        if 'text_width' in pr:
+            self._drag_width(pr, x)
             return
         if 'spot' in pr:                                    # a TLC spot: Rf, size (Shift) or a copy (Ctrl)
             import tlc
@@ -2360,15 +2428,25 @@ class Canvas(QWidget):
             return
         if t in ('select', 'lasso'):
             if 'move' in pr:
+                mods = e.modifiers()
                 if not pr.get('snapped'):
                     pr['snapped'] = True
                     self.snapshot()
+                    if pr.get('ctrl') or mods & Qt.KeyboardModifier.ControlModifier:
+                        pr['move'] = self._drag_copy(pr['move'])    # ChemDraw: Ctrl+drag drags a copy
                     pr['origin'], pr['applied'] = pr['start'], (0.0, 0.0)
                     pr['guide_targets'] = self._snap_targets(pr['move'])
                 ox, oy = pr['origin']
                 want = (x - ox, y - oy)
-                alt = bool(e.modifiers() & Qt.KeyboardModifier.AltModifier)
+                straight = bool(mods & Qt.KeyboardModifier.ShiftModifier)   # Shift: only across or only down
+                if straight:
+                    want = (want[0], 0.0) if abs(want[0]) >= abs(want[1]) else (0.0, want[1])
+                alt = bool(mods & Qt.KeyboardModifier.AltModifier)
                 total, self.guides = (want, []) if alt else self._snap(pr['guide_targets'], want)
+                if straight:                                # a guide may not pull it off its line
+                    axis = 1 if want[1] == 0.0 else 0
+                    total = (0.0, total[1]) if axis == 0 else (total[0], 0.0)
+                    self.guides = [g for g in self.guides if g[0] == ('v' if axis == 1 else 'h')]
                 dx, dy = total[0] - pr['applied'][0], total[1] - pr['applied'][1]
                 pr['applied'] = total
                 self.doc.transform(pr['move'], lambda px, py: (px + dx, py + dy))
@@ -2553,7 +2631,7 @@ class Canvas(QWidget):
         x, y = self.to_model(pos)
         t, item = self.tool, pr['item']
         preview, self.preview = self.preview, None
-        if 'charge' in pr or 'rotate' in pr:                # a charge sign dragged, or the selection turned
+        if 'charge' in pr or 'rotate' in pr or 'text_width' in pr:   # a charge sign, a turn, a caption's width
             if pr.get('snapped'):
                 self.edited()
             return

@@ -366,6 +366,7 @@ class Text:
     on_arrow: list | None = None                            # reaction conditions: [arrow id, 'above' | 'below']
     live: list = field(default_factory=list)                # a pasted analysis: the property keys it shows, kept up to
                                                             # date with the structure in its group (chem.live_caption)
+    width: float = 0.0                                      # wrap lines at this width (bond lengths); 0: no wrapping
 
 
 SHAPE_KINDS = ('rect', 'roundrect', 'oval', 'line', 'brackets', 'parens', 'braces')

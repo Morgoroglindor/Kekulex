@@ -144,6 +144,28 @@ def runs(line, formula):
     return out
 
 
+def wrap_line(line, width, measure):
+    """The line split to fit width (pt): after a comma first ("m/z: 300.03 (100.0%), 301.03 ..."), else at spaces; a
+    piece longer than width stays whole."""
+    if '; ' in line:                                        # elemental analysis: C, 66.67; H, 3.73 - keep pairs whole
+        parts = re.findall(r'[^;]*;\s*|[^;]+$', line)
+    elif ', ' in line:
+        parts = re.findall(r'[^,]*,\s*|[^,]+$', line)
+    else:
+        parts = re.findall(r'\S+\s*', line)
+    if not parts:
+        return [line]
+    out, cur = [], ''
+    for part in parts:
+        if cur and measure((cur + part).rstrip()) > width:
+            out.append(cur.rstrip())
+            cur = part
+        else:
+            cur += part
+    out.append(cur.rstrip())
+    return out
+
+
 def exit_t(ox, oy, ux, uy, hw, hh):
     """How far along (ux, uy) a line starting at offset (ox, oy) from a box centre leaves the box (half sizes hw, hh)."""
     t = math.inf
@@ -683,7 +705,12 @@ class Renderer:
         lh = m.line(fs)
         pieces = []
         rect = QRectF()
-        for k, line in enumerate(t.text.split('\n')):
+        lines = t.text.split('\n')
+        if getattr(t, 'width', 0) > 0:                       # a caption given a width: its lines wrap to it
+            def measure(s):
+                return sum(m.width(txt, small if sub else fs, t.bold, t.italic) for txt, sub in runs(s, t.formula))
+            lines = [w for line in lines for w in wrap_line(line, t.width * self.BL, measure)]
+        for k, line in enumerate(lines):
             parts = runs(line, t.formula)
             widths = [m.width(txt, small if sub else fs, t.bold, t.italic) for txt, sub in parts]
             w = sum(widths)
